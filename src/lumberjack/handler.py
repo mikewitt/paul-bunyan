@@ -35,7 +35,6 @@ class LumberjackHandler(logging.Handler):
         self._buffer: collections.deque[LogRecordRow] = collections.deque(
             maxlen=buffer_size
         )
-        self._buffer_size = buffer_size
         self._dropped = 0
         self.on_record = on_record
 
@@ -60,7 +59,7 @@ class LumberjackHandler(logging.Handler):
         with self.lock:
             # deque(maxlen=...) discards silently; check before appending,
             # since afterwards the evicted row is simply gone.
-            if len(self._buffer) == self._buffer_size:
+            if len(self._buffer) == self._buffer.maxlen:
                 self._dropped += 1
             self._buffer.append(row)
 

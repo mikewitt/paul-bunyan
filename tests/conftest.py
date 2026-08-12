@@ -101,11 +101,12 @@ def wait_until() -> Callable[..., bool]:
 def _reset_lumberjack_state() -> Iterator[None]:
     root = logging.getLogger()
     prev_handlers = root.handlers[:]
-    prev_level = root.level
     yield
     import lumberjack
 
     if lumberjack.is_initialized():
         lumberjack.shutdown()
+    # Load-bearing, unlike a level restore would be: `shutdown()` puts back
+    # the handlers *it* replaced, but tests that add one to the root logger
+    # and never init — or that init and fail — leave it behind otherwise.
     root.handlers[:] = prev_handlers
-    root.setLevel(prev_level)
