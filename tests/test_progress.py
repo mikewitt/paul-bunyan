@@ -7,8 +7,6 @@ the model is display-independent, so it runs on a bare install.
 
 from __future__ import annotations
 
-import time
-
 from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     BarState,
@@ -85,23 +83,37 @@ def test_a_bar_keeps_its_slot_when_another_overtakes_it(store, make_row):
     assert [b.source.lineno for b in model.poll()] == [10, 99]
 
 
-def test_a_bar_survives_dropping_below_the_threshold(store, make_row):
-    # Only reachable in a windowed view, where old records age out. A bar
-    # vanishing mid-run would read as "this work stopped existing".
-    now = time.time()
-    model = RepeatingSourceModel(store, min_repeats=3, window_seconds=30)
-    store.append(_loop_rows(make_row, 5, created=now))
-    assert len(model.poll()) == 1
-    model.window_seconds = 0.0
-    assert [b.count for b in model.poll()] == [5]
+def test_a_bar_never_counts_backwards_after_eviction(store, make_row):
+    # The store is a window on the last N records; a bar is a count of work
+    # done. Trimming the former must not rewrite the latter.
+    model = RepeatingSourceModel(store, min_repeats=3)
+    store.append(_loop_rows(make_row, 10))
+    assert [b.count for b in model.poll()] == [10]
+    store.evict(keep_last=2)
+    assert [b.count for b in model.poll()] == [10]
+    store.append(_loop_rows(make_row, 3))
+    assert [b.count for b in model.poll()] == [13]
 
 
-def test_window_seconds_excludes_older_records(store, make_row):
-    now = time.time()
-    store.append(_loop_rows(make_row, 4, created=now - 3600))
-    store.append(_loop_rows(make_row, 6, created=now))
-    model = RepeatingSourceModel(store, min_repeats=3, window_seconds=60)
-    assert [b.count for b in model.poll()] == [6]
+def test_records_are_counted_once_however_often_it_polls(store, make_row):
+    # The watermark is the whole mechanism: re-polling without new records
+    # must add nothing, or every idle redraw would inflate the bar.
+    model = RepeatingSourceModel(store, min_repeats=3)
+    store.append(_loop_rows(make_row, 4))
+    assert [b.count for b in model.poll()] == [4]
+    for _ in range(5):
+        assert [b.count for b in model.poll()] == [4]
+
+
+def test_a_source_qualifies_on_its_total_not_one_poll(store, make_row):
+    # Records dribbling in below the threshold still accumulate, so a slow
+    # loop earns its bar on the poll that takes it over the line.
+    model = RepeatingSourceModel(store, min_repeats=3)
+    for _ in range(2):
+        store.append(_loop_rows(make_row, 1))
+        assert model.poll() == []
+    store.append(_loop_rows(make_row, 1))
+    assert [b.count for b in model.poll()] == [3]
 
 
 def test_label_names_the_source_location():

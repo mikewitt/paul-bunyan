@@ -9,6 +9,10 @@ to prove the premise: a log line that recurs is progress signal, not noise.
 Counts come from the store, never from tallying the handler's live callback,
 so every renderer reading that store sees the same numbers. Nothing here
 imports `rich` — the model is display-independent.
+
+The store is read forward from a watermark rather than re-tallied, so a
+redraw costs what arrived since the last one instead of what the store
+holds.
 """
 
 from __future__ import annotations
@@ -51,53 +55,63 @@ class BarState:
 
 
 class RepeatingSourceModel:
-    """Turns `store.count_by_source()` into an ordered list of bars."""
+    """Accumulates `store.count_by_source_since()` into an ordered list of bars.
+
+    Counting forward from a watermark rather than re-tallying the store is
+    what keeps a redraw affordable — the query costs what arrived since the
+    last poll, not what the store holds. It also makes the totals monotonic
+    by construction, which is what a progress bar means: `evict()` can drop
+    the rows a bar counted without the bar counting backwards.
+    """
 
     def __init__(
         self,
         store: RecordStore,
         *,
         min_repeats: int = DEFAULT_MIN_REPEATS,
-        window_seconds: float | None = None,
     ) -> None:
         self._store = store
         self.min_repeats = min_repeats
-        self.window_seconds = window_seconds
-        # Insertion-ordered, so a source keeps the slot it was first given.
+        # Every source seen, including those still short of min_repeats —
+        # their running total is what lets them qualify later.
         # Unbounded: 300 repeating log sites means 300 bars.
         # lumberjack: see issue #8
-        self._counts: dict[SourceKey, int] = {}
+        self._totals: dict[SourceKey, int] = {}
+        # Display order, append-only, so bars never jump around on screen.
+        # The set mirrors it purely for membership: this is checked once per
+        # source per poll, and a list scan there would be quadratic.
+        self._shown: list[SourceKey] = []
+        self._shown_set: set[SourceKey] = set()
+        self._watermark = 0
 
     def poll(self) -> list[BarState]:
-        """Re-read the store and return the current bars.
+        """Fold in whatever arrived since the last call and return the bars.
 
-        Once a source has a bar it keeps it, even if a `window_seconds` view
-        later drops its count below the threshold — a bar that vanished
-        mid-run would read as "this work stopped existing".
+        Once a source has a bar it keeps it: a bar that vanished mid-run
+        would read as "this work stopped existing".
         """
-        # Re-read wholesale rather than accumulated, so a count can fall after
-        # an evict() or inside a window. lumberjack: see issue #9
-        counts = self._store.count_by_source(self.window_seconds)
-        # Newly-qualifying sources are added busiest-first; sources already
-        # tracked keep their position, so bars never jump around on screen.
+        delta = self._store.count_by_source_since(self._watermark)
+        self._watermark = delta.last_id
+        for source, count in delta.counts.items():
+            self._totals[source] = self._totals.get(source, 0) + count
+        # Newly-qualifying sources join busiest-first; those already shown
+        # keep the slot they were first given.
         fresh = sorted(
             (
-                (source, count)
-                for source, count in counts.items()
-                if count >= self.min_repeats and source not in self._counts
+                (source, total)
+                for source, total in self._totals.items()
+                if total >= self.min_repeats and source not in self._shown_set
             ),
             key=lambda item: (-item[1], item[0]),
         )
-        for source, count in fresh:
-            self._counts[source] = count
-        for source, count in counts.items():
-            if source in self._counts:
-                self._counts[source] = count
+        for source, _ in fresh:
+            self._shown.append(source)
+            self._shown_set.add(source)
         return self.bars()
 
     def bars(self) -> list[BarState]:
         """The most recent poll's bars, in display order. Empty before `poll()`."""
         return [
-            BarState(source=source, count=count)
-            for source, count in self._counts.items()
+            BarState(source=source, count=self._totals[source])
+            for source in self._shown
         ]

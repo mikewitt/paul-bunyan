@@ -79,6 +79,53 @@ def test_count_by_source(store):
     assert counts[SourceKey("b.py", 2, "g")] == 1
 
 
+def test_count_by_template_within_a_window(store):
+    now = time.time()
+    store.append(
+        [_row(created=now - 3600, template_id=1), _row(created=now, template_id=1)]
+    )
+    assert store.count_by_template(window_seconds=60) == {1: 1}
+
+
+def test_count_by_source_within_a_window(store):
+    now = time.time()
+    store.append(
+        [
+            _row(created=now - 3600, pathname="a.py", lineno=1, func_name="f"),
+            _row(created=now, pathname="a.py", lineno=1, func_name="f"),
+            _row(created=now, pathname="a.py", lineno=1, func_name="f"),
+        ]
+    )
+    assert store.count_by_source(window_seconds=60) == {SourceKey("a.py", 1, "f"): 2}
+
+
+# --- incremental counting --------------------------------------------------
+
+
+def test_count_by_source_since_returns_only_newer_rows(store):
+    store.append([_row(pathname="a.py", lineno=1, func_name="f")])
+    first = store.count_by_source_since(0)
+    assert first.counts == {SourceKey("a.py", 1, "f"): 1}
+
+    store.append([_row(pathname="a.py", lineno=1, func_name="f") for _ in range(3)])
+    second = store.count_by_source_since(first.last_id)
+    assert second.counts == {SourceKey("a.py", 1, "f"): 3}
+    assert second.last_id > first.last_id
+
+
+def test_count_by_source_since_holds_the_watermark_when_nothing_arrived(store):
+    store.append([_row()])
+    first = store.count_by_source_since(0)
+    again = store.count_by_source_since(first.last_id)
+    assert again.counts == {}
+    assert again.last_id == first.last_id, "an empty delta must not rewind"
+
+
+def test_count_by_source_since_from_zero_sees_everything(store):
+    store.append([_row() for _ in range(4)])
+    assert sum(store.count_by_source_since(0).counts.values()) == 4
+
+
 def test_evict_before(store):
     now = time.time()
     store.append(
@@ -94,6 +141,25 @@ def test_evict_keep_last(store):
     evicted = store.evict(keep_last=2)
     assert evicted == 3
     assert [r.message for r in store.recent()] == ["3", "4"]
+
+
+def test_evict_keep_last_zero_clears_the_store(store):
+    store.append([_row() for _ in range(3)])
+    assert store.evict(keep_last=0) == 3
+    assert store.recent() == []
+
+
+def test_evict_keep_last_beyond_the_row_count_deletes_nothing(store):
+    # The cutoff subquery returns NULL here, and `id < NULL` matches no row.
+    store.append([_row(message=str(i)) for i in range(2)])
+    assert store.evict(keep_last=100) == 0
+    assert [r.message for r in store.recent()] == ["0", "1"]
+
+
+def test_evict_keep_last_one_keeps_the_newest(store):
+    store.append([_row(message=str(i)) for i in range(4)])
+    assert store.evict(keep_last=1) == 3
+    assert [r.message for r in store.recent()] == ["3"]
 
 
 def test_evict_requires_exactly_one_arg(store):

@@ -108,15 +108,12 @@ class RichProgressRenderer:
         *,
         stream: TextIO | None = None,
         min_repeats: int = DEFAULT_MIN_REPEATS,
-        window_seconds: float | None = None,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
         passthrough_level: int = logging.WARNING,
     ) -> None:
         if Progress is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR
-        self._model = RepeatingSourceModel(
-            store, min_repeats=min_repeats, window_seconds=window_seconds
-        )
+        self._model = RepeatingSourceModel(store, min_repeats=min_repeats)
         self.passthrough_level = passthrough_level
         self._progress = Progress(
             # markup=False: the label is a file path, and a stray "[" in one
