@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-This repository (`lumberjack`, hosted as `mikewitt/paul-bunyan`) is pre-scaffolding: as of this writing it contains no source code, only this file. Everything below describes the intended design that future work should implement and conform to, not code that exists yet. Do not assume any module, file, or directory mentioned below exists until you've checked.
+This repository (`lumberjack`, hosted as `mikewitt/paul-bunyan`) has **Phases 0 and 1 complete**. Trunk is `daddy`, not `main`.
+
+What exists and works: capture (`LumberjackHandler`), storage (`SQLiteRecordStore`), output-mode detection, plain/JSON/rich rendering, the Phase 1 live progress bar, the flush pump, and `atexit`/excepthook teardown. Grouping for the bar is by *source location* — a deliberate placeholder for Phase 4's template clustering.
+
+What does not exist yet, and must not be described as though it does: `track()` / `task()`, `RepetitionAnalyzer`, `HintsConfig`, `OTelBridge`, the DuckDB backend, and multiprocessing-aware capture. Sections below describe the intended design for those. Check before assuming any module named here is on disk.
+
+Everything is pre-1.0 with no released version and no back-compat obligation, so a wrong API shape should be fixed rather than deprecated.
 
 ## Vision
 
@@ -32,7 +38,9 @@ The intended experience is a value ladder:
 - **Concise, auditable code.** Small readable modules over clever abstraction.
 - **Test-driven development.** Tests pin the API shape before/alongside implementation — the test suite *is* the spec. Expect early scaffolding passes to include tests that fail against stub implementations by design.
 - **Coverage via fixtures, not speculative code.** Don't add defensive code paths nothing exercises; high coverage should fall out of writing a fixture per edge case, not be chased separately.
-- **Edge cases become GitHub issues, semi-automated,** via a form/template, an agent-validated repro step, then a filed issue linked back via an in-code marker (`# lumberjack: see issue #NN`).
+- **Edge cases become GitHub issues, semi-automated,** via a form/template, an agent-validated repro step, then a filed issue linked back via an in-code marker (`# lumberjack: see issue #NN`). This is in force — grep the marker to find known-incomplete code. Remove the marker in the same change that closes the issue.
+- **Measure before claiming a speedup, and measure again after.** Two changes in this repo were only ~3x until the query plan was checked; both are commented with the number and the reason. `EXPLAIN QUERY PLAN` is cheap and has already twice contradicted a design that looked obviously correct.
+- **Assert the observable contract, not internal state.** Where a test could read a state accessor or check the behaviour that accessor exists to describe, prefer the behaviour — several accessors were deleted precisely because tests were their only caller.
 
 ## Architecture
 
@@ -49,7 +57,15 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 - `HintsConfig` — declarative config where the user explains message semantics (progress step, task boundary, noise, severity override); sits above the analyzer, so declared meaning beats inference.
 - `OutputModeDetector` — interactive TTY vs plain/structured (file or pipe), with explicit override.
 - `Renderer` — abstract interface; `RichTerminalRenderer` (optional-dependency guarded, falls back to plain if `rich` is absent or not a TTY) and `PlainTextRenderer` (plain text and JSON-lines, write-through — not timer-gated). Live TTY redraw is periodic (~200ms), timer-driven, decoupled from log volume; non-TTY output is always write-through.
+- `RepeatingSourceModel` — accumulates `count_by_source_since()` forward from a watermark. Totals are therefore **monotonic by construction**: `evict()` can drop the rows a bar counted without the bar counting backwards, which is what a progress bar has to mean. Bar count is unbounded on purpose — see below.
 - `OTelBridge` — optional `SpanProcessor`/`MetricReader` feeding the same store (inbound direction; outbound is `task()` emitting spans directly).
+
+### Decisions worth not relitigating
+
+- **A high bar count is a symptom, not a display bug.** It means grouping is too granular or the code logs ungroupably. Capping by default, or collapsing the excess into a neutral "… 298 more" row, destroys that signal. The diagnosis is phase-dependent: under today's source-location grouping, 800 bars is an honest report of 800 busy call sites; under Phase 4's template grouping it would mean 800 distinct message *shapes*, which points at masking having failed. `LUMBERJACK_MAX_BARS` exists only as a debug/terminal-compat escape hatch — opt-in, absent from the README, reported once at exit. Issue #8 is the home for the real fix.
+- **Rich crops rather than corrupts.** `Progress` runs `Live` with `vertical_overflow="ellipsis"`, so an over-tall live frame shows the first N bars plus an ellipsis with correct cursor arithmetic. Do not justify display work by claiming otherwise. `Live.stop()` does *not* crop, though — see issue #28.
+- **At exit, drain before closing the display.** A live bar draws its closing frame from the store, so `teardown.run()` flushes the buffer first; closing first leaves the final count short, or with the pump disabled draws no bar at all. The excepthook path is the opposite by design — there a traceback is imminent, so the display comes down first.
+- **Bar display order is append-only, first-qualified.** Bars never move once placed, because a bar that jumps around as counts overtake each other is unreadable. The known cost is that with cropping the visible window is permanently the earliest qualifiers, not the busiest — an open question under issue #8.
 
 ### Record schema
 
@@ -62,7 +78,9 @@ Derived from `logging.LogRecord`'s standard attributes (`name`, `levelname`, `le
 | `sqlite` (default) | stdlib | Zero required deps. Raw `sqlite3`, not an ORM. WAL mode may support multiple writer processes, which could remove most multiprocessing IPC work — needs prototyping before building a queue-based fallback. |
 | `duckdb` | optional extra | Columnar/OLAP, much faster grouping/windowing at scale. Single-writer, so multiprocessing still needs the queue path when this backend is selected. |
 
-Retention target: in-memory by default (`:memory:`), ~1M records working target. Eviction must maintain derived progress state incrementally, not by recomputing from the full window.
+Retention target: in-memory by default (`:memory:`), ~1M records working target. Eviction must maintain derived progress state incrementally, not by recomputing from the full window — satisfied for the bar model by `count_by_source_since()`, and any future reader on a timer owes the same.
+
+Two SQLite specifics that measurement forced, both commented at their call sites. `count_by_source_since()` uses `NOT INDEXED`: left alone SQLite serves the `GROUP BY` from `idx_records_source` as a covering index, scanning every row to answer a delta query, and ruling the index out turns it into a rowid range seek (32ms → 0.5ms at 1M rows). `evict(keep_last)` resolves a cutoff id and deletes by range rather than `id NOT IN (SELECT …)`. A second backend will need its own answers to both — these are not portable.
 
 ### Integration surfaces
 
@@ -72,8 +90,8 @@ Retention target: in-memory by default (`:memory:`), ~1M records working target.
 
 Full detail lives in the project plan; phase order is deliberate (simplest-first, exact-before-inferred):
 
-0. Foundations — repo scaffolding, packaging, CI, pre-commit, test harness before implementation.
-1. MVP — capture/store/render skeleton, including a throwaway crude end-to-end proof (one hardcoded/naively-detected repeating log shape rendered as a live bar) to validate the core premise early.
+0. **Done.** Foundations — repo scaffolding, packaging, CI, pre-commit, test harness before implementation.
+1. **Done.** MVP — capture/store/render skeleton, including a throwaway crude end-to-end proof (one hardcoded/naively-detected repeating log shape rendered as a live bar) to validate the core premise early.
 2. Tracking API (`track`/`task`), outbound OTel only — establishes the progress/task model before inference is built on top of it.
 3. Multiprocessing-aware capture — prototype SQLite WAL multi-writer before building an IPC/queue fallback.
 4. Repetition analysis & inferred progress — the phase that delivers the core premise (recurring log line → progress tick) on top of the Phase 1-3 substrate.
@@ -84,12 +102,58 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
 9. (Stretch) Web renderer & disk-backed persistence.
 10. (Stretch) Profiling & contingent Rust migration for a specific bottleneck, gated on profiling data — not scheduled work.
 
-## Toolchain (intended, per decisions log)
+### Phases are GitHub milestones
+
+Phases 0–7 exist as milestones. **The milestone number is the phase number plus one** (Phase 0 is milestone 1, Phase 7 "Polish & extensibility" is milestone 8) — the API takes the number, not the title, so assign one issue and read it back before batching. Phases 8–10 have no milestone yet; nothing maps to them.
+
+File new work against its phase. Defects in already-shipped code and anything genuinely ambiguous go to **Polish & extensibility** — correcting minor defects is what polish means — rather than being left unassigned or forced into a phase they do not belong to.
+
+## Toolchain
 
 - **Environment/deps:** `uv`
-- **Lint/format:** `ruff` + `black`
-- **Tests:** `pytest` + coverage; a single parametrized suite exercises every installed `RecordStore` backend
+- **Lint/format:** `ruff` lints, `black` formats — one tool per job. `ruff format` is deliberately not run; it would be a second opinion on the question `black` already answers.
+- **Types:** `mypy`, strict over `src` and ordinary over `tests`/`examples`. Strict where it matters because the package ships `py.typed`, so a wrong annotation is our bug in someone else's build.
+- **Tests:** `pytest` + coverage; a single parametrized suite exercises every installed `RecordStore` backend. Warnings are errors.
 - **License:** Apache 2.0
 - **Python floor:** 3.12+
 
-Once scaffolding lands, expect `uv sync`, `uv run pytest`, `uv run ruff check .`, and `uv run black --check .` to be the standard local commands — verify against the actual `pyproject.toml` rather than assuming these exact invocations, since extras/scripts may refine them.
+The full local gate, which is what CI runs:
+
+```bash
+uv sync --all-extras
+uv run ruff check . && uv run black --check .
+uv run mypy --strict src && uv run mypy tests examples
+uv run pytest
+```
+
+### CI
+
+Jobs are independent — knowing *which* is broken beats making one wait on another, the same reasoning behind `fail-fast: false` on the matrix.
+
+| Job | Guards |
+|---|---|
+| `lint` | Once, not six times — style is a property of the source, not the interpreter |
+| `typecheck` | `mypy`, strict on the shipped package |
+| `test` | 6 legs: {ubuntu, windows} × {3.12, 3.13, 3.14} |
+| `bare install (no rich)` | Principle 8 — the zero-dependency install. Asserts `rich` is genuinely absent so it cannot rot into a duplicate of `test` |
+| `package` | `uv lock --check`, builds the wheel, installs it into a clean venv, asserts `py.typed` ships |
+| `coverage-badge` | Trunk pushes only; commits the badge with `[skip ci]` |
+
+CodeQL also runs, configured outside this workflow.
+
+Every job pins its interpreter with `actions/setup-python` *before* `setup-uv`. Without it `uv sync` resolves whatever satisfies `requires-python` and the matrix silently stops testing six versions — verified from run logs that the legs really do run distinct interpreters.
+
+`.pre-commit-config.yaml` pins `ruff`/`black` by git rev while `uv` resolves them from `pyproject.toml`; nothing links the two, so `tests/test_toolchain.py` fails when they drift. Otherwise a commit passes locally and fails `lint` over a rule one version has and the other does not.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `LUMBERJACK_OUTPUT_MODE` | `rich` / `plain` / `json`, overriding TTY detection |
+| `LUMBERJACK_MAX_BARS` | Opt-in ceiling on drawn bars. Debug/compat aid, deliberately undocumented in the README — see the decisions above |
+
+Both follow the same rule: a bad **argument** is a caller's bug and raises; a bad **environment variable** is an operator typo, so it warns and degrades.
+
+### Verifying display behaviour
+
+Bars only render on a TTY, so piping the demo shows the plain renderer instead. To see the real thing, run it under a pty and strip ANSI. Note `examples/demo.py` calls `shutdown()`, which unregisters the `atexit` hook — a script that exits naturally is needed to observe exit-time diagnostics.
