@@ -1,0 +1,9 @@
+# Line endings are a property of the repository, not of each contributor's
+# local `core.autocrlf`. Text files are stored and checked out as LF on every
+# platform, so a Windows checkout and an ubuntu-latest CI checkout produce
+# byte-identical working trees.
+#
+# `text=auto` lets git auto-detect text vs. binary, so genuinely binary files
+# added later are left untouched without needing to be listed here. No file in
+# this repo currently requires an explicit `binary` marker.
+* text=auto eol=lf

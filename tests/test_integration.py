@@ -85,6 +85,85 @@ def test_write_through_records_printed_once_after_traceback(scripts_dir):
     assert result.stderr.count(b"about to fail") == 1, result.stderr
 
 
+def _store_count(db_path: Path) -> int:
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
+    # The Phase 1 premise, end to end in its own interpreter: 200 log lines in,
+    # no scrolling out, one bar naming the source location that produced them.
+    db_path = tmp_path / "records.db"
+    result = _run_script(
+        scripts_dir,
+        "loop_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(db_path),
+            "LUMBERJACK_TEST_RECORD_COUNT": "200",
+            "COLUMNS": "200",
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    stderr = result.stderr
+    assert b"processing item" not in stderr, stderr
+    assert b"loop_then_exit.py:" in stderr, stderr
+    assert b"200 records" in stderr, stderr
+    # Lossy display, lossless store.
+    assert _store_count(db_path) == 201  # 200 loop records + the warning
+
+
+def test_a_warning_survives_the_collapse(scripts_dir, tmp_path):
+    result = _run_script(
+        scripts_dir,
+        "loop_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
+            "LUMBERJACK_TEST_RECORD_COUNT": "50",
+        },
+    )
+    assert result.stderr.count(b"something looked odd") == 1, result.stderr
+
+
+def test_live_bar_writes_no_ansi_when_piped(scripts_dir, tmp_path):
+    # Explicitly asked for rich, but stderr is a pipe: no cursor control may
+    # reach a consumer that isn't a terminal.
+    result = _run_script(
+        scripts_dir,
+        "loop_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
+            "LUMBERJACK_TEST_RECORD_COUNT": "20",
+        },
+    )
+    assert not _ANSI_RE.search(result.stderr), result.stderr
+
+
+def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
+    # The other half of the write_through=False contract: records the bar
+    # swallowed are replayed at exit, and still reach the store.
+    db_path = tmp_path / "records.db"
+    result = _run_script(
+        scripts_dir,
+        "loop_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(db_path),
+            "LUMBERJACK_TEST_RECORD_COUNT": "20",
+            "LUMBERJACK_TEST_DUMP_LAST_N": "5",
+            # Pump and final flush off, so the tail is still in the buffer the
+            # dump reads from at exit.
+            "LUMBERJACK_TEST_FLUSH_INTERVAL": "0",
+            "LUMBERJACK_TEST_FINAL_FLUSH": "0",
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert b"processing item 19" in result.stderr, result.stderr
+    assert b"processing item 0" not in result.stderr, "dumped more than the tail"
+    assert _store_count(db_path) == 21
+
+
 def test_no_records_lost_on_process_exit(scripts_dir, tmp_path):
     db_path = tmp_path / "records.db"
     result = _run_script(

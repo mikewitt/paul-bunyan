@@ -5,6 +5,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 dist/
 build/
+
+# Agent worktrees are real git worktrees living inside the repo; staging them
+# would embed one repository in another. Tool scratch, never committed.
+.claude/worktrees/

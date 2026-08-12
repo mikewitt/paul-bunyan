@@ -62,6 +62,41 @@ def test_rich_mode_falls_back_to_plain_without_rich(without_rich):
     assert isinstance(renderer, PlainTextRenderer)
 
 
+def test_rich_mode_with_a_store_creates_the_live_bar(store):
+    pytest.importorskip("rich")
+    from lumberjack.renderers.rich_renderer import RichProgressRenderer
+
+    renderer = create_renderer(OutputMode.RICH, stream=io.StringIO(), store=store)
+    try:
+        assert isinstance(renderer, RichProgressRenderer)
+    finally:
+        renderer.close()
+
+
+def test_rich_mode_without_a_store_stays_on_the_scrolling_renderer():
+    # The bar reads its counts out of a store; with nowhere to read from,
+    # there is nothing to draw.
+    pytest.importorskip("rich")
+    from lumberjack.renderers.rich_renderer import RichTerminalRenderer
+
+    renderer = create_renderer(OutputMode.RICH, stream=io.StringIO())
+    assert isinstance(renderer, RichTerminalRenderer)
+
+
+def test_live_bar_falls_back_to_plain_without_rich(without_rich, store):
+    renderer = create_renderer(OutputMode.RICH, stream=io.StringIO(), store=store)
+    assert isinstance(renderer, PlainTextRenderer)
+
+
+@pytest.mark.parametrize("mode", [OutputMode.PLAIN, OutputMode.JSON])
+def test_a_store_never_buys_a_live_bar_off_a_tty(mode, store):
+    # Never assume a human is watching: a bar redrawing itself into a pipe or
+    # a log file is noise, however much there is to show.
+    renderer = create_renderer(mode, stream=io.StringIO(), store=store)
+    assert isinstance(renderer, PlainTextRenderer)
+    assert renderer.write_through is True
+
+
 def test_every_renderer_satisfies_the_protocol(make_row):
     # Includes `write_through`, which teardown reads off the renderer to decide
     # whether replaying the tail at exit would duplicate output.

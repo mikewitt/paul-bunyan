@@ -1,0 +1,104 @@
+"""Naive repeating-source detection behind the Phase 1 live bar.
+
+This is deliberately *not* `RepetitionAnalyzer` (Phase 4): no template
+extraction, no message masking, no clustering. Here "a repeating log shape"
+means "records emitted from the same source location", which the store
+already groups for free — `count_by_source()` keys on
+(pathname, lineno, func_name), and a `logger.debug(...)` inside a loop hits
+the same line on every iteration. That is enough to prove the premise: a log
+line that recurs is progress signal, not noise.
+
+Store, then render: counts come from a `RecordStore` query, never from
+tallying the handler's live callback, so every renderer reading the same
+store sees the same numbers.
+
+No `rich` import lives here — the model is display-independent, and the
+package's only `rich` import stays in `rich_renderer.py`.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+from typing import TYPE_CHECKING
+
+from lumberjack.schema import SourceKey
+
+if TYPE_CHECKING:
+    from lumberjack.store import RecordStore
+
+#: How many times a source location must have logged before it earns a bar.
+#: Low on purpose: two hits is a coincidence, three is a loop.
+DEFAULT_MIN_REPEATS = 3
+
+#: Seconds between store polls (and therefore between redraws). Timer-driven
+#: and deliberately independent of log volume — a million records a second
+#: must still cost five redraws a second.
+DEFAULT_REFRESH_INTERVAL = 0.2
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class BarState:
+    """One bar's worth of state: which source it tracks and how far it has got.
+
+    There is no `total`: this proof knows how many records have arrived, never
+    how many are still coming. Exact totals are the tracking API's job (Phase 2).
+    """
+
+    source: SourceKey
+    count: int
+
+    @property
+    def label(self) -> str:
+        """Human-readable source location, e.g. `worker.py:42 process()`."""
+        name = os.path.basename(self.source.pathname)
+        return f"{name}:{self.source.lineno} {self.source.func_name}()"
+
+
+class RepeatingSourceModel:
+    """Turns `store.count_by_source()` into an ordered list of bars."""
+
+    def __init__(
+        self,
+        store: RecordStore,
+        *,
+        min_repeats: int = DEFAULT_MIN_REPEATS,
+        window_seconds: float | None = None,
+    ) -> None:
+        self._store = store
+        self.min_repeats = min_repeats
+        self.window_seconds = window_seconds
+        # Insertion-ordered, so a source keeps the slot it was first given.
+        self._counts: dict[SourceKey, int] = {}
+
+    def poll(self) -> list[BarState]:
+        """Re-read the store and return the current bars.
+
+        Once a source has a bar it keeps it, even if a `window_seconds` view
+        later drops its count below the threshold — a bar that vanished
+        mid-run would read as "this work stopped existing".
+        """
+        counts = self._store.count_by_source(self.window_seconds)
+        # Newly-qualifying sources are added busiest-first; sources already
+        # tracked keep their position, so bars never jump around on screen.
+        fresh = sorted(
+            (
+                (source, count)
+                for source, count in counts.items()
+                if count >= self.min_repeats and source not in self._counts
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        for source, count in fresh:
+            self._counts[source] = count
+        for source, count in counts.items():
+            if source in self._counts:
+                self._counts[source] = count
+        return self.bars()
+
+    def bars(self) -> list[BarState]:
+        """The most recent poll's bars, in display order. Empty before `poll()`."""
+        return [
+            BarState(source=source, count=count)
+            for source, count in self._counts.items()
+        ]

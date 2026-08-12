@@ -17,6 +17,15 @@ def test_render_writes_message_to_stream(make_row):
     assert "hello world" in stream.getvalue()
 
 
+def test_render_includes_exception_text(make_row):
+    stream = io.StringIO()
+    renderer = RichTerminalRenderer(stream=stream)
+    renderer.render(
+        make_row(level_name="ERROR", level_no=40, exc_text="RuntimeError: boom")
+    )
+    assert "RuntimeError: boom" in stream.getvalue()
+
+
 def test_close_suppresses_further_renders(make_row):
     stream = io.StringIO()
     renderer = RichTerminalRenderer(stream=stream)
