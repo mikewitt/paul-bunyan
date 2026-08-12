@@ -171,7 +171,12 @@ def current_handler() -> LumberjackHandler | None:
 def current_store() -> RecordStore | None:
     """The store records are being written to, or None if `init()` hasn't run.
 
-    The supported way to query captured records: `current_store().recent()`.
+    The supported way to query captured records. It is `RecordStore | None`,
+    so a type checker will make a caller say why it knows better::
+
+        store = lumberjack.current_store()
+        assert store is not None  # init() ran
+        rows = store.recent(n=100)
     """
     return _session.store if _session is not None else None
 

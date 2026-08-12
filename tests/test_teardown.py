@@ -156,6 +156,27 @@ def test_teardown_flushes_buffer_to_store():
     assert handler.drained == 1
 
 
+def test_the_buffer_reaches_the_store_before_the_display_closes():
+    # A live bar draws its closing frame from the store. Close it first and
+    # the run's final count is short — or, with the pump disabled, the store
+    # is empty and the bar is never drawn at all.
+    seen_at_close: list[list[str]] = []
+    store = _FakeStore()
+
+    class _RecordingRenderer(_FakeRenderer):
+        def close(self) -> None:
+            seen_at_close.append(list(store.rows))
+            super().close()
+
+    _install(
+        renderer=_RecordingRenderer(),
+        handler=_FakeHandler(rows=["a", "b", "c"]),
+        store=store,
+    )
+    teardown.run()
+    assert seen_at_close == [["a", "b", "c"]], "display closed over a stale store"
+
+
 def test_teardown_is_idempotent():
     renderer = _FakeRenderer()
     handler = _FakeHandler(rows=["a"])
