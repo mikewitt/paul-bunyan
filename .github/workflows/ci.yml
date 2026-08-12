@@ -6,6 +6,27 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    # Its own job, not a step in the matrix below: style is a property of the
+    # source, not of the OS or interpreter running it, so checking it six
+    # times says the same thing six times — and reports a single misplaced
+    # comma as six red legs with no check called "lint" among them.
+    # Deliberately not a dependency of `test`: which of the two is broken is
+    # more useful than making one wait on the other.
+    # No type-check gate yet. lumberjack: see issue #12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      # ruff lints, black formats — one tool per job, per the toolchain in
+      # CLAUDE.md. `ruff format` is deliberately not run: it would be a second
+      # opinion on the same question black already answers.
+      - run: uv run ruff check .
+      - run: uv run black --check .
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,12 +41,9 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: ${{ matrix.python-version }}
-      # Every leg installs rich, so the bare-install path is never exercised;
-      # no type-check gate or subprocess coverage yet.
-      # lumberjack: see issues #10, #12
+      # Every leg installs rich, so the bare-install path is never exercised.
+      # lumberjack: see issue #10
       - run: uv sync --all-extras
-      - run: uv run ruff check .
-      - run: uv run black --check .
       - run: uv run pytest
 
   coverage-badge:
