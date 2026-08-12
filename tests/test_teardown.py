@@ -1,0 +1,171 @@
+"""In-process unit tests for install/uninstall/idempotency/hook-chaining.
+
+The excepthook-fires-for-real and atexit-fires-for-real paths can't be
+exercised in-process (pytest owns exception handling; atexit only runs at
+real interpreter shutdown) — those are covered via subprocess in
+test_integration.py instead.
+"""
+
+from __future__ import annotations
+
+import sys
+
+import pytest
+
+from lumberjack import teardown
+
+
+class _FakeRenderer:
+    """Lossy by default — a live display that swallows records is the case
+    the diagnostic dump exists for."""
+
+    def __init__(self, *, write_through: bool = False) -> None:
+        self.write_through = write_through
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _FakeHandler:
+    def __init__(self, rows: list[str] | None = None) -> None:
+        self._rows = list(rows or [])
+        self.drained = 0
+        self.peeked: list[int | None] = []
+
+    def drain(self) -> list[str]:
+        self.drained += 1
+        rows, self._rows = self._rows, []
+        return rows
+
+    def peek(self, n: int | None = None) -> list[str]:
+        self.peeked.append(n)
+        return list(self._rows)
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.appended: list[str] = []
+
+    def append(self, rows: list[str]) -> None:
+        self.appended.extend(rows)
+
+
+@pytest.fixture(autouse=True)
+def _uninstall_after() -> None:
+    yield
+    teardown.uninstall()
+
+
+def test_install_sets_excepthook():
+    prev_hook = sys.excepthook
+    teardown.install(
+        renderer=_FakeRenderer(), handler=_FakeHandler(), store=_FakeStore()
+    )
+    assert sys.excepthook is teardown.handle_exception
+    assert teardown.is_installed()
+    teardown.uninstall()
+    assert sys.excepthook is prev_hook
+    assert not teardown.is_installed()
+
+
+def test_install_twice_is_a_noop():
+    renderer1, renderer2 = _FakeRenderer(), _FakeRenderer()
+    handler, store = _FakeHandler(), _FakeStore()
+    teardown.install(renderer=renderer1, handler=handler, store=store)
+    teardown.install(renderer=renderer2, handler=handler, store=store)
+    assert teardown.current_renderer() is renderer1
+
+
+def test_excepthook_closes_renderer_before_delegating(monkeypatch):
+    renderer = _FakeRenderer()
+    handler = _FakeHandler()
+    store = _FakeStore()
+    calls: list[str] = []
+    teardown.install(renderer=renderer, handler=handler, store=store)
+    monkeypatch.setattr(
+        teardown, "_prev_excepthook", lambda *a: calls.append("prev_hook")
+    )
+    teardown.handle_exception(RuntimeError, RuntimeError("x"), None)
+    assert renderer.closed == 1
+    assert calls == ["prev_hook"]
+
+
+def test_teardown_flushes_buffer_to_store():
+    renderer = _FakeRenderer()
+    handler = _FakeHandler(rows=["a", "b"])
+    store = _FakeStore()
+    teardown.install(renderer=renderer, handler=handler, store=store)
+    teardown.run()
+    assert store.appended == ["a", "b"]
+    assert handler.drained == 1
+
+
+def test_teardown_is_idempotent():
+    renderer = _FakeRenderer()
+    handler = _FakeHandler(rows=["a"])
+    store = _FakeStore()
+    teardown.install(renderer=renderer, handler=handler, store=store)
+    teardown.run()
+    teardown.run()  # must not raise
+    assert renderer.closed == 2
+
+
+def test_teardown_diagnostics_dumped_before_drain():
+    renderer = _FakeRenderer()
+    handler = _FakeHandler(rows=["a", "b"])
+    store = _FakeStore()
+    teardown.install(renderer=renderer, handler=handler, store=store, dump_last_n=5)
+    teardown.run()
+    assert handler.peeked == [5]
+
+
+def test_lossy_renderer_dump_replays_records_to_stderr(capsys, make_row) -> None:
+    handler = _FakeHandler(rows=[make_row(message="swallowed by the bar")])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert "swallowed by the bar" in capsys.readouterr().err
+
+
+def test_write_through_renderer_is_not_dumped(make_row):
+    # Regression: the atexit dump used to replay records the write-through
+    # renderer had already printed, doubling every line of a normal run.
+    handler = _FakeHandler(rows=[make_row(message="already printed")])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=True),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert handler.peeked == []
+
+
+def test_dump_last_n_zero_disables_the_dump(make_row):
+    handler = _FakeHandler(rows=[make_row()])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    assert handler.peeked == []
+
+
+def test_uninstall_restores_previous_hook():
+    prev_hook = sys.excepthook
+    teardown.install(
+        renderer=_FakeRenderer(), handler=_FakeHandler(), store=_FakeStore()
+    )
+    teardown.uninstall()
+    assert sys.excepthook is prev_hook
+
+
+def test_uninstall_without_install_is_a_noop():
+    teardown.uninstall()
