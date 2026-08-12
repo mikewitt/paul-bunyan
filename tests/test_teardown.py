@@ -33,8 +33,9 @@ class _FakeRenderer:
 
 
 class _FakeHandler:
-    def __init__(self, rows: list[str] | None = None) -> None:
+    def __init__(self, rows: list[str] | None = None, dropped: int = 0) -> None:
         self._rows = list(rows or [])
+        self.dropped = dropped
         self.drained = 0
         self.peeked: list[int | None] = []
 
@@ -211,6 +212,44 @@ def test_dump_last_n_zero_disables_the_dump(make_row):
     )
     teardown.run()
     assert store.tailed == []
+
+
+def test_buffer_overflow_is_reported_at_exit(capsys):
+    """Records dropped before the store are the one loss nothing else shows."""
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=_FakeHandler(dropped=37),
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    err = capsys.readouterr().err
+    assert "37 record(s) dropped" in err
+    assert "buffer_size" in err
+
+
+def test_overflow_report_is_not_suppressed_by_write_through(capsys):
+    """The dump is skipped for write-through renderers; this warning isn't —
+    it is about what never reached the store, not about what was displayed."""
+    teardown.install(
+        renderer=_FakeRenderer(write_through=True),
+        handler=_FakeHandler(dropped=2),
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert "2 record(s) dropped" in capsys.readouterr().err
+
+
+def test_no_overflow_report_when_nothing_was_dropped(capsys):
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=_FakeHandler(dropped=0),
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    assert "dropped" not in capsys.readouterr().err
 
 
 def test_uninstall_restores_previous_hook():

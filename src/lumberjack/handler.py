@@ -17,6 +17,11 @@ class LumberjackHandler(logging.Handler):
     Store writes are batched separately (via `drain()`), so `emit()` stays
     cheap and never touches the store directly. `on_record`, if given, is
     invoked synchronously per record for write-through renderers.
+
+    The buffer is bounded, so a burst that outruns the flush pump evicts the
+    oldest rows before they ever reach the store. That breaks the losslessness
+    the store promises, so it is counted rather than passed over in silence —
+    `dropped` is the running total, and teardown reports it at exit.
     """
 
     def __init__(
@@ -30,7 +35,20 @@ class LumberjackHandler(logging.Handler):
         self._buffer: collections.deque[LogRecordRow] = collections.deque(
             maxlen=buffer_size
         )
+        self._buffer_size = buffer_size
+        self._dropped = 0
         self.on_record = on_record
+
+    @property
+    def dropped(self) -> int:
+        """Records evicted unread because the buffer was full, since startup.
+
+        Cumulative for the life of the handler — `drain()` does not reset it.
+        Any non-zero value means the store is missing records: either the
+        pump interval is too long or `buffer_size` is too small for the load.
+        """
+        with self.lock:
+            return self._dropped
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -40,6 +58,10 @@ class LumberjackHandler(logging.Handler):
             return
 
         with self.lock:
+            # deque(maxlen=...) discards silently; check before appending,
+            # since afterwards the evicted row is simply gone.
+            if len(self._buffer) == self._buffer_size:
+                self._dropped += 1
             self._buffer.append(row)
 
         if self.on_record is not None:

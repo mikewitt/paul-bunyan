@@ -42,6 +42,29 @@ def test_buffer_is_bounded():
     assert [r.message for r in rows] == ["b", "c"]
 
 
+def test_overflow_is_counted_not_silent():
+    """A full buffer evicts the oldest row; the store loses it, so say so."""
+    handler = LumberjackHandler(buffer_size=2)
+    assert handler.dropped == 0
+    for msg in ("a", "b"):
+        _emit(handler, msg)
+    assert handler.dropped == 0, "a buffer that is merely full has lost nothing"
+    for msg in ("c", "d", "e"):
+        _emit(handler, msg)
+    assert handler.dropped == 3
+
+
+def test_dropped_count_survives_a_drain():
+    """Cumulative for the session: draining doesn't forgive earlier losses."""
+    handler = LumberjackHandler(buffer_size=1)
+    for msg in ("a", "b", "c"):
+        _emit(handler, msg)
+    assert handler.dropped == 2
+    handler.drain()
+    _emit(handler, "d")
+    assert handler.dropped == 2
+
+
 def test_on_record_callback_invoked_per_record():
     seen: list[str] = []
     handler = LumberjackHandler(on_record=lambda row: seen.append(row.message))

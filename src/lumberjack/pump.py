@@ -47,8 +47,8 @@ class FlushPump:
         self._thread.start()
 
     def _run(self) -> None:
-        # wait() returns True only once stop() fires, so this doubles as an
-        # interruptible sleep — stop() never waits out a full interval.
+        # wait() doubles as an interruptible sleep: stop() is never left
+        # waiting out a full interval.
         while not self._stop.wait(self.interval):
             try:
                 self._flush()

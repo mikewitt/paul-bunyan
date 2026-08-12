@@ -42,6 +42,7 @@ _renderer: Renderer | None = None
 _output_mode: OutputMode | None = None
 _pump: FlushPump | None = None
 _prev_handlers: list[logging.Handler] = []
+_prev_level: int | None = None
 
 
 def init(
@@ -64,44 +65,56 @@ def init(
     the store; pass 0 to disable the pump and drain only on `flush()` and at
     exit. A `store` passed in here belongs to the caller and is left open by
     `shutdown()`; one lumberjack creates itself is closed.
+
+    Failing partway through leaves the process as it was found: a store
+    created here is closed again rather than left open and unreachable.
     """
-    global _installed, _handler, _store, _owns_store, _prev_handlers
+    global _installed, _handler, _store, _owns_store, _prev_handlers, _prev_level
     global _renderer, _output_mode, _pump
     if _installed:
         raise RuntimeError(
             "lumberjack.init() already called; call lumberjack.shutdown() first"
         )
 
-    _owns_store = store is None
+    owns_store = store is None
     resolved_store = store if store is not None else SQLiteRecordStore(":memory:")
-    mode = OutputModeDetector(override=output_mode).detect()
-    # The renderer gets the store, not just the record stream: a live bar
-    # reads its counts back out of the store (store, then render).
-    renderer = create_renderer(mode, store=resolved_store)
+    try:
+        mode = OutputModeDetector(override=output_mode).detect()
+        # The renderer gets the store, not just the record stream: a live bar
+        # reads its counts back out of the store (store, then render).
+        renderer = create_renderer(mode, store=resolved_store)
 
-    handler = LumberjackHandler(
-        buffer_size=buffer_size,
-        on_record=renderer.render,
-        level=level,
-    )
+        handler = LumberjackHandler(
+            buffer_size=buffer_size,
+            on_record=renderer.render,
+            level=level,
+        )
 
+        teardown.install(
+            renderer=renderer,
+            handler=handler,
+            store=resolved_store,
+            dump_last_n=dump_last_n,
+        )
+    except BaseException:
+        if owns_store:
+            resolved_store.close()
+        raise
+
+    # Everything that can fail is done; the root logger is only touched once
+    # the install is guaranteed to complete, so there is no half-swapped state
+    # to unwind here.
     root = logging.getLogger()
-    if replace_handlers:
-        _prev_handlers = root.handlers[:]
-        for existing in _prev_handlers:
-            root.removeHandler(existing)
-    else:
-        _prev_handlers = []
+    prev_handlers = root.handlers[:] if replace_handlers else []
+    for existing in prev_handlers:
+        root.removeHandler(existing)
+    prev_level = root.level
     root.addHandler(handler)
     root.setLevel(level)
 
-    teardown.install(
-        renderer=renderer,
-        handler=handler,
-        store=resolved_store,
-        dump_last_n=dump_last_n,
-    )
-
+    _owns_store = owns_store
+    _prev_handlers = prev_handlers
+    _prev_level = prev_level
     _handler = handler
     _store = resolved_store
     _renderer = renderer
@@ -116,12 +129,16 @@ def init(
 
 
 def shutdown() -> None:
-    """Tear down lumberjack: stop the pump, flush the buffer, restore handlers.
+    """Tear down lumberjack: stop the pump, flush, restore the root logger.
+
+    Restores both halves of what `init()` took over — the handler list *and*
+    the level — so a library that only wanted lumberjack for part of a run
+    does not silently leave the root logger more verbose than it found it.
 
     Closes the store only if lumberjack created it — a store the caller passed
     to `init()` stays open so it can still be queried afterward.
     """
-    global _installed, _handler, _store, _owns_store, _prev_handlers
+    global _installed, _handler, _store, _owns_store, _prev_handlers, _prev_level
     global _renderer, _output_mode, _pump
     if not _installed:
         return
@@ -139,9 +156,12 @@ def shutdown() -> None:
         root.removeHandler(_handler)
     for h in _prev_handlers:
         root.addHandler(h)
+    if _prev_level is not None:
+        root.setLevel(_prev_level)
     if _owns_store and _store is not None:
         _store.close()
     _prev_handlers = []
+    _prev_level = None
     _handler = None
     _store = None
     _owns_store = False

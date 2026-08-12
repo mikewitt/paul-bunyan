@@ -89,16 +89,15 @@ class RichTerminalRenderer:
 class RichProgressRenderer:
     """Live progress bars, one per repeating source location.
 
-    The Phase 1 crude proof of the premise: a `logger.info(...)` inside a loop
-    stops scrolling and becomes a bar that advances. Counts come from the
-    store (see `RepeatingSourceModel`), never from this renderer's own
-    callback — which is what lets a bar and a plain log file describe the same
-    run without divergent logic.
+    The Phase 1 proof: a `logger.info(...)` inside a loop stops scrolling and
+    becomes a bar that advances. Counts come from the store (see
+    `RepeatingSourceModel`), never from this renderer's own callback, so a bar
+    and a plain log file describe the same run without divergent logic.
 
-    Lossy by construction: routine records are collapsed into a count rather
-    than printed, so `write_through` is False and teardown replays the tail of
-    the store at exit. Records at `passthrough_level` and above still print
-    above the bars, because a swallowed ERROR is never the right trade.
+    Lossy by construction — routine records are collapsed into a count, so
+    `write_through` is False and teardown replays the store's tail at exit.
+    Records at `passthrough_level` and above still print above the bars: a
+    swallowed ERROR is never the right trade.
     """
 
     write_through = False
@@ -153,10 +152,9 @@ class RichProgressRenderer:
     def render(self, row: LogRecordRow) -> None:
         """Per-record hook. Deliberately does *not* feed the bars.
 
-        The bars are fed by the store on a timer; all this decides is whether
-        a record is important enough to also print above them. Everything else
-        is collapsed — still in the store, and still replayed by teardown's
-        exit dump.
+        The store feeds the bars on a timer; all this decides is whether a
+        record also prints above them. Everything else is collapsed — still
+        stored, still replayed by teardown's exit dump.
         """
         if self._closed or row.level_no < self.passthrough_level:
             return
@@ -185,14 +183,14 @@ class RichProgressRenderer:
     def close(self) -> None:
         """Stop the timer and tear the live display down. Idempotent.
 
-        Ordering matters: teardown calls this before Python's excepthook
-        prints, so the timer must be stopped and the cursor restored before a
-        traceback reaches the terminal — otherwise a redraw lands on top of it.
+        Teardown calls this before Python's excepthook prints, so the cursor
+        must be restored before a traceback reaches the terminal — otherwise a
+        redraw lands on top of it.
         """
         if self._closed:
             return
-        # Stop the timer first so nothing redraws behind this, then draw one
-        # last frame: the counts a run finished on are the interesting ones.
+        # Timer first so nothing redraws behind us, then one last frame: the
+        # counts a run finished on are the interesting ones.
         if self._pump is not None:
             self._pump.stop()
         try:

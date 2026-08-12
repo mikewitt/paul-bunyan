@@ -19,10 +19,9 @@ if TYPE_CHECKING:
 @runtime_checkable
 class Renderer(Protocol):
     #: True when every record reaching `render()` is written out verbatim.
-    #: Teardown's diagnostic dump exists to recover records a *lossy* live
-    #: display swallowed; replaying them for a write-through renderer would
-    #: just print the whole session twice. Renderers that redraw in place
-    #: (progress bars) must declare False.
+    #: Teardown's exit dump recovers records a *lossy* display swallowed;
+    #: replaying them for a write-through renderer would print the session
+    #: twice. Renderers that redraw in place must declare False.
     write_through: bool
 
     def render(self, row: LogRecordRow) -> None: ...
