@@ -41,6 +41,7 @@ from lumberjack.renderers.progress import (
     DEFAULT_REFRESH_INTERVAL,
     BarState,
     RepeatingSourceModel,
+    resolve_max_bars,
 )
 from lumberjack.schema import LogRecordRow, SourceKey
 
@@ -110,11 +111,17 @@ class RichProgressRenderer:
         min_repeats: int = DEFAULT_MIN_REPEATS,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
         passthrough_level: int = logging.WARNING,
+        max_bars: int | None = None,
     ) -> None:
         if Progress is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR
         self._model = RepeatingSourceModel(store, min_repeats=min_repeats)
         self.passthrough_level = passthrough_level
+        # None here means "consult the environment", not "no ceiling" — see
+        # resolve_max_bars(). The model still tracks every source either way;
+        # this only bounds what gets drawn.
+        self._max_bars = resolve_max_bars(max_bars)
+        self._suppressed_bars = 0
         self._progress = Progress(
             # markup=False: the label is a file path, and a stray "[" in one
             # must not be parsed as a rich tag.
@@ -159,11 +166,26 @@ class RichProgressRenderer:
         if row.exc_text:
             self._progress.console.print(row.exc_text, style="red")
 
+    @property
+    def suppressed_bars(self) -> int:
+        """Bars the ceiling kept off screen as of the last refresh.
+
+        Teardown reads this to report at exit; 0 when uncapped.
+        """
+        return self._suppressed_bars
+
     def refresh(self) -> None:
         """Re-read the store and redraw. Timer-driven, never per record."""
         if self._closed:
             return
-        for bar in self._model.poll():
+        bars = self._model.poll()
+        if self._max_bars is not None and len(bars) > self._max_bars:
+            self._suppressed_bars = len(bars) - self._max_bars
+            # Not `Task.visible = False`: rich skips invisible rows cheaply
+            # enough, but `add_task()` refreshes the display on every call, so
+            # registering the ones we will never draw costs a redraw each.
+            bars = bars[: self._max_bars]
+        for bar in bars:
             task_id = self._tasks.get(bar.source)
             if task_id is None:
                 # total=None → an indeterminate bar: this proof knows how many
@@ -174,7 +196,12 @@ class RichProgressRenderer:
         self._progress.refresh()
 
     def bars(self) -> list[BarState]:
-        """What the display is currently advertising, as of the last refresh."""
+        """Every bar the model is tracking, drawn or not.
+
+        Deliberately unfiltered by the ceiling: the ceiling is a property of
+        the display, and a caller asking what is being tracked should get the
+        honest answer.
+        """
         return self._model.bars()
 
     def close(self) -> None:

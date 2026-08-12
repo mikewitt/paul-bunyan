@@ -28,8 +28,11 @@ class _FakeRenderer:
     """Lossy by default — a live display that swallows records is the case
     the diagnostic dump exists for."""
 
-    def __init__(self, *, write_through: bool = False) -> None:
+    def __init__(
+        self, *, write_through: bool = False, suppressed_bars: int = 0
+    ) -> None:
         self.write_through = write_through
+        self.suppressed_bars = suppressed_bars
         self.closed = 0
 
     def close(self) -> None:
@@ -301,6 +304,45 @@ def test_overflow_report_is_not_suppressed_by_write_through(capsys):
     )
     teardown.run()
     assert "2 record(s) dropped" in capsys.readouterr().err
+
+
+def test_a_hidden_bar_count_is_reported_at_exit(capsys):
+    """The ceiling is opt-in and quiet during the run, so exit is the only
+    place a user learns part of the display was withheld."""
+    _install(renderer=_FakeRenderer(suppressed_bars=798), dump_last_n=0)
+    teardown.run()
+    err = capsys.readouterr().err
+    assert "798 progress bar(s) hidden" in err
+    assert "LUMBERJACK_MAX_BARS" in err
+
+
+def test_the_hidden_bar_report_does_not_advise_raising_the_ceiling(capsys):
+    """The honest remedy is that the ceiling hides a grouping problem rather
+    than fixing it — not "set a bigger number"."""
+    _install(renderer=_FakeRenderer(suppressed_bars=5), dump_last_n=0)
+    teardown.run()
+    err = capsys.readouterr().err
+    assert "hides rather than" in err
+
+
+def test_no_hidden_bar_report_when_nothing_was_hidden(capsys):
+    _install(renderer=_FakeRenderer(suppressed_bars=0), dump_last_n=0)
+    teardown.run()
+    assert "progress bar(s) hidden" not in capsys.readouterr().err
+
+
+def test_a_renderer_without_a_ceiling_is_not_asked_about_one(capsys):
+    """Plain renderers have no bars; the duck-typed read must not blow up."""
+
+    class _NoBars:
+        write_through = True
+
+        def close(self) -> None:
+            pass
+
+    _install(renderer=_NoBars(), dump_last_n=0)
+    teardown.run()
+    assert "progress bar(s) hidden" not in capsys.readouterr().err
 
 
 def test_no_overflow_report_when_nothing_was_dropped(capsys):

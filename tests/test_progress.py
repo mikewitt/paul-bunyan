@@ -7,10 +7,14 @@ the model is display-independent, so it runs on a bare install.
 
 from __future__ import annotations
 
+import pytest
+
 from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
+    MAX_BARS_ENV_VAR,
     BarState,
     RepeatingSourceModel,
+    resolve_max_bars,
 )
 from lumberjack.schema import SourceKey
 
@@ -119,3 +123,45 @@ def test_a_source_qualifies_on_its_total_not_one_poll(store, make_row):
 def test_label_names_the_source_location():
     bar = BarState(source=SourceKey("/srv/app/worker.py", 42, "process"), count=1)
     assert bar.label == "worker.py:42 process()"
+
+
+# --- the opt-in bar ceiling ------------------------------------------------
+#
+# An environment variable rather than an init() option, and a debug aid rather
+# than a feature: see the note on MAX_BARS_ENV_VAR and issue #8.
+
+
+def test_no_ceiling_by_default(monkeypatch):
+    monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
+    assert resolve_max_bars() is None
+
+
+def test_ceiling_from_the_environment(monkeypatch):
+    monkeypatch.setenv(MAX_BARS_ENV_VAR, "12")
+    assert resolve_max_bars() == 12
+
+
+def test_an_explicit_ceiling_beats_the_environment(monkeypatch):
+    monkeypatch.setenv(MAX_BARS_ENV_VAR, "12")
+    assert resolve_max_bars(3) == 3
+
+
+@pytest.mark.parametrize("value", ["banana", "", "0", "-4", "3.5"])
+def test_an_unusable_environment_value_warns_and_draws_everything(monkeypatch, value):
+    """An operator typo must not cap at something surprising, or take the run
+    down. Same split as LUMBERJACK_OUTPUT_MODE: env typos warn and degrade."""
+    monkeypatch.setenv(MAX_BARS_ENV_VAR, value)
+    if value == "":
+        # Unset and empty are the same request: no ceiling, nothing to warn about.
+        assert resolve_max_bars() is None
+        return
+    with pytest.warns(RuntimeWarning, match=MAX_BARS_ENV_VAR):
+        assert resolve_max_bars() is None
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_an_unusable_explicit_ceiling_raises(monkeypatch, value):
+    """A bad argument is the caller's bug, so it raises rather than warns."""
+    monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
+    with pytest.raises(ValueError, match="must be positive"):
+        resolve_max_bars(value)

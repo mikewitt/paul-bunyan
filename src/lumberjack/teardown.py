@@ -25,6 +25,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING
 
 from lumberjack.renderers.plain import PlainTextRenderer
+from lumberjack.renderers.progress import MAX_BARS_ENV_VAR
 
 if TYPE_CHECKING:
     from lumberjack.session import Session
@@ -96,6 +97,7 @@ def run() -> None:
     _flush_buffer()
     _stop_live_display()
     _report_dropped()
+    _report_suppressed_bars()
     _dump_diagnostics()
 
 
@@ -123,6 +125,34 @@ def _report_dropped() -> None:
                 f"lumberjack: {dropped} record(s) dropped before reaching the "
                 "store — the write buffer overflowed. Raise buffer_size or "
                 "lower flush_interval in init().",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+
+
+def _report_suppressed_bars() -> None:
+    """Say so if a bar ceiling hid part of the display.
+
+    Read by duck-typing, like `write_through` below: only the live-bar
+    renderer has a ceiling, and a renderer-specific counter does not earn a
+    field on `Session`.
+
+    The remedy deliberately does not say "raise the ceiling". A bar count that
+    hits it means log lines are not collapsing into shared shapes, and the
+    ceiling hides that rather than fixing it.
+    """
+    if _session is None:
+        return
+    try:
+        suppressed = getattr(_session.renderer, "suppressed_bars", 0)
+        if suppressed:
+            print(
+                f"lumberjack: {suppressed} progress bar(s) hidden by "
+                f"{MAX_BARS_ENV_VAR} — the ceiling is a debug aid, and a bar "
+                "count that reaches it means log lines are not collapsing "
+                "into shared shapes, which the ceiling hides rather than "
+                "fixes.",
                 file=sys.stderr,
             )
     except Exception:

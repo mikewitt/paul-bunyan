@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import warnings
 from typing import TYPE_CHECKING
 
 from lumberjack.schema import SourceKey
@@ -34,6 +35,48 @@ DEFAULT_MIN_REPEATS = 3
 #: and deliberately independent of log volume — a million records a second
 #: must still cost five redraws a second.
 DEFAULT_REFRESH_INTERVAL = 0.2
+
+#: Opt-in ceiling on how many bars the display draws. Unset means no ceiling.
+#:
+#: Deliberately an environment variable rather than an `init()` option, and
+#: deliberately absent from the README: it is a debug and terminal-compat aid,
+#: not something to reach for in production. A bar count high enough to want
+#: it is a *symptom* — either lumberjack is grouping too finely, or the code
+#: is logging in a way that cannot be grouped — and capping hides that symptom
+#: rather than treating it. Grouping by source location is a known-crude
+#: placeholder for template clustering, so the real remedy arrives with that.
+#: lumberjack: see issue #8
+MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
+
+
+def resolve_max_bars(override: int | None = None) -> int | None:
+    """The bar ceiling: `override`, else the environment, else None.
+
+    Follows the same split as `OutputModeDetector`: an out-of-range argument
+    is a caller's bug and raises, while a bad environment variable is a typo
+    by whoever launched the process, so it warns and carries on uncapped.
+    """
+    if override is not None:
+        if override <= 0:
+            raise ValueError(f"max_bars must be positive, got {override!r}")
+        return override
+
+    raw = os.environ.get(MAX_BARS_ENV_VAR)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0  # falls into the warning below
+    if value <= 0:
+        warnings.warn(
+            f"{MAX_BARS_ENV_VAR}={raw!r} is not a positive integer; "
+            f"drawing every bar.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    return value
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
