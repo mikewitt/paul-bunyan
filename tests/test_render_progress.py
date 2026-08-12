@@ -153,6 +153,87 @@ def test_records_written_by_another_writer_reach_the_bar(rig: _Rig, make_row):
     assert [b.count for b in rig.renderer.bars()] == [4]
 
 
+# --- the opt-in bar ceiling ------------------------------------------------
+
+
+def _capped_renderer(store: RecordStore, max_bars: int) -> RichProgressRenderer:
+    return RichProgressRenderer(
+        store,
+        stream=io.StringIO(),
+        min_repeats=3,
+        refresh_interval=0,
+        max_bars=max_bars,
+    )
+
+
+def test_the_ceiling_bounds_what_is_drawn(store: RecordStore, make_row):
+    renderer = _capped_renderer(store, max_bars=2)
+    try:
+        for lineno in range(5):
+            store.append([make_row(lineno=lineno) for _ in range(3)])
+        renderer.refresh()
+        assert len(renderer._tasks) == 2, "drew more bars than the ceiling allows"
+    finally:
+        renderer.close()
+
+
+def test_the_ceiling_does_not_touch_the_counts(store: RecordStore, make_row):
+    # The model tracks every source regardless; the ceiling is a property of
+    # the display. A capped run must not misreport what it captured.
+    renderer = _capped_renderer(store, max_bars=2)
+    try:
+        for lineno in range(5):
+            store.append([make_row(lineno=lineno) for _ in range(3)])
+        renderer.refresh()
+        assert len(renderer.bars()) == 5
+        assert sum(b.count for b in renderer.bars()) == 15
+    finally:
+        renderer.close()
+
+
+def test_the_ceiling_counts_what_it_hid(store: RecordStore, make_row):
+    renderer = _capped_renderer(store, max_bars=2)
+    try:
+        assert renderer.suppressed_bars == 0
+        for lineno in range(5):
+            store.append([make_row(lineno=lineno) for _ in range(3)])
+        renderer.refresh()
+        assert renderer.suppressed_bars == 3
+    finally:
+        renderer.close()
+
+
+def test_no_ceiling_draws_everything(store: RecordStore, make_row, monkeypatch):
+    monkeypatch.delenv("LUMBERJACK_MAX_BARS", raising=False)
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        for lineno in range(5):
+            store.append([make_row(lineno=lineno) for _ in range(3)])
+        renderer.refresh()
+        assert len(renderer._tasks) == 5
+        assert renderer.suppressed_bars == 0
+    finally:
+        renderer.close()
+
+
+def test_the_environment_sets_the_ceiling(store: RecordStore, make_row, monkeypatch):
+    # The whole point of the knob: reachable without touching init().
+    monkeypatch.setenv("LUMBERJACK_MAX_BARS", "1")
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        for lineno in range(4):
+            store.append([make_row(lineno=lineno) for _ in range(3)])
+        renderer.refresh()
+        assert len(renderer._tasks) == 1
+        assert renderer.suppressed_bars == 3
+    finally:
+        renderer.close()
+
+
 # --- lossy display, lossless store ----------------------------------------
 
 
