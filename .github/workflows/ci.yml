@@ -15,6 +15,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job pins its interpreter with actions/setup-python before setup-uv,
+# and the pin is deliberate. Left to itself `uv sync` resolves whatever
+# satisfies requires-python, so the single-interpreter jobs below would drift
+# as runners update and a version-specific failure would land in an unrelated
+# PR. The matrix passes ${{ matrix.python-version }} here for the same reason
+# — it is what makes the six legs genuinely six versions rather than six
+# copies of whatever uv picked.
 jobs:
   lint:
     # Its own job, not a step in the matrix below: style is a property of the
@@ -27,6 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
       # ruff lints, black formats — one tool per job, per the toolchain in
@@ -39,6 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
       # Strict for the shipped package: it ships py.typed, so downstream users
@@ -75,6 +88,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
       # No --all-extras: dev tooling, but none of the optional dependencies.
       - run: uv sync
@@ -96,6 +112,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
       # Fails if uv.lock has drifted from pyproject.toml, which would mean
       # every other job resolved something the lockfile does not describe.
@@ -136,6 +155,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
       - run: uv run pytest --cov-report=xml
