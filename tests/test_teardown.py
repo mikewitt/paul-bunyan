@@ -8,11 +8,16 @@ test_integration.py instead.
 
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Callable
 
 import pytest
 
 from lumberjack import teardown
+from lumberjack.handler import LumberjackHandler
+from lumberjack.pump import FlushPump
+from lumberjack.store import SQLiteRecordStore
 
 
 class _FakeRenderer:
@@ -44,11 +49,18 @@ class _FakeHandler:
 
 
 class _FakeStore:
-    def __init__(self) -> None:
-        self.appended: list[str] = []
+    """Lossless and complete — the guarantee the exit dump is built on."""
+
+    def __init__(self, rows: list[str] | None = None) -> None:
+        self.rows: list[str] = list(rows or [])
+        self.tailed: list[int] = []
 
     def append(self, rows: list[str]) -> None:
-        self.appended.extend(rows)
+        self.rows.extend(rows)
+
+    def tail(self, n: int) -> list[str]:
+        self.tailed.append(n)
+        return self.rows[-n:]
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +109,7 @@ def test_teardown_flushes_buffer_to_store():
     store = _FakeStore()
     teardown.install(renderer=renderer, handler=handler, store=store)
     teardown.run()
-    assert store.appended == ["a", "b"]
+    assert store.rows == ["a", "b"]
     assert handler.drained == 1
 
 
@@ -111,17 +123,25 @@ def test_teardown_is_idempotent():
     assert renderer.closed == 2
 
 
-def test_teardown_diagnostics_dumped_before_drain():
-    renderer = _FakeRenderer()
-    handler = _FakeHandler(rows=["a", "b"])
-    store = _FakeStore()
-    teardown.install(renderer=renderer, handler=handler, store=store, dump_last_n=5)
+def test_lossy_renderer_dump_replays_the_store_tail_to_stderr(capsys, make_row):
+    handler = _FakeHandler()
+    store = _FakeStore(rows=[make_row(message="swallowed by the bar")])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=handler,
+        store=store,
+        dump_last_n=5,
+    )
     teardown.run()
-    assert handler.peeked == [5]
+    assert "swallowed by the bar" in capsys.readouterr().err
+    assert store.tailed == [5]
+    assert handler.peeked == [], "the buffer is not a source for the dump"
 
 
-def test_lossy_renderer_dump_replays_records_to_stderr(capsys, make_row) -> None:
-    handler = _FakeHandler(rows=[make_row(message="swallowed by the bar")])
+def test_teardown_drains_before_dumping(capsys, make_row):
+    # The dump reads the store, so anything still sitting in the buffer at exit
+    # has to land there first — dump-then-drain would miss the run's whole tail.
+    handler = _FakeHandler(rows=[make_row(message="still in the buffer")])
     teardown.install(
         renderer=_FakeRenderer(write_through=False),
         handler=handler,
@@ -129,33 +149,68 @@ def test_lossy_renderer_dump_replays_records_to_stderr(capsys, make_row) -> None
         dump_last_n=5,
     )
     teardown.run()
-    assert "swallowed by the bar" in capsys.readouterr().err
+    assert "still in the buffer" in capsys.readouterr().err
+
+
+def test_dump_survives_the_flush_pump_draining_the_buffer(
+    capsys, wait_until: Callable[..., bool]
+):
+    # The regression this ordering exists for: with the pump running, the
+    # buffer is empty most of the time, so a buffer-sourced dump recovered
+    # nothing. Real handler, real store, real pump — what init() builds.
+    handler = LumberjackHandler(level=logging.DEBUG)
+    store = SQLiteRecordStore(":memory:")
+    pump = FlushPump(interval=0.001, flush=lambda: store.append(handler.drain()))
+    logger = logging.getLogger("teardown-pump-test")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    pump.start()
+    try:
+        for i in range(5):
+            logger.info("swallowed by the bar %d", i)
+        assert wait_until(lambda: len(store.recent()) == 5), "pump never drained"
+        assert handler.peek() == [], "the pump emptied the buffer, as it does"
+        teardown.install(
+            renderer=_FakeRenderer(write_through=False),
+            handler=handler,
+            store=store,
+            dump_last_n=50,
+        )
+        teardown.run()
+    finally:
+        pump.stop()
+        logger.removeHandler(handler)
+        store.close()
+    err = capsys.readouterr().err
+    assert "swallowed by the bar 0" in err
+    assert "swallowed by the bar 4" in err
 
 
 def test_write_through_renderer_is_not_dumped(make_row):
     # Regression: the atexit dump used to replay records the write-through
     # renderer had already printed, doubling every line of a normal run.
-    handler = _FakeHandler(rows=[make_row(message="already printed")])
+    store = _FakeStore(rows=[make_row(message="already printed")])
     teardown.install(
         renderer=_FakeRenderer(write_through=True),
-        handler=handler,
-        store=_FakeStore(),
+        handler=_FakeHandler(),
+        store=store,
         dump_last_n=5,
     )
     teardown.run()
-    assert handler.peeked == []
+    assert store.tailed == []
 
 
 def test_dump_last_n_zero_disables_the_dump(make_row):
-    handler = _FakeHandler(rows=[make_row()])
+    store = _FakeStore(rows=[make_row()])
     teardown.install(
         renderer=_FakeRenderer(write_through=False),
-        handler=handler,
-        store=_FakeStore(),
+        handler=_FakeHandler(),
+        store=store,
         dump_last_n=0,
     )
     teardown.run()
-    assert handler.peeked == []
+    assert store.tailed == []
 
 
 def test_uninstall_restores_previous_hook():

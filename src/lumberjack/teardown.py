@@ -11,6 +11,14 @@ is the only way to see them. A write-through renderer already printed every
 one, and replaying there would duplicate the entire session — so renderers
 declare `write_through` and this module honours it.
 
+At exit the order is drain-then-dump, and the drain is what makes the dump
+work: the dump reads `store.tail(n)`, so whatever is still in the handler's
+buffer has to land in the store first. Sourcing it from the buffer instead is
+not an option — the flush pump empties that every ~200ms, so "the last N
+records" would really mean "whatever the pump hadn't reached yet", which
+during a steady run is usually nothing at all. The store is lossless and
+complete, which is exactly the guarantee this diagnostic needs.
+
 Every step here is wrapped in try/except: a bug in lumberjack's own cleanup
 must never replace or hide the user's real traceback.
 """
@@ -92,10 +100,10 @@ def handle_exception(
 
 
 def run() -> None:
-    """atexit hook: stop the display, dump diagnostics, drain to the store."""
+    """atexit hook: stop the display, drain to the store, dump diagnostics."""
     _stop_live_display()
-    _dump_diagnostics()
     _flush_buffer()
+    _dump_diagnostics()
 
 
 def _stop_live_display() -> None:
@@ -107,14 +115,16 @@ def _stop_live_display() -> None:
 
 
 def _dump_diagnostics() -> None:
-    if _handler is None or _dump_last_n <= 0:
+    # Reads the store, never the handler's buffer — see the module docstring:
+    # by exit the pump has usually drained the buffer to nothing.
+    if _store is None or _dump_last_n <= 0:
         return
     # Unknown renderers are assumed lossy: replaying is noisy, but silently
     # dropping the only copy of a record is worse.
     if getattr(_renderer, "write_through", False):
         return
     try:
-        rows = _handler.peek(_dump_last_n)
+        rows = _store.tail(_dump_last_n)
         dumper = PlainTextRenderer(stream=sys.stderr)
         for row in rows:
             dumper.render(row)

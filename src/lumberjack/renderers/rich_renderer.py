@@ -97,7 +97,7 @@ class RichProgressRenderer:
 
     Lossy by construction: routine records are collapsed into a count rather
     than printed, so `write_through` is False and teardown replays the tail of
-    the buffer at exit. Records at `passthrough_level` and above still print
+    the store at exit. Records at `passthrough_level` and above still print
     above the bars, because a swallowed ERROR is never the right trade.
     """
 

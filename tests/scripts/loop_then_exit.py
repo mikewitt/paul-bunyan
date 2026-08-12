@@ -5,8 +5,9 @@ loop actually looks like.
 The parent test (test_integration.py) checks the whole premise in a real
 process: the loop's lines don't scroll, a bar is drawn instead, every record
 still lands in the store, and a WARNING still gets through. The env knobs
-exist so one script can cover both the clean-exit case and the lossy-renderer
-diagnostic dump, which needs the buffer left undrained.
+exist so one script can cover the clean-exit case and both sides of the
+lossy-renderer diagnostic dump — buffer already drained by the pump, and
+buffer still full at exit.
 """
 
 import logging

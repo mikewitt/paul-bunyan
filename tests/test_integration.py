@@ -143,7 +143,9 @@ def test_live_bar_writes_no_ansi_when_piped(scripts_dir, tmp_path):
 
 def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
     # The other half of the write_through=False contract: records the bar
-    # swallowed are replayed at exit, and still reach the store.
+    # swallowed are replayed at exit, and still reach the store. Regression:
+    # the dump used to read the handler's buffer, which the flush pump — left
+    # running here, as in any real run — has emptied long before exit.
     db_path = tmp_path / "records.db"
     result = _run_script(
         scripts_dir,
@@ -152,8 +154,26 @@ def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
             "LUMBERJACK_TEST_DB_PATH": str(db_path),
             "LUMBERJACK_TEST_RECORD_COUNT": "20",
             "LUMBERJACK_TEST_DUMP_LAST_N": "5",
-            # Pump and final flush off, so the tail is still in the buffer the
-            # dump reads from at exit.
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert b"processing item 19" in result.stderr, result.stderr
+    assert b"processing item 0" not in result.stderr, "dumped more than the tail"
+    assert _store_count(db_path) == 21
+
+
+def test_an_undrained_buffer_still_reaches_the_exit_dump(scripts_dir, tmp_path):
+    # The ordering guard, from the other side: pump and final flush both off,
+    # so at exit the whole run is still in the buffer. The dump reads the
+    # store, so the atexit drain has to run first or it dumps nothing.
+    db_path = tmp_path / "records.db"
+    result = _run_script(
+        scripts_dir,
+        "loop_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(db_path),
+            "LUMBERJACK_TEST_RECORD_COUNT": "20",
+            "LUMBERJACK_TEST_DUMP_LAST_N": "5",
             "LUMBERJACK_TEST_FLUSH_INTERVAL": "0",
             "LUMBERJACK_TEST_FINAL_FLUSH": "0",
         },
