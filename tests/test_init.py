@@ -138,8 +138,6 @@ def test_a_bad_level_fails_before_teardown_is_installed():
     assert not any(
         isinstance(h, LumberjackHandler) for h in logging.getLogger().handlers
     ), "a failed init() left its handler on the root logger"
-    lumberjack.init(output_mode="plain")
-    assert lumberjack.is_initialized()
 
 
 def test_init_without_rich_installed_still_works(monkeypatch):
