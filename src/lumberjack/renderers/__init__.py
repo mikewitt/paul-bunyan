@@ -13,6 +13,7 @@ from lumberjack.detect import OutputMode
 
 if TYPE_CHECKING:
     from lumberjack.schema import LogRecordRow
+    from lumberjack.store import RecordStore
 
 
 @runtime_checkable
@@ -36,10 +37,27 @@ def rich_available() -> bool:
     return True
 
 
-def create_renderer(mode: OutputMode, *, stream: TextIO | None = None) -> Renderer:
-    if mode is OutputMode.RICH and rich_available():
-        from lumberjack.renderers.rich_renderer import RichTerminalRenderer
+def create_renderer(
+    mode: OutputMode,
+    *,
+    stream: TextIO | None = None,
+    store: RecordStore | None = None,
+) -> Renderer:
+    """Pick a renderer for the detected output mode.
 
+    Only RICH mode — an interactive TTY with `rich` installed — gets the live
+    bar, and only when there's a store to read counts from; a bar redrawing
+    itself into a pipe or a log file is noise at best. Everything else stays
+    on the write-through plain renderer.
+    """
+    if mode is OutputMode.RICH and rich_available():
+        from lumberjack.renderers.rich_renderer import (
+            RichProgressRenderer,
+            RichTerminalRenderer,
+        )
+
+        if store is not None:
+            return RichProgressRenderer(store, stream=stream)
         return RichTerminalRenderer(stream=stream)
 
     from lumberjack.renderers.plain import PlainTextRenderer

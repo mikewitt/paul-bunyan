@@ -75,7 +75,9 @@ def init(
     _owns_store = store is None
     resolved_store = store if store is not None else SQLiteRecordStore(":memory:")
     mode = OutputModeDetector(override=output_mode).detect()
-    renderer = create_renderer(mode)
+    # The renderer gets the store, not just the record stream: a live bar
+    # reads its counts back out of the store (store, then render).
+    renderer = create_renderer(mode, store=resolved_store)
 
     handler = LumberjackHandler(
         buffer_size=buffer_size,
@@ -127,6 +129,10 @@ def shutdown() -> None:
         _pump.stop()
         _pump = None
     flush()
+    if _renderer is not None:
+        # A live display owns a timer thread and the terminal; leaving it
+        # running past shutdown() would leak both.
+        _renderer.close()
     teardown.uninstall()
     root = logging.getLogger()
     if _handler is not None:
