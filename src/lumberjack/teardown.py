@@ -54,7 +54,9 @@ def install(
 ) -> None:
     global _installed, _prev_excepthook, _renderer, _handler, _store, _dump_last_n
     if _installed:
-        return
+        raise RuntimeError(
+            "teardown.install() already called; call teardown.uninstall() first"
+        )
     _prev_excepthook = sys.excepthook
     _renderer = renderer
     _handler = handler

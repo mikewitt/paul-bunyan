@@ -81,11 +81,12 @@ def test_install_sets_excepthook():
     assert not teardown.is_installed()
 
 
-def test_install_twice_is_a_noop():
+def test_install_twice_raises():
     renderer1, renderer2 = _FakeRenderer(), _FakeRenderer()
     handler, store = _FakeHandler(), _FakeStore()
     teardown.install(renderer=renderer1, handler=handler, store=store)
-    teardown.install(renderer=renderer2, handler=handler, store=store)
+    with pytest.raises(RuntimeError, match="already called"):
+        teardown.install(renderer=renderer2, handler=handler, store=store)
     assert teardown.current_renderer() is renderer1
 
 
