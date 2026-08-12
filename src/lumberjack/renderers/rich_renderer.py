@@ -32,6 +32,10 @@ _LEVEL_STYLES = {
 
 
 class RichTerminalRenderer:
+    # Still one line per record — no in-place redraw yet, so nothing is lost
+    # and teardown must not replay. A future live-bar renderer sets False.
+    write_through = True
+
     def __init__(self, *, stream: TextIO | None = None) -> None:
         if Console is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR

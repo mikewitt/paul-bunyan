@@ -7,7 +7,7 @@ to the plain renderer instead of failing at import time.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TextIO
+from typing import TYPE_CHECKING, Protocol, TextIO, runtime_checkable
 
 from lumberjack.detect import OutputMode
 
@@ -15,7 +15,15 @@ if TYPE_CHECKING:
     from lumberjack.schema import LogRecordRow
 
 
+@runtime_checkable
 class Renderer(Protocol):
+    #: True when every record reaching `render()` is written out verbatim.
+    #: Teardown's diagnostic dump exists to recover records a *lossy* live
+    #: display swallowed; replaying them for a write-through renderer would
+    #: just print the whole session twice. Renderers that redraw in place
+    #: (progress bars) must declare False.
+    write_through: bool
+
     def render(self, row: LogRecordRow) -> None: ...
     def close(self) -> None: ...
 

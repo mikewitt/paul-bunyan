@@ -64,6 +64,27 @@ def test_piped_output_has_no_ansi_in_plain_mode(scripts_dir):
     assert not _ANSI_RE.search(result.stderr)
 
 
+def test_write_through_records_printed_once_on_clean_exit(scripts_dir, tmp_path):
+    # Regression: the atexit diagnostic dump replayed the buffer unconditionally,
+    # so a write-through renderer printed the entire run a second time.
+    result = _run_script(
+        scripts_dir,
+        "log_then_exit.py",
+        env={
+            "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
+            "LUMBERJACK_TEST_RECORD_COUNT": "5",
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    for i in range(5):
+        assert result.stderr.count(f"record {i}".encode()) == 1, result.stderr
+
+
+def test_write_through_records_printed_once_after_traceback(scripts_dir):
+    result = _run_script(scripts_dir, "raise_after_init.py")
+    assert result.stderr.count(b"about to fail") == 1, result.stderr
+
+
 def test_no_records_lost_on_process_exit(scripts_dir, tmp_path):
     db_path = tmp_path / "records.db"
     result = _run_script(

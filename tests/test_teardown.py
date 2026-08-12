@@ -16,7 +16,11 @@ from lumberjack import teardown
 
 
 class _FakeRenderer:
-    def __init__(self) -> None:
+    """Lossy by default — a live display that swallows records is the case
+    the diagnostic dump exists for."""
+
+    def __init__(self, *, write_through: bool = False) -> None:
+        self.write_through = write_through
         self.closed = 0
 
     def close(self) -> None:
@@ -58,9 +62,11 @@ def test_install_sets_excepthook():
     teardown.install(
         renderer=_FakeRenderer(), handler=_FakeHandler(), store=_FakeStore()
     )
-    assert sys.excepthook is teardown._excepthook
+    assert sys.excepthook is teardown.handle_exception
+    assert teardown.is_installed()
     teardown.uninstall()
     assert sys.excepthook is prev_hook
+    assert not teardown.is_installed()
 
 
 def test_install_twice_is_a_noop():
@@ -68,7 +74,7 @@ def test_install_twice_is_a_noop():
     handler, store = _FakeHandler(), _FakeStore()
     teardown.install(renderer=renderer1, handler=handler, store=store)
     teardown.install(renderer=renderer2, handler=handler, store=store)
-    assert teardown._renderer is renderer1
+    assert teardown.current_renderer() is renderer1
 
 
 def test_excepthook_closes_renderer_before_delegating(monkeypatch):
@@ -80,7 +86,7 @@ def test_excepthook_closes_renderer_before_delegating(monkeypatch):
     monkeypatch.setattr(
         teardown, "_prev_excepthook", lambda *a: calls.append("prev_hook")
     )
-    teardown._excepthook(RuntimeError, RuntimeError("x"), None)
+    teardown.handle_exception(RuntimeError, RuntimeError("x"), None)
     assert renderer.closed == 1
     assert calls == ["prev_hook"]
 
@@ -90,7 +96,7 @@ def test_teardown_flushes_buffer_to_store():
     handler = _FakeHandler(rows=["a", "b"])
     store = _FakeStore()
     teardown.install(renderer=renderer, handler=handler, store=store)
-    teardown._teardown()
+    teardown.run()
     assert store.appended == ["a", "b"]
     assert handler.drained == 1
 
@@ -100,8 +106,8 @@ def test_teardown_is_idempotent():
     handler = _FakeHandler(rows=["a"])
     store = _FakeStore()
     teardown.install(renderer=renderer, handler=handler, store=store)
-    teardown._teardown()
-    teardown._teardown()  # must not raise
+    teardown.run()
+    teardown.run()  # must not raise
     assert renderer.closed == 2
 
 
@@ -110,8 +116,46 @@ def test_teardown_diagnostics_dumped_before_drain():
     handler = _FakeHandler(rows=["a", "b"])
     store = _FakeStore()
     teardown.install(renderer=renderer, handler=handler, store=store, dump_last_n=5)
-    teardown._teardown()
+    teardown.run()
     assert handler.peeked == [5]
+
+
+def test_lossy_renderer_dump_replays_records_to_stderr(capsys, make_row) -> None:
+    handler = _FakeHandler(rows=[make_row(message="swallowed by the bar")])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert "swallowed by the bar" in capsys.readouterr().err
+
+
+def test_write_through_renderer_is_not_dumped(make_row):
+    # Regression: the atexit dump used to replay records the write-through
+    # renderer had already printed, doubling every line of a normal run.
+    handler = _FakeHandler(rows=[make_row(message="already printed")])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=True),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert handler.peeked == []
+
+
+def test_dump_last_n_zero_disables_the_dump(make_row):
+    handler = _FakeHandler(rows=[make_row()])
+    teardown.install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=handler,
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    assert handler.peeked == []
 
 
 def test_uninstall_restores_previous_hook():

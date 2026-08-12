@@ -16,6 +16,8 @@ from lumberjack.schema import LogRecordRow
 
 
 class PlainTextRenderer:
+    write_through = True
+
     def __init__(
         self, *, stream: TextIO | None = None, json_lines: bool = False
     ) -> None:
