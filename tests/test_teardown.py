@@ -104,14 +104,32 @@ def test_install_sets_excepthook():
     assert sys.excepthook is prev_hook
 
 
-def test_install_twice_keeps_the_first_session():
-    # Asserted through behaviour rather than a state accessor: the session
-    # teardown kept is the one whose renderer it closes.
+def test_install_twice_raises():
+    # There is one excepthook and one process exit to own, so a second
+    # installer is asking for something this module cannot give it.
+    _install()
+    with pytest.raises(RuntimeError, match="already installed"):
+        _install()
+
+
+def test_a_rejected_install_leaves_the_first_session_intact():
+    # Raising must not be the same as half-installing: the session teardown
+    # still holds is the one whose renderer it closes.
     renderer1, renderer2 = _FakeRenderer(), _FakeRenderer()
     _install(renderer=renderer1)
-    _install(renderer=renderer2)
+    with pytest.raises(RuntimeError):
+        _install(renderer=renderer2)
     teardown.run()
     assert (renderer1.closed, renderer2.closed) == (1, 0)
+
+
+def test_install_works_again_after_uninstall():
+    renderer1, renderer2 = _FakeRenderer(), _FakeRenderer()
+    _install(renderer=renderer1)
+    teardown.uninstall()
+    _install(renderer=renderer2)
+    teardown.run()
+    assert (renderer1.closed, renderer2.closed) == (0, 1)
 
 
 def test_excepthook_closes_renderer_before_delegating(monkeypatch):

@@ -33,11 +33,22 @@ _prev_excepthook = None
 
 
 def install(session: Session) -> None:
+    """Take ownership of `sys.excepthook` and the atexit hook for `session`.
+
+    Raises RuntimeError if already installed, rather than keeping the first
+    session and discarding this one in silence. There is only one excepthook
+    and one process exit to own, so a second caller is not asking for a
+    no-op — it is asking for something this module cannot give it, and
+    returning None either way left it no way to find out.
+
+    `uninstall()` is deliberately not symmetrical: undoing nothing is a
+    coherent request, which is the same split `init()` and `shutdown()` make.
+    """
     global _session, _prev_excepthook
     if _session is not None:
-        # Silently discards the new session, where init() raises.
-        # lumberjack: see issue #13
-        return
+        raise RuntimeError(
+            "lumberjack teardown is already installed; call uninstall() first"
+        )
     _prev_excepthook = sys.excepthook
     _session = session
     sys.excepthook = handle_exception
@@ -45,6 +56,7 @@ def install(session: Session) -> None:
 
 
 def uninstall() -> None:
+    """Give the excepthook and atexit hook back. A no-op if not installed."""
     global _session, _prev_excepthook
     if _session is None:
         return

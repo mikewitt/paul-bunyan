@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import sys
 
 import pytest
 
 import lumberjack
+from lumberjack import teardown
 from lumberjack.detect import OutputMode
+from lumberjack.handler import LumberjackHandler
 from lumberjack.store import SQLiteRecordStore
 
 
@@ -114,6 +117,27 @@ def test_init_is_retryable_after_a_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="renderer boom"):
         lumberjack.init(output_mode="plain")
     monkeypatch.undo()
+    lumberjack.init(output_mode="plain")
+    assert lumberjack.is_initialized()
+
+
+def test_a_bad_level_fails_before_teardown_is_installed():
+    """Everything that can raise must do so before `teardown.install()`.
+
+    Not hypothetical: `init(level=...)` is validated by `logging`, and
+    `teardown.install()` now raises on a second call rather than shrugging.
+    Install teardown before something that can still fail and a failed
+    `init()` would leave it owning the excepthook with no session to reach
+    it, turning the retry into a confusing "already installed".
+    """
+    with pytest.raises(ValueError, match="Unknown level"):
+        lumberjack.init(level="LOUD", output_mode="plain")
+    assert (
+        sys.excepthook is not teardown.handle_exception
+    ), "teardown outlived a failed init() and still owns the excepthook"
+    assert not any(
+        isinstance(h, LumberjackHandler) for h in logging.getLogger().handlers
+    ), "a failed init() left its handler on the root logger"
     lumberjack.init(output_mode="plain")
     assert lumberjack.is_initialized()
 
