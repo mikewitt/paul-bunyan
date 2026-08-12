@@ -26,10 +26,14 @@ class PlainTextRenderer:
 
     def render(self, row: LogRecordRow) -> None:
         if self.json_lines:
+            # asdict() deepcopies every field, per record.
+            # lumberjack: see issue #18
             line = json.dumps(
                 dataclasses.asdict(row), default=str, separators=(",", ":")
             )
         else:
+            # Naive local time here, raw epoch float in JSON — two
+            # representations from one renderer. lumberjack: see issue #14
             ts = datetime.datetime.fromtimestamp(row.created).isoformat(
                 timespec="milliseconds"
             )

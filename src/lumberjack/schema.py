@@ -43,6 +43,7 @@ class LogRecordRow:
     def from_log_record(cls, record: logging.LogRecord) -> LogRecordRow:
         exc_text = record.exc_text
         if exc_text is None and record.exc_info:
+            # lumberjack: see issue #18 (formatter could be a singleton)
             exc_text = logging.Formatter().formatException(record.exc_info)
 
         task_id: int | None = None
@@ -51,6 +52,8 @@ class LogRecordRow:
         except RuntimeError:
             task = None
         if task is not None:
+            # id() is reused after GC, so sequential tasks can collide.
+            # lumberjack: see issue #4
             task_id = id(task)
 
         return cls(

@@ -34,6 +34,8 @@ __all__ = [
     "__version__",
 ]
 
+# Module-level lifecycle state: unguarded by any lock, and mirrored by
+# teardown.py's own copies. lumberjack: see issues #11, #17
 _installed = False
 _handler: LumberjackHandler | None = None
 _store: RecordStore | None = None

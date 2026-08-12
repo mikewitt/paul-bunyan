@@ -19,7 +19,12 @@ DEFAULT_FLUSH_INTERVAL = 0.2
 
 
 class FlushPump:
-    """Daemon thread that calls `flush` every `interval` seconds."""
+    """Daemon thread that calls `flush` every `interval` seconds.
+
+    Named for the buffer→store job, but `RichProgressRenderer` uses it as its
+    redraw timer too — it is really a generic periodic timer.
+    lumberjack: see issue #16
+    """
 
     def __init__(
         self, *, interval: float, flush: Callable[[], None], name: str | None = None

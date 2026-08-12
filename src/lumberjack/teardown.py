@@ -47,6 +47,8 @@ def install(
 ) -> None:
     global _installed, _prev_excepthook, _renderer, _handler, _store, _dump_last_n
     if _installed:
+        # Silently discards the new arguments, where init() raises.
+        # lumberjack: see issue #13
         return
     _prev_excepthook = sys.excepthook
     _renderer = renderer

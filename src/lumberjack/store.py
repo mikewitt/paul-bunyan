@@ -43,6 +43,9 @@ _COLUMNS = (
 
 
 class RecordStore(abc.ABC):
+    # These methods carry the contract every backend implements against, and
+    # none of it is written down yet. lumberjack: see issue #15
+
     @abc.abstractmethod
     def append(self, rows: Sequence[LogRecordRow]) -> None: ...
 
@@ -125,6 +128,7 @@ class SQLiteRecordStore(RecordStore):
     def append(self, rows: Sequence[LogRecordRow]) -> None:
         if not rows:
             return
+        # Rebuilt per call; _COLUMNS is constant. lumberjack: see issue #18
         placeholders = ", ".join("?" for _ in _COLUMNS)
         sql = f"INSERT INTO records ({', '.join(_COLUMNS)}) VALUES ({placeholders})"
         values = [tuple(getattr(row, col) for col in _COLUMNS) for row in rows]
@@ -139,6 +143,7 @@ class SQLiteRecordStore(RecordStore):
     def recent(
         self, n: int | None = None, since: float | None = None
     ) -> Sequence[StoredRecord]:
+        # n=None materializes the whole store. lumberjack: see issue #7
         sql = "SELECT * FROM records"
         params: list[object] = []
         if since is not None:
@@ -171,6 +176,8 @@ class SQLiteRecordStore(RecordStore):
     def count_by_source(
         self, window_seconds: float | None = None
     ) -> Mapping[SourceKey, int]:
+        # Full GROUP BY, and the renderer calls this every 200ms; needs to
+        # become incremental before Phase 4. lumberjack: see issue #5
         sql = "SELECT pathname, lineno, func_name, COUNT(*) AS cnt FROM records"
         params: list[object] = []
         if window_seconds is not None:
@@ -195,6 +202,8 @@ class SQLiteRecordStore(RecordStore):
                     "DELETE FROM records WHERE created < ?", (before,)
                 )
             else:
+                # NOT IN against a large subquery; ~2.2s at 1M rows, holding
+                # the lock against every reader. lumberjack: see issue #6
                 cur = self._conn.execute(
                     "DELETE FROM records WHERE id NOT IN "
                     "(SELECT id FROM records ORDER BY id DESC LIMIT ?)",

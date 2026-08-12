@@ -64,6 +64,8 @@ class RepeatingSourceModel:
         self.min_repeats = min_repeats
         self.window_seconds = window_seconds
         # Insertion-ordered, so a source keeps the slot it was first given.
+        # Unbounded: 300 repeating log sites means 300 bars.
+        # lumberjack: see issue #8
         self._counts: dict[SourceKey, int] = {}
 
     def poll(self) -> list[BarState]:
@@ -73,6 +75,8 @@ class RepeatingSourceModel:
         later drops its count below the threshold — a bar that vanished
         mid-run would read as "this work stopped existing".
         """
+        # Re-read wholesale rather than accumulated, so a count can fall after
+        # an evict() or inside a window. lumberjack: see issue #9
         counts = self._store.count_by_source(self.window_seconds)
         # Newly-qualifying sources are added busiest-first; sources already
         # tracked keep their position, so bars never jump around on screen.
