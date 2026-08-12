@@ -28,8 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
       - run: uv sync --all-extras
       # ruff lints, black formats — one tool per job, per the toolchain in
       # CLAUDE.md. `ruff format` is deliberately not run: it would be a second
@@ -42,8 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
       - run: uv sync --all-extras
       # Strict for the shipped package: it ships py.typed, so downstream users
       # type-check against these annotations and a wrong one is our bug.
@@ -63,9 +59,10 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
       - run: uv run pytest
 
@@ -79,8 +76,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
       # No --all-extras: dev tooling, but none of the optional dependencies.
       - run: uv sync
       - name: Assert rich really is absent
@@ -102,8 +97,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
       # Fails if uv.lock has drifted from pyproject.toml, which would mean
       # every other job resolved something the lockfile does not describe.
       - run: uv lock --check
@@ -144,8 +137,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
       - run: uv sync --all-extras
       - run: uv run pytest --cov-report=xml
       # Installed ephemerally rather than as a dev dependency: genbadge pulls
