@@ -10,9 +10,10 @@ collapses a thousand records into one line, so replaying the tail at exit is
 the only way to see them. Write-through renderers declare themselves and are
 skipped, since replaying there would print the whole session twice.
 
-The exit order is drain-then-dump: the dump reads `store.recent(n)`, so the
-handler's buffer has to reach the store first. Every step is wrapped in
-try/except — a bug in lumberjack's own cleanup must never hide the user's
+The exit order is drain first, then everything that reads the store: both the
+dump and a live bar's closing frame come from `_session.store`, so the
+handler's buffer has to land there before either runs. Every step is wrapped
+in try/except — a bug in lumberjack's own cleanup must never hide the user's
 real traceback.
 """
 
@@ -78,9 +79,22 @@ def handle_exception(
 
 
 def run() -> None:
-    """atexit hook: stop the display, drain to the store, dump diagnostics."""
-    _stop_live_display()
+    """atexit hook: drain to the store, stop the display, dump diagnostics.
+
+    Drain first. A live bar draws its closing frame from the store, so
+    stopping the display before the buffer reaches it leaves the run's final
+    count short — or, with the pump disabled, leaves the store empty and the
+    bar never drawn at all.
+
+    Stopping the display first is what the *excepthook* path does, and for
+    good reason: there a traceback is seconds away and the cursor has to come
+    back before it. That urgency does not apply here. By the time this atexit
+    hook runs, an exception has already been through `handle_exception()` and
+    the display is already down, so `_stop_live_display()` below is a no-op
+    on the path that cared.
+    """
     _flush_buffer()
+    _stop_live_display()
     _report_dropped()
     _dump_diagnostics()
 
