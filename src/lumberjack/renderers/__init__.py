@@ -7,6 +7,7 @@ to the plain renderer instead of failing at import time.
 
 from __future__ import annotations
 
+import importlib.util
 from typing import TYPE_CHECKING, Protocol, TextIO, runtime_checkable
 
 from lumberjack.detect import OutputMode
@@ -29,11 +30,7 @@ class Renderer(Protocol):
 
 
 def rich_available() -> bool:
-    try:
-        import rich  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return importlib.util.find_spec("rich") is not None
 
 
 def create_renderer(

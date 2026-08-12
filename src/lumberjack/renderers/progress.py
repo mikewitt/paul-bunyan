@@ -94,13 +94,17 @@ class RepeatingSourceModel:
         self._watermark = delta.last_id
         for source, count in delta.counts.items():
             self._totals[source] = self._totals.get(source, 0) + count
-        # Newly-qualifying sources join busiest-first; those already shown
-        # keep the slot they were first given.
+        # Only a source that just gained records can newly cross the
+        # threshold — every source already over it was promoted on the poll
+        # that took it there — so this scans the delta rather than every
+        # source ever seen. Newly-qualifying ones join busiest-first; those
+        # already shown keep the slot they were first given.
         fresh = sorted(
             (
-                (source, total)
-                for source, total in self._totals.items()
-                if total >= self.min_repeats and source not in self._shown_set
+                (source, self._totals[source])
+                for source in delta.counts
+                if self._totals[source] >= self.min_repeats
+                and source not in self._shown_set
             ),
             key=lambda item: (-item[1], item[0]),
         )

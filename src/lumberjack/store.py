@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from operator import attrgetter
 from typing import NamedTuple
 
 from lumberjack.schema import LogRecordRow, SourceKey, StoredRecord
@@ -54,6 +55,9 @@ _COLUMNS = (
     "parent_task_id",
     "template_id",
 )
+_GET_COLUMNS = attrgetter(*_COLUMNS)
+_PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS)
+_INSERT_SQL = f"INSERT INTO records ({', '.join(_COLUMNS)}) VALUES ({_PLACEHOLDERS})"
 
 
 class RecordStore(abc.ABC):
@@ -142,12 +146,9 @@ class SQLiteRecordStore(RecordStore):
     def append(self, rows: Sequence[LogRecordRow]) -> None:
         if not rows:
             return
-        # Rebuilt per call; _COLUMNS is constant. lumberjack: see issue #18
-        placeholders = ", ".join("?" for _ in _COLUMNS)
-        sql = f"INSERT INTO records ({', '.join(_COLUMNS)}) VALUES ({placeholders})"
-        values = [tuple(getattr(row, col) for col in _COLUMNS) for row in rows]
+        values = list(map(_GET_COLUMNS, rows))
         with self._lock:
-            self._conn.executemany(sql, values)
+            self._conn.executemany(_INSERT_SQL, values)
             self._conn.commit()
 
     def _row_to_stored(self, row: sqlite3.Row) -> StoredRecord:
