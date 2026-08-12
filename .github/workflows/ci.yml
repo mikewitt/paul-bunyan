@@ -24,3 +24,34 @@ jobs:
       - run: uv run ruff check .
       - run: uv run black --check .
       - run: uv run pytest
+
+  coverage-badge:
+    # Trunk pushes only. A PR must never push commits back, and a single
+    # writer keeps concurrent runs from racing on the same file.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run pytest --cov-report=xml
+      # Installed ephemerally rather than as a dev dependency: genbadge pulls
+      # in Pillow, which local development has no reason to carry.
+      - run: uv run --with "genbadge[coverage]" genbadge coverage -i coverage.xml -o coverage.svg
+      - name: Commit badge if coverage changed
+        run: |
+          if git diff --quiet -- coverage.svg; then
+            echo "Coverage unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage.svg
+          # [skip ci] stops this push from re-triggering the workflow.
+          git commit -m "Update coverage badge [skip ci]"
+          git push

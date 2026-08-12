@@ -1,5 +1,8 @@
 # lumberjack
 
+[![CI](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml/badge.svg?branch=daddy)](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml)
+[![Coverage](coverage.svg)](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml)
+
 A drop-in UX layer for Python's stdlib `logging`. Capture every log record at
 full fidelity into a queryable store, while rendering something concise —
 instead of a thousand scrolling `DEBUG` lines, render progress.
