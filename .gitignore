@@ -4,7 +4,11 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .coverage
+# Parallel coverage writes one file per process before combining them; an
+# interrupted run leaves them behind.
+.coverage.*
 coverage.xml
 htmlcov/
 dist/

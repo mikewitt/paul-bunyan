@@ -10,6 +10,15 @@ from lumberjack.detect import OutputMode
 from lumberjack.store import SQLiteRecordStore
 
 
+def _raise(exc: Exception):
+    """A stand-in callable that fails, for exercising init()'s unwind path."""
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise exc
+
+    return _fail
+
+
 def test_init_replaces_root_handlers_by_default():
     root = logging.getLogger()
     sentinel = logging.NullHandler()
@@ -47,6 +56,68 @@ def test_shutdown_restores_previous_handlers():
         root.removeHandler(sentinel)
 
 
+def test_shutdown_restores_the_root_level():
+    """init() takes over the level too, so shutdown() has to give it back."""
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    lumberjack.init(level=logging.DEBUG, output_mode="plain")
+    assert root.level == logging.DEBUG
+    lumberjack.shutdown()
+    assert root.level == logging.WARNING
+
+
+def test_failed_init_closes_the_store_it_created(monkeypatch):
+    """A store nobody can reach is a leak; init() must not leave one behind."""
+    created: list[SQLiteRecordStore] = []
+    real_init = SQLiteRecordStore.__init__
+
+    def spy(self, path=":memory:"):
+        real_init(self, path)
+        created.append(self)
+
+    monkeypatch.setattr(SQLiteRecordStore, "__init__", spy)
+    monkeypatch.setattr(
+        lumberjack, "create_renderer", _raise(RuntimeError("renderer boom"))
+    )
+
+    with pytest.raises(RuntimeError, match="renderer boom"):
+        lumberjack.init(output_mode="plain")
+
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].recent()
+
+
+def test_failed_init_leaves_the_root_logger_alone(monkeypatch):
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+    root.setLevel(logging.WARNING)
+    monkeypatch.setattr(
+        lumberjack, "create_renderer", _raise(RuntimeError("renderer boom"))
+    )
+    try:
+        with pytest.raises(RuntimeError, match="renderer boom"):
+            lumberjack.init(level=logging.DEBUG, output_mode="plain")
+        assert sentinel in root.handlers
+        assert root.level == logging.WARNING
+        assert not lumberjack.is_initialized()
+    finally:
+        root.removeHandler(sentinel)
+
+
+def test_init_is_retryable_after_a_failure(monkeypatch):
+    """A failed init() must not wedge the module into a half-installed state."""
+    monkeypatch.setattr(
+        lumberjack, "create_renderer", _raise(RuntimeError("renderer boom"))
+    )
+    with pytest.raises(RuntimeError, match="renderer boom"):
+        lumberjack.init(output_mode="plain")
+    monkeypatch.undo()
+    lumberjack.init(output_mode="plain")
+    assert lumberjack.is_initialized()
+
+
 def test_init_without_rich_installed_still_works(monkeypatch):
     monkeypatch.setattr("lumberjack.renderers.rich_available", lambda: False)
     lumberjack.init(output_mode="rich")
@@ -58,7 +129,7 @@ def test_init_captures_log_records_into_buffer():
     handler = lumberjack.init(output_mode="plain")
     logger = logging.getLogger("capture-test")
     logger.info("captured")
-    assert any(r.message == "captured" for r in handler.peek())
+    assert any(r.message == "captured" for r in handler.drain())
 
 
 def test_shutdown_without_init_is_a_noop():

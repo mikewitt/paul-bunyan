@@ -19,7 +19,12 @@ DEFAULT_FLUSH_INTERVAL = 0.2
 
 
 class FlushPump:
-    """Daemon thread that calls `flush` every `interval` seconds."""
+    """Daemon thread that calls `flush` every `interval` seconds.
+
+    Named for the buffer→store job, but `RichProgressRenderer` uses it as its
+    redraw timer too — it is really a generic periodic timer.
+    lumberjack: see issue #16
+    """
 
     def __init__(
         self, *, interval: float, flush: Callable[[], None], name: str | None = None
@@ -47,8 +52,8 @@ class FlushPump:
         self._thread.start()
 
     def _run(self) -> None:
-        # wait() returns True only once stop() fires, so this doubles as an
-        # interruptible sleep — stop() never waits out a full interval.
+        # wait() doubles as an interruptible sleep: stop() is never left
+        # waiting out a full interval.
         while not self._stop.wait(self.interval):
             try:
                 self._flush()

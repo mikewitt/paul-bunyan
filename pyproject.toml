@@ -25,7 +25,14 @@ duckdb = ["duckdb>=0.10"]
 otel = ["opentelemetry-api>=1.24", "opentelemetry-sdk>=1.24"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "black>=24.0", "pre-commit>=3.6"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "black>=24.0",
+    "pre-commit>=3.6",
+    "mypy>=2.3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/mikewitt/paul-bunyan"
@@ -43,10 +50,26 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.black]
 target-version = ["py312"]
 
+[tool.mypy]
+python_version = "3.12"
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unused_configs = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=lumberjack --cov-report=term-missing"
+filterwarnings = ["error"]
 
 [tool.coverage.run]
 source = ["lumberjack"]
 branch = true
+# The excepthook, atexit and file-backed-store paths only run in the
+# subprocesses test_integration.py spawns. Without this their coverage is
+# invisible, and "uncovered" stops meaning "untested".
+parallel = true
+concurrency = ["thread", "multiprocessing"]
+sigterm = true
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "\\.\\.\\."]

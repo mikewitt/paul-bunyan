@@ -24,8 +24,10 @@ pytest.importorskip("rich")
 import lumberjack  # noqa: E402
 import lumberjack.renderers.rich_renderer as rich_renderer_module  # noqa: E402
 from lumberjack import teardown  # noqa: E402
+from lumberjack.detect import OutputMode  # noqa: E402
 from lumberjack.handler import LumberjackHandler  # noqa: E402
 from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
+from lumberjack.session import Session  # noqa: E402
 from lumberjack.store import RecordStore  # noqa: E402
 
 _TIMER_THREAD = "lumberjack-progress"
@@ -173,7 +175,16 @@ def test_teardown_replays_swallowed_records_at_exit(rig: _Rig, capsys):
     for i in range(5):
         rig.logger.info("processing item %d", i)
     teardown.install(
-        renderer=rig.renderer, handler=rig.handler, store=rig.store, dump_last_n=50
+        Session(
+            handler=rig.handler,
+            store=rig.store,
+            renderer=rig.renderer,
+            output_mode=OutputMode.RICH,
+            owns_store=False,
+            dump_last_n=50,
+            prev_handlers=[],
+            prev_level=logging.WARNING,
+        )
     )
     try:
         teardown.run()

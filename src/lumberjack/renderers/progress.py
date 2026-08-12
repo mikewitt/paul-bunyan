@@ -1,19 +1,14 @@
 """Naive repeating-source detection behind the Phase 1 live bar.
 
-This is deliberately *not* `RepetitionAnalyzer` (Phase 4): no template
-extraction, no message masking, no clustering. Here "a repeating log shape"
-means "records emitted from the same source location", which the store
-already groups for free — `count_by_source()` keys on
-(pathname, lineno, func_name), and a `logger.debug(...)` inside a loop hits
-the same line on every iteration. That is enough to prove the premise: a log
-line that recurs is progress signal, not noise.
+Deliberately *not* `RepetitionAnalyzer` (Phase 4): no template extraction, no
+masking, no clustering. "A repeating log shape" here means "records from the
+same source location", which `count_by_source()` already groups for free — a
+`logger.debug(...)` inside a loop hits the same line every iteration. Enough
+to prove the premise: a log line that recurs is progress signal, not noise.
 
-Store, then render: counts come from a `RecordStore` query, never from
-tallying the handler's live callback, so every renderer reading the same
-store sees the same numbers.
-
-No `rich` import lives here — the model is display-independent, and the
-package's only `rich` import stays in `rich_renderer.py`.
+Counts come from the store, never from tallying the handler's live callback,
+so every renderer reading that store sees the same numbers. Nothing here
+imports `rich` — the model is display-independent.
 """
 
 from __future__ import annotations
@@ -69,6 +64,8 @@ class RepeatingSourceModel:
         self.min_repeats = min_repeats
         self.window_seconds = window_seconds
         # Insertion-ordered, so a source keeps the slot it was first given.
+        # Unbounded: 300 repeating log sites means 300 bars.
+        # lumberjack: see issue #8
         self._counts: dict[SourceKey, int] = {}
 
     def poll(self) -> list[BarState]:
@@ -78,6 +75,8 @@ class RepeatingSourceModel:
         later drops its count below the threshold — a bar that vanished
         mid-run would read as "this work stopped existing".
         """
+        # Re-read wholesale rather than accumulated, so a count can fall after
+        # an evict() or inside a window. lumberjack: see issue #9
         counts = self._store.count_by_source(self.window_seconds)
         # Newly-qualifying sources are added busiest-first; sources already
         # tracked keep their position, so bars never jump around on screen.

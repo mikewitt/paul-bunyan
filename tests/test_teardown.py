@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from typing import cast
 
 import pytest
 
 from lumberjack import teardown
+from lumberjack.detect import OutputMode
 from lumberjack.handler import LumberjackHandler
 from lumberjack.pump import FlushPump
-from lumberjack.store import SQLiteRecordStore
+from lumberjack.renderers import Renderer
+from lumberjack.session import Session
+from lumberjack.store import RecordStore, SQLiteRecordStore
 
 
 class _FakeRenderer:
@@ -33,19 +37,15 @@ class _FakeRenderer:
 
 
 class _FakeHandler:
-    def __init__(self, rows: list[str] | None = None) -> None:
+    def __init__(self, rows: list[str] | None = None, dropped: int = 0) -> None:
         self._rows = list(rows or [])
+        self.dropped = dropped
         self.drained = 0
-        self.peeked: list[int | None] = []
 
     def drain(self) -> list[str]:
         self.drained += 1
         rows, self._rows = self._rows, []
         return rows
-
-    def peek(self, n: int | None = None) -> list[str]:
-        self.peeked.append(n)
-        return list(self._rows)
 
 
 class _FakeStore:
@@ -53,40 +53,65 @@ class _FakeStore:
 
     def __init__(self, rows: list[str] | None = None) -> None:
         self.rows: list[str] = list(rows or [])
-        self.tailed: list[int] = []
+        self.read: list[int | None] = []
 
     def append(self, rows: list[str]) -> None:
         self.rows.extend(rows)
 
-    def tail(self, n: int) -> list[str]:
-        self.tailed.append(n)
-        return self.rows[-n:]
+    def recent(self, n: int | None = None, since: float | None = None) -> list[str]:
+        self.read.append(n)
+        return self.rows if n is None else self.rows[-n:]
+
+
+def _install(
+    *,
+    renderer: object | None = None,
+    handler: object | None = None,
+    store: object | None = None,
+    dump_last_n: int = 50,
+) -> Session:
+    """Install teardown over a Session of fakes, filling in what it ignores.
+
+    The casts are the point of the fakes: teardown only ever calls `close()`,
+    `drain()`, `dropped`, `append()` and `recent()`, so a stand-in exercising
+    exactly those pins the contract more honestly than a real component would.
+    """
+    session = Session(
+        handler=cast(LumberjackHandler, handler or _FakeHandler()),
+        store=cast(RecordStore, store or _FakeStore()),
+        renderer=cast(Renderer, renderer or _FakeRenderer()),
+        output_mode=OutputMode.PLAIN,
+        owns_store=False,
+        dump_last_n=dump_last_n,
+        prev_handlers=[],
+        prev_level=logging.WARNING,
+    )
+    teardown.install(session)
+    return session
 
 
 @pytest.fixture(autouse=True)
-def _uninstall_after() -> None:
+def _uninstall_after() -> Iterator[None]:
     yield
     teardown.uninstall()
 
 
 def test_install_sets_excepthook():
     prev_hook = sys.excepthook
-    teardown.install(
-        renderer=_FakeRenderer(), handler=_FakeHandler(), store=_FakeStore()
-    )
+    _install()
     assert sys.excepthook is teardown.handle_exception
-    assert teardown.is_installed()
     teardown.uninstall()
     assert sys.excepthook is prev_hook
-    assert not teardown.is_installed()
 
 
-def test_install_twice_is_a_noop():
+def test_install_twice_keeps_the_first_session():
+    # Asserted through behaviour rather than a state accessor: the session
+    # teardown kept is the one whose renderer it closes.
     renderer1, renderer2 = _FakeRenderer(), _FakeRenderer()
-    handler, store = _FakeHandler(), _FakeStore()
-    teardown.install(renderer=renderer1, handler=handler, store=store)
-    teardown.install(renderer=renderer2, handler=handler, store=store)
-    assert teardown.current_renderer() is renderer1
+    _install(renderer=renderer1)
+    _install(renderer=renderer2)
+    teardown.run()
+    assert (renderer1.closed, renderer2.closed) == (1, 0)
 
 
 def test_excepthook_closes_renderer_before_delegating(monkeypatch):
@@ -94,7 +119,7 @@ def test_excepthook_closes_renderer_before_delegating(monkeypatch):
     handler = _FakeHandler()
     store = _FakeStore()
     calls: list[str] = []
-    teardown.install(renderer=renderer, handler=handler, store=store)
+    _install(renderer=renderer, handler=handler, store=store)
     monkeypatch.setattr(
         teardown, "_prev_excepthook", lambda *a: calls.append("prev_hook")
     )
@@ -107,7 +132,7 @@ def test_teardown_flushes_buffer_to_store():
     renderer = _FakeRenderer()
     handler = _FakeHandler(rows=["a", "b"])
     store = _FakeStore()
-    teardown.install(renderer=renderer, handler=handler, store=store)
+    _install(renderer=renderer, handler=handler, store=store)
     teardown.run()
     assert store.rows == ["a", "b"]
     assert handler.drained == 1
@@ -117,7 +142,7 @@ def test_teardown_is_idempotent():
     renderer = _FakeRenderer()
     handler = _FakeHandler(rows=["a"])
     store = _FakeStore()
-    teardown.install(renderer=renderer, handler=handler, store=store)
+    _install(renderer=renderer, handler=handler, store=store)
     teardown.run()
     teardown.run()  # must not raise
     assert renderer.closed == 2
@@ -126,7 +151,7 @@ def test_teardown_is_idempotent():
 def test_lossy_renderer_dump_replays_the_store_tail_to_stderr(capsys, make_row):
     handler = _FakeHandler()
     store = _FakeStore(rows=[make_row(message="swallowed by the bar")])
-    teardown.install(
+    _install(
         renderer=_FakeRenderer(write_through=False),
         handler=handler,
         store=store,
@@ -134,15 +159,14 @@ def test_lossy_renderer_dump_replays_the_store_tail_to_stderr(capsys, make_row):
     )
     teardown.run()
     assert "swallowed by the bar" in capsys.readouterr().err
-    assert store.tailed == [5]
-    assert handler.peeked == [], "the buffer is not a source for the dump"
+    assert store.read == [5], "the dump's only source is the store"
 
 
 def test_teardown_drains_before_dumping(capsys, make_row):
     # The dump reads the store, so anything still sitting in the buffer at exit
     # has to land there first — dump-then-drain would miss the run's whole tail.
     handler = _FakeHandler(rows=[make_row(message="still in the buffer")])
-    teardown.install(
+    _install(
         renderer=_FakeRenderer(write_through=False),
         handler=handler,
         store=_FakeStore(),
@@ -170,8 +194,8 @@ def test_dump_survives_the_flush_pump_draining_the_buffer(
         for i in range(5):
             logger.info("swallowed by the bar %d", i)
         assert wait_until(lambda: len(store.recent()) == 5), "pump never drained"
-        assert handler.peek() == [], "the pump emptied the buffer, as it does"
-        teardown.install(
+        assert handler.drain() == [], "the pump emptied the buffer, as it does"
+        _install(
             renderer=_FakeRenderer(write_through=False),
             handler=handler,
             store=store,
@@ -191,33 +215,69 @@ def test_write_through_renderer_is_not_dumped(make_row):
     # Regression: the atexit dump used to replay records the write-through
     # renderer had already printed, doubling every line of a normal run.
     store = _FakeStore(rows=[make_row(message="already printed")])
-    teardown.install(
+    _install(
         renderer=_FakeRenderer(write_through=True),
         handler=_FakeHandler(),
         store=store,
         dump_last_n=5,
     )
     teardown.run()
-    assert store.tailed == []
+    assert store.read == []
 
 
 def test_dump_last_n_zero_disables_the_dump(make_row):
     store = _FakeStore(rows=[make_row()])
-    teardown.install(
+    _install(
         renderer=_FakeRenderer(write_through=False),
         handler=_FakeHandler(),
         store=store,
         dump_last_n=0,
     )
     teardown.run()
-    assert store.tailed == []
+    assert store.read == []
+
+
+def test_buffer_overflow_is_reported_at_exit(capsys):
+    """Records dropped before the store are the one loss nothing else shows."""
+    _install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=_FakeHandler(dropped=37),
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    err = capsys.readouterr().err
+    assert "37 record(s) dropped" in err
+    assert "buffer_size" in err
+
+
+def test_overflow_report_is_not_suppressed_by_write_through(capsys):
+    """The dump is skipped for write-through renderers; this warning isn't —
+    it is about what never reached the store, not about what was displayed."""
+    _install(
+        renderer=_FakeRenderer(write_through=True),
+        handler=_FakeHandler(dropped=2),
+        store=_FakeStore(),
+        dump_last_n=5,
+    )
+    teardown.run()
+    assert "2 record(s) dropped" in capsys.readouterr().err
+
+
+def test_no_overflow_report_when_nothing_was_dropped(capsys):
+    _install(
+        renderer=_FakeRenderer(write_through=False),
+        handler=_FakeHandler(dropped=0),
+        store=_FakeStore(),
+        dump_last_n=0,
+    )
+    teardown.run()
+    assert "dropped" not in capsys.readouterr().err
 
 
 def test_uninstall_restores_previous_hook():
     prev_hook = sys.excepthook
-    teardown.install(
-        renderer=_FakeRenderer(), handler=_FakeHandler(), store=_FakeStore()
-    )
+    _install()
     teardown.uninstall()
     assert sys.excepthook is prev_hook
 

@@ -2,25 +2,18 @@
 
 A live display must be torn down before Python's excepthook prints a
 traceback, and before interpreter shutdown — otherwise ANSI/cursor control
-can corrupt or overwrite it. This module owns that ordering, plus a
-best-effort store flush and an atexit diagnostic dump of the last N records.
+corrupts it. This module owns that ordering, plus a best-effort store flush
+and an atexit dump of the last N records.
 
-The dump is strictly a recovery path for *lossy* renderers: a live progress
-bar collapses a thousand records into one line, so replaying the tail at exit
-is the only way to see them. A write-through renderer already printed every
-one, and replaying there would duplicate the entire session — so renderers
-declare `write_through` and this module honours it.
+The dump is a recovery path for *lossy* renderers only: a progress bar
+collapses a thousand records into one line, so replaying the tail at exit is
+the only way to see them. Write-through renderers declare themselves and are
+skipped, since replaying there would print the whole session twice.
 
-At exit the order is drain-then-dump, and the drain is what makes the dump
-work: the dump reads `store.tail(n)`, so whatever is still in the handler's
-buffer has to land in the store first. Sourcing it from the buffer instead is
-not an option — the flush pump empties that every ~200ms, so "the last N
-records" would really mean "whatever the pump hadn't reached yet", which
-during a steady run is usually nothing at all. The store is lossless and
-complete, which is exactly the guarantee this diagnostic needs.
-
-Every step here is wrapped in try/except: a bug in lumberjack's own cleanup
-must never replace or hide the user's real traceback.
+The exit order is drain-then-dump: the dump reads `store.recent(n)`, so the
+handler's buffer has to reach the store first. Every step is wrapped in
+try/except — a bug in lumberjack's own cleanup must never hide the user's
+real traceback.
 """
 
 from __future__ import annotations
@@ -33,59 +26,32 @@ from typing import TYPE_CHECKING
 from lumberjack.renderers.plain import PlainTextRenderer
 
 if TYPE_CHECKING:
-    from lumberjack.handler import LumberjackHandler
-    from lumberjack.renderers import Renderer
-    from lumberjack.store import RecordStore
+    from lumberjack.session import Session
 
-_installed = False
+_session: Session | None = None
 _prev_excepthook = None
-_renderer: Renderer | None = None
-_handler: LumberjackHandler | None = None
-_store: RecordStore | None = None
-_dump_last_n = 50
 
 
-def install(
-    *,
-    renderer: Renderer,
-    handler: LumberjackHandler,
-    store: RecordStore,
-    dump_last_n: int = 50,
-) -> None:
-    global _installed, _prev_excepthook, _renderer, _handler, _store, _dump_last_n
-    if _installed:
+def install(session: Session) -> None:
+    global _session, _prev_excepthook
+    if _session is not None:
+        # Silently discards the new session, where init() raises.
+        # lumberjack: see issue #13
         return
     _prev_excepthook = sys.excepthook
-    _renderer = renderer
-    _handler = handler
-    _store = store
-    _dump_last_n = dump_last_n
+    _session = session
     sys.excepthook = handle_exception
     atexit.register(run)
-    _installed = True
 
 
 def uninstall() -> None:
-    global _installed, _prev_excepthook, _renderer, _handler, _store
-    if not _installed:
+    global _session, _prev_excepthook
+    if _session is None:
         return
     sys.excepthook = _prev_excepthook or sys.__excepthook__
     atexit.unregister(run)
-    _installed = False
+    _session = None
     _prev_excepthook = None
-    _renderer = None
-    _handler = None
-    _store = None
-
-
-def is_installed() -> bool:
-    """True while this module owns sys.excepthook and the atexit hook."""
-    return _installed
-
-
-def current_renderer() -> Renderer | None:
-    """The renderer teardown will close, or None if not installed."""
-    return _renderer
 
 
 def handle_exception(
@@ -103,28 +69,51 @@ def run() -> None:
     """atexit hook: stop the display, drain to the store, dump diagnostics."""
     _stop_live_display()
     _flush_buffer()
+    _report_dropped()
     _dump_diagnostics()
 
 
 def _stop_live_display() -> None:
-    if _renderer is not None:
-        try:
-            _renderer.close()
-        except Exception:
-            pass
+    if _session is None:
+        return
+    try:
+        _session.renderer.close()
+    except Exception:
+        pass
+
+
+def _report_dropped() -> None:
+    """Say so if the write buffer overflowed: the store is missing records.
+
+    Unconditional, unlike the dump below — this is about what never reached
+    the store, so it is just as true for a write-through renderer.
+    """
+    if _session is None:
+        return
+    try:
+        dropped = _session.handler.dropped
+        if dropped:
+            print(
+                f"lumberjack: {dropped} record(s) dropped before reaching the "
+                "store — the write buffer overflowed. Raise buffer_size or "
+                "lower flush_interval in init().",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
 
 
 def _dump_diagnostics() -> None:
     # Reads the store, never the handler's buffer — see the module docstring:
     # by exit the pump has usually drained the buffer to nothing.
-    if _store is None or _dump_last_n <= 0:
+    if _session is None or _session.dump_last_n <= 0:
         return
     # Unknown renderers are assumed lossy: replaying is noisy, but silently
     # dropping the only copy of a record is worse.
-    if getattr(_renderer, "write_through", False):
+    if getattr(_session.renderer, "write_through", False):
         return
     try:
-        rows = _store.tail(_dump_last_n)
+        rows = _session.store.recent(n=_session.dump_last_n)
         dumper = PlainTextRenderer(stream=sys.stderr)
         for row in rows:
             dumper.render(row)
@@ -133,11 +122,11 @@ def _dump_diagnostics() -> None:
 
 
 def _flush_buffer() -> None:
-    if _handler is None or _store is None:
+    if _session is None:
         return
     try:
-        rows = _handler.drain()
+        rows = _session.handler.drain()
         if rows:
-            _store.append(rows)
+            _session.store.append(rows)
     except Exception:
         pass

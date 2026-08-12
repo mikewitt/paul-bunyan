@@ -19,7 +19,7 @@ def _emit(handler: LumberjackHandler, message: str) -> None:
 def test_emit_appends_to_buffer():
     handler = LumberjackHandler()
     _emit(handler, "hello")
-    rows = handler.peek()
+    rows = handler.drain()
     assert len(rows) == 1
     assert rows[0].message == "hello"
 
@@ -30,7 +30,7 @@ def test_drain_empties_buffer_in_order():
     _emit(handler, "second")
     drained = handler.drain()
     assert [r.message for r in drained] == ["first", "second"]
-    assert handler.peek() == []
+    assert handler.drain() == []
 
 
 def test_buffer_is_bounded():
@@ -38,8 +38,31 @@ def test_buffer_is_bounded():
     _emit(handler, "a")
     _emit(handler, "b")
     _emit(handler, "c")
-    rows = handler.peek()
+    rows = handler.drain()
     assert [r.message for r in rows] == ["b", "c"]
+
+
+def test_overflow_is_counted_not_silent():
+    """A full buffer evicts the oldest row; the store loses it, so say so."""
+    handler = LumberjackHandler(buffer_size=2)
+    assert handler.dropped == 0
+    for msg in ("a", "b"):
+        _emit(handler, msg)
+    assert handler.dropped == 0, "a buffer that is merely full has lost nothing"
+    for msg in ("c", "d", "e"):
+        _emit(handler, msg)
+    assert handler.dropped == 3
+
+
+def test_dropped_count_survives_a_drain():
+    """Cumulative for the session: draining doesn't forgive earlier losses."""
+    handler = LumberjackHandler(buffer_size=1)
+    for msg in ("a", "b", "c"):
+        _emit(handler, msg)
+    assert handler.dropped == 2
+    handler.drain()
+    _emit(handler, "d")
+    assert handler.dropped == 2
 
 
 def test_on_record_callback_invoked_per_record():
@@ -47,13 +70,6 @@ def test_on_record_callback_invoked_per_record():
     handler = LumberjackHandler(on_record=lambda row: seen.append(row.message))
     _emit(handler, "hi")
     assert seen == ["hi"]
-
-
-def test_peek_with_n_returns_last_n():
-    handler = LumberjackHandler()
-    for msg in ("a", "b", "c"):
-        _emit(handler, msg)
-    assert [r.message for r in handler.peek(2)] == ["b", "c"]
 
 
 def test_default_buffer_size_is_positive():

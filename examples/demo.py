@@ -80,7 +80,10 @@ def main() -> None:
     # below reflects the complete run.
     lumberjack.flush()
 
+    # The accessors return None before init() and after shutdown(), so a
+    # type checker will make you say why you know better. init() ran above.
     store = lumberjack.current_store()
+    assert store is not None
     records = store.recent()
 
     print("\n--- the display was lossy; the store was not ---")
