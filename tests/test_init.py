@@ -129,7 +129,7 @@ def test_init_captures_log_records_into_buffer():
     handler = lumberjack.init(output_mode="plain")
     logger = logging.getLogger("capture-test")
     logger.info("captured")
-    assert any(r.message == "captured" for r in handler.peek())
+    assert any(r.message == "captured" for r in handler.drain())
 
 
 def test_shutdown_without_init_is_a_noop():

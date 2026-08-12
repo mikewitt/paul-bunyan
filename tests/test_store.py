@@ -59,12 +59,6 @@ def test_recent_respects_since(store):
     assert [r.message for r in rows] == ["new"]
 
 
-def test_tail_returns_oldest_to_newest(store):
-    store.append([_row(message=str(i)) for i in range(3)])
-    rows = store.tail(2)
-    assert [r.message for r in rows] == ["1", "2"]
-
-
 def test_count_by_template(store):
     store.append([_row(template_id=1), _row(template_id=1), _row(template_id=2)])
     counts = store.count_by_template()

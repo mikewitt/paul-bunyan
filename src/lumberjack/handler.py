@@ -72,11 +72,3 @@ class LumberjackHandler(logging.Handler):
             rows = list(self._buffer)
             self._buffer.clear()
         return rows
-
-    def peek(self, n: int | None = None) -> list[LogRecordRow]:
-        """Non-destructive snapshot of the buffer, oldest first."""
-        with self.lock:
-            rows = list(self._buffer)
-        if n is None:
-            return rows
-        return rows[-n:]

@@ -55,9 +55,6 @@ class RecordStore(abc.ABC):
     ) -> Sequence[StoredRecord]: ...
 
     @abc.abstractmethod
-    def tail(self, n: int) -> Sequence[StoredRecord]: ...
-
-    @abc.abstractmethod
     def count_by_template(
         self, window_seconds: float | None = None
     ) -> Mapping[int | None, int]: ...
@@ -156,9 +153,6 @@ class SQLiteRecordStore(RecordStore):
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_stored(r) for r in reversed(rows)]
-
-    def tail(self, n: int) -> Sequence[StoredRecord]:
-        return self.recent(n=n)
 
     def count_by_template(
         self, window_seconds: float | None = None

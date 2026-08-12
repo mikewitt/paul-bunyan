@@ -15,6 +15,7 @@ from lumberjack.detect import OutputMode, OutputModeDetector
 from lumberjack.handler import DEFAULT_BUFFER_SIZE, LumberjackHandler
 from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
 from lumberjack.renderers import Renderer, create_renderer
+from lumberjack.session import Session
 from lumberjack.store import RecordStore, SQLiteRecordStore
 
 try:
@@ -34,17 +35,9 @@ __all__ = [
     "__version__",
 ]
 
-# Module-level lifecycle state: unguarded by any lock, and mirrored by
-# teardown.py's own copies. lumberjack: see issues #11, #17
-_installed = False
-_handler: LumberjackHandler | None = None
-_store: RecordStore | None = None
-_owns_store = False
-_renderer: Renderer | None = None
-_output_mode: OutputMode | None = None
-_pump: FlushPump | None = None
-_prev_handlers: list[logging.Handler] = []
-_prev_level: int | None = None
+# The one piece of module state, and it is unguarded by any lock.
+# lumberjack: see issue #11
+_session: Session | None = None
 
 
 def init(
@@ -71,9 +64,8 @@ def init(
     Failing partway through leaves the process as it was found: a store
     created here is closed again rather than left open and unreachable.
     """
-    global _installed, _handler, _store, _owns_store, _prev_handlers, _prev_level
-    global _renderer, _output_mode, _pump
-    if _installed:
+    global _session
+    if _session is not None:
         raise RuntimeError(
             "lumberjack.init() already called; call lumberjack.shutdown() first"
         )
@@ -91,13 +83,6 @@ def init(
             on_record=renderer.render,
             level=level,
         )
-
-        teardown.install(
-            renderer=renderer,
-            handler=handler,
-            store=resolved_store,
-            dump_last_n=dump_last_n,
-        )
     except BaseException:
         if owns_store:
             resolved_store.close()
@@ -107,25 +92,27 @@ def init(
     # the install is guaranteed to complete, so there is no half-swapped state
     # to unwind here.
     root = logging.getLogger()
-    prev_handlers = root.handlers[:] if replace_handlers else []
-    for existing in prev_handlers:
+    session = Session(
+        handler=handler,
+        store=resolved_store,
+        renderer=renderer,
+        output_mode=mode,
+        owns_store=owns_store,
+        dump_last_n=dump_last_n,
+        prev_handlers=root.handlers[:] if replace_handlers else [],
+        prev_level=root.level,
+    )
+    teardown.install(session)
+
+    for existing in session.prev_handlers:
         root.removeHandler(existing)
-    prev_level = root.level
     root.addHandler(handler)
     root.setLevel(level)
-
-    _owns_store = owns_store
-    _prev_handlers = prev_handlers
-    _prev_level = prev_level
-    _handler = handler
-    _store = resolved_store
-    _renderer = renderer
-    _output_mode = mode
-    _installed = True
+    _session = session
 
     if flush_interval > 0:
-        _pump = FlushPump(interval=flush_interval, flush=flush)
-        _pump.start()
+        session.pump = FlushPump(interval=flush_interval, flush=flush)
+        session.pump.start()
 
     return handler
 
@@ -140,55 +127,45 @@ def shutdown() -> None:
     Closes the store only if lumberjack created it — a store the caller passed
     to `init()` stays open so it can still be queried afterward.
     """
-    global _installed, _handler, _store, _owns_store, _prev_handlers, _prev_level
-    global _renderer, _output_mode, _pump
-    if not _installed:
+    global _session
+    session = _session
+    if session is None:
         return
-    if _pump is not None:
-        _pump.stop()
-        _pump = None
+    if session.pump is not None:
+        session.pump.stop()
     flush()
-    if _renderer is not None:
-        # A live display owns a timer thread and the terminal; leaving it
-        # running past shutdown() would leak both.
-        _renderer.close()
+    # A live display owns a timer thread and the terminal; leaving it running
+    # past shutdown() would leak both.
+    session.renderer.close()
     teardown.uninstall()
     root = logging.getLogger()
-    if _handler is not None:
-        root.removeHandler(_handler)
-    for h in _prev_handlers:
+    root.removeHandler(session.handler)
+    for h in session.prev_handlers:
         root.addHandler(h)
-    if _prev_level is not None:
-        root.setLevel(_prev_level)
-    if _owns_store and _store is not None:
-        _store.close()
-    _prev_handlers = []
-    _prev_level = None
-    _handler = None
-    _store = None
-    _owns_store = False
-    _renderer = None
-    _output_mode = None
-    _installed = False
+    root.setLevel(session.prev_level)
+    if session.owns_store:
+        session.store.close()
+    _session = None
 
 
 def flush() -> None:
     """Drain the handler's buffer into the store on demand."""
-    if _handler is None or _store is None:
+    session = _session
+    if session is None:
         return
-    rows = _handler.drain()
+    rows = session.handler.drain()
     if rows:
-        _store.append(rows)
+        session.store.append(rows)
 
 
 def is_initialized() -> bool:
     """True between a successful `init()` and the matching `shutdown()`."""
-    return _installed
+    return _session is not None
 
 
 def current_handler() -> LumberjackHandler | None:
     """The installed handler, or None if `init()` hasn't run."""
-    return _handler
+    return _session.handler if _session is not None else None
 
 
 def current_store() -> RecordStore | None:
@@ -196,14 +173,14 @@ def current_store() -> RecordStore | None:
 
     The supported way to query captured records: `current_store().recent()`.
     """
-    return _store
+    return _session.store if _session is not None else None
 
 
 def current_renderer() -> Renderer | None:
     """The renderer chosen for the detected output mode, or None."""
-    return _renderer
+    return _session.renderer if _session is not None else None
 
 
 def current_output_mode() -> OutputMode | None:
     """The output mode `init()` resolved to, after override/env/TTY detection."""
-    return _output_mode
+    return _session.output_mode if _session is not None else None
