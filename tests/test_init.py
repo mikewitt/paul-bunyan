@@ -132,9 +132,9 @@ def test_a_bad_level_fails_before_teardown_is_installed():
     """
     with pytest.raises(ValueError, match="Unknown level"):
         lumberjack.init(level="LOUD", output_mode="plain")
-    assert (
-        sys.excepthook is not teardown.handle_exception
-    ), "teardown outlived a failed init() and still owns the excepthook"
+    assert sys.excepthook is not teardown.handle_exception, (
+        "teardown outlived a failed init() and still owns the excepthook"
+    )
     assert not any(
         isinstance(h, LumberjackHandler) for h in logging.getLogger().handlers
     ), "a failed init() left its handler on the root logger"

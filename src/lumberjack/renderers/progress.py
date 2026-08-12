@@ -90,9 +90,9 @@ class RepeatingSourceModel:
         )
         for source, count in fresh:
             self._counts[source] = count
-        for source, count in counts.items():
-            if source in self._counts:
-                self._counts[source] = count
+        for source in self._counts:
+            if source in counts:
+                self._counts[source] = counts[source]
         return self.bars()
 
     def bars(self) -> list[BarState]:
