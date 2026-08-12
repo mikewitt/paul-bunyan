@@ -8,6 +8,7 @@ processes and inspect their stderr/exit code/on-disk store afterward.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import sqlite3
@@ -19,6 +20,16 @@ import pytest
 
 _ANSI_RE = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
 
+#: Some of these scripts ask for `output_mode="rich"` and then assert on what
+#: only the *lossy* live bar does — collapsing the loop, and the exit dump that
+#: recovers it. On a bare install the factory hands back the write-through
+#: plain renderer instead, which correctly prints everything and dumps nothing,
+#: so the assertions below would be measuring the fallback, not the bar.
+_needs_rich = pytest.mark.skipif(
+    importlib.util.find_spec("rich") is None,
+    reason="asserts live-bar behaviour, which degrades to plain without rich",
+)
+
 
 def _run_script(
     scripts_dir: Path, name: str, env: dict[str, str] | None = None
@@ -26,6 +37,12 @@ def _run_script(
     full_env = dict(os.environ)
     src_dir = str(Path(__file__).parent.parent / "src")
     full_env["PYTHONPATH"] = os.pathsep.join([src_dir, full_env.get("PYTHONPATH", "")])
+    # These children are the only place the excepthook, atexit and
+    # file-backed-store paths run at all. pytest-cov's .pth hook starts
+    # measuring in a subprocess only when this points at the config.
+    full_env["COVERAGE_PROCESS_START"] = str(
+        Path(__file__).parent.parent / "pyproject.toml"
+    )
     if env:
         full_env.update(env)
     return subprocess.run(
@@ -93,6 +110,7 @@ def _store_count(db_path: Path) -> int:
         conn.close()
 
 
+@_needs_rich
 def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
     # The Phase 1 premise, end to end in its own interpreter: 200 log lines in,
     # no scrolling out, one bar naming the source location that produced them.
@@ -141,6 +159,7 @@ def test_live_bar_writes_no_ansi_when_piped(scripts_dir, tmp_path):
     assert not _ANSI_RE.search(result.stderr), result.stderr
 
 
+@_needs_rich
 def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
     # The other half of the write_through=False contract: records the bar
     # swallowed are replayed at exit, and still reach the store. Regression:
@@ -162,6 +181,7 @@ def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
     assert _store_count(db_path) == 21
 
 
+@_needs_rich
 def test_an_undrained_buffer_still_reaches_the_exit_dump(scripts_dir, tmp_path):
     # The ordering guard, from the other side: pump and final flush both off,
     # so at exit the whole run is still in the buffer. The dump reads the

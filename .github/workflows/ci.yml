@@ -5,15 +5,25 @@ on:
     branches: [daddy]
   pull_request:
 
+# Least privilege by default; coverage-badge opts back up to write, and is
+# the only job that needs to.
+permissions:
+  contents: read
+
+# A newer push makes an in-flight run's verdict stale before it lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     # Its own job, not a step in the matrix below: style is a property of the
     # source, not of the OS or interpreter running it, so checking it six
     # times says the same thing six times — and reports a single misplaced
     # comma as six red legs with no check called "lint" among them.
-    # Deliberately not a dependency of `test`: which of the two is broken is
-    # more useful than making one wait on the other.
-    # No type-check gate yet. lumberjack: see issue #12
+    # None of these jobs depends on another: which one is broken is more
+    # useful than making one wait on the rest, the same reasoning the matrix
+    # already applies with fail-fast: false.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,9 +33,24 @@ jobs:
       - run: uv sync --all-extras
       # ruff lints, black formats — one tool per job, per the toolchain in
       # CLAUDE.md. `ruff format` is deliberately not run: it would be a second
-      # opinion on the same question black already answers.
+      # opinion on the question black already answers.
       - run: uv run ruff check .
       - run: uv run black --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      # Strict for the shipped package: it ships py.typed, so downstream users
+      # type-check against these annotations and a wrong one is our bug.
+      - run: uv run mypy --strict src
+      # Ordinary checking for the rest. `-> None` on 150 test functions is
+      # bookkeeping; a real type error in a fixture is not.
+      - run: uv run mypy tests examples
 
   test:
     runs-on: ${{ matrix.os }}
@@ -41,10 +66,72 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: ${{ matrix.python-version }}
-      # Every leg installs rich, so the bare-install path is never exercised.
-      # lumberjack: see issue #10
       - run: uv sync --all-extras
       - run: uv run pytest
+
+  bare:
+    # Design principle 8: `pip install lumberjack` must pull in nothing, so a
+    # library can instrument with zero imposed dependencies. Every leg of
+    # `test` installs rich, so without this job the no-rich path — the whole
+    # `except ImportError` guard in rich_renderer.py — never runs in CI.
+    name: bare install (no rich)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      # No --all-extras: dev tooling, but none of the optional dependencies.
+      - run: uv sync
+      - name: Assert rich really is absent
+        # Without this the job silently becomes a duplicate of `test` the day
+        # rich turns up in the default install.
+        run: |
+          uv run python - <<'EOF'
+          import importlib.util, sys
+          if importlib.util.find_spec("rich") is not None:
+              sys.exit("rich is installed; this job no longer tests the bare install")
+          EOF
+      - run: uv run pytest
+
+  package:
+    # The wheel is the artefact users actually get, and it is assembled by
+    # hatchling from a config nothing else exercises — a mistake in the
+    # packages list or a missing py.typed passes every other job here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      # Fails if uv.lock has drifted from pyproject.toml, which would mean
+      # every other job resolved something the lockfile does not describe.
+      - run: uv lock --check
+      - run: uv build
+      - name: Install the built wheel and use it
+        # A fresh venv with no source tree on the path, so this imports the
+        # wheel's contents rather than src/.
+        run: |
+          uv venv /tmp/wheeltest
+          VIRTUAL_ENV=/tmp/wheeltest uv pip install dist/*.whl
+          cd /tmp
+          /tmp/wheeltest/bin/python - <<'EOF'
+          import importlib.resources, logging, lumberjack
+          # Zero required dependencies: importing must not need the extras.
+          lumberjack.init(output_mode="plain", flush_interval=0)
+          logging.getLogger("smoke").warning("installed wheel works")
+          store = lumberjack.current_store()
+          assert store is not None
+          lumberjack.flush()
+          assert len(store.recent()) == 1, "record never reached the store"
+          lumberjack.shutdown()
+          # py.typed has to be in the wheel or downstream type checking of
+          # lumberjack silently does nothing.
+          assert (
+              importlib.resources.files("lumberjack") / "py.typed"
+          ).is_file(), "py.typed missing from the wheel"
+          print("wheel smoke test passed")
+          EOF
 
   coverage-badge:
     # Trunk pushes only. A PR must never push commits back, and a single

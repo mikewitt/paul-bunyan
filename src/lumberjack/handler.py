@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import threading
 from collections.abc import Callable
 
 from lumberjack.schema import LogRecordRow
@@ -35,6 +36,11 @@ class LumberjackHandler(logging.Handler):
         self._buffer: collections.deque[LogRecordRow] = collections.deque(
             maxlen=buffer_size
         )
+        # Our own lock, not `logging.Handler.lock`. That one serializes
+        # `emit()` against the handler's output; this one guards the buffer,
+        # which `drain()` touches from the pump thread without going through
+        # `handle()` at all. Always taken innermost, so there is no inversion.
+        self._lock = threading.Lock()
         self._dropped = 0
         self.on_record = on_record
 
@@ -46,7 +52,7 @@ class LumberjackHandler(logging.Handler):
         Any non-zero value means the store is missing records: either the
         pump interval is too long or `buffer_size` is too small for the load.
         """
-        with self.lock:
+        with self._lock:
             return self._dropped
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -56,7 +62,7 @@ class LumberjackHandler(logging.Handler):
             self.handleError(record)
             return
 
-        with self.lock:
+        with self._lock:
             # deque(maxlen=...) discards silently; check before appending,
             # since afterwards the evicted row is simply gone.
             if len(self._buffer) == self._buffer.maxlen:
@@ -68,7 +74,7 @@ class LumberjackHandler(logging.Handler):
 
     def drain(self) -> list[LogRecordRow]:
         """Atomically empty and return the buffer, oldest first."""
-        with self.lock:
+        with self._lock:
             rows = list(self._buffer)
             self._buffer.clear()
         return rows

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from typing import cast
 
 import pytest
 
@@ -18,8 +19,9 @@ from lumberjack import teardown
 from lumberjack.detect import OutputMode
 from lumberjack.handler import LumberjackHandler
 from lumberjack.pump import FlushPump
+from lumberjack.renderers import Renderer
 from lumberjack.session import Session
-from lumberjack.store import SQLiteRecordStore
+from lumberjack.store import RecordStore, SQLiteRecordStore
 
 
 class _FakeRenderer:
@@ -68,11 +70,16 @@ def _install(
     store: object | None = None,
     dump_last_n: int = 50,
 ) -> Session:
-    """Install teardown over a Session of fakes, filling in what it ignores."""
+    """Install teardown over a Session of fakes, filling in what it ignores.
+
+    The casts are the point of the fakes: teardown only ever calls `close()`,
+    `drain()`, `dropped`, `append()` and `recent()`, so a stand-in exercising
+    exactly those pins the contract more honestly than a real component would.
+    """
     session = Session(
-        handler=handler if handler is not None else _FakeHandler(),
-        store=store if store is not None else _FakeStore(),
-        renderer=renderer if renderer is not None else _FakeRenderer(),
+        handler=cast(LumberjackHandler, handler or _FakeHandler()),
+        store=cast(RecordStore, store or _FakeStore()),
+        renderer=cast(Renderer, renderer or _FakeRenderer()),
         output_mode=OutputMode.PLAIN,
         owns_store=False,
         dump_last_n=dump_last_n,
@@ -84,7 +91,7 @@ def _install(
 
 
 @pytest.fixture(autouse=True)
-def _uninstall_after() -> None:
+def _uninstall_after() -> Iterator[None]:
     yield
     teardown.uninstall()
 
