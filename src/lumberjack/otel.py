@@ -87,7 +87,7 @@ def detach(token: object | None) -> None:
     otel_context.detach(token)  # type: ignore[arg-type]
 
 
-def record_failure(span: Span | None, exc: BaseException) -> None:
+def record_failure(span: Span, exc: BaseException) -> None:
     """Mark `span` failed.
 
     Choosing `start_span()` over `start_as_current_span()` — necessary,
@@ -95,7 +95,7 @@ def record_failure(span: Span | None, exc: BaseException) -> None:
     may outlive one frame — gives up its `record_exception=True` and
     `set_status_on_exception=True` defaults, so this does that work by hand.
     """
-    if otel_trace is None or span is None:
+    if otel_trace is None:
         return
     span.set_status(otel_trace.Status(otel_trace.StatusCode.ERROR, str(exc)))
     span.record_exception(exc)

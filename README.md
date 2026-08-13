@@ -183,10 +183,10 @@ them.
 Two things worth knowing:
 
 - **Progress ticks are sampled** — roughly one record per 50ms, not one per
-  `advance()`. A tight loop would otherwise outrun the write buffer and, piped
-  to a file, print a line per item, which is the thing this package exists to
-  avoid. Counts stay exact: the value is absolute, and the closing record
-  carries the final one.
+  `advance()`. Piped to a file, output is write-through: a record per item
+  would print a line per item, which is the thing this package exists to
+  avoid. Counts stay exact regardless, because the value is absolute and the
+  closing record carries the final one.
 - **The live bars are still rung-1 bars.** Task counts and hierarchy go into
   the store today; drawing them as named, determinate bars is the next phase.
   Read them back with `current_store()` in the meantime.

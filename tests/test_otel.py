@@ -17,11 +17,15 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Iterator
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 import lumberjack
 from lumberjack import otel
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 trace_sdk = pytest.importorskip("opentelemetry.sdk.trace")
 export = pytest.importorskip("opentelemetry.sdk.trace.export")
@@ -82,7 +86,7 @@ def test_the_helpers_are_all_no_ops_without_otel(monkeypatch):
     assert otel.context_with_span(None) is None
     assert otel.attach(object()) is None
     assert otel.detach(None) is None
-    assert otel.record_failure(None, ValueError("x")) is None
+    assert otel.record_failure(cast("Span", object()), ValueError("x")) is None
 
 
 def test_context_with_span_is_none_for_a_parentless_task():

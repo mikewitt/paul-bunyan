@@ -42,11 +42,20 @@ if TYPE_CHECKING:
 TASK_LOGGER_NAME = "lumberjack.task"
 
 #: Smallest gap between progress ticks, and a shipping constraint rather than
-#: a tuning knob. A tight `advance()` loop produces ~85,000 records/s against
-#: a write buffer that drains 10,000 per 200ms, so a record per call overflows
-#: lumberjack's own buffer and trips its own dropped-records warning — and the
-#: write-through plain renderer would print a line per item, which is the
-#: disease this package exists to cure.
+#: a tuning knob.
+#:
+#: The unconditional reason: non-TTY output is write-through, one line per
+#: record, so a record per `advance()` prints a million lines for a
+#: million-item loop — the disease this package exists to cure, caused by the
+#: cure. That holds on every machine and needs no measurement.
+#:
+#: The second reason is real but machine-dependent, so take the number with
+#: its conditions rather than as a law: an unsampled loop measured here at
+#: ~59,000 records/s through the handler alone and ~24,000 with the
+#: JSON-lines renderer attached, against a buffer that drains 10,000 per
+#: 200ms — i.e. 50,000/s. Fast enough hardware therefore overruns lumberjack's
+#: own buffer and trips its own dropped-records warning; slower hardware, or a
+#: heavier renderer, does not. Re-measure before quoting a figure.
 TICK_INTERVAL = 0.05
 
 #: `(pathname, lineno, func_name)` of the user code that opened a task.
@@ -65,13 +74,21 @@ _current_task: contextvars.ContextVar[TaskHandle | None] = contextvars.ContextVa
 def _ambient_parent() -> TaskHandle | None:
     """The nearest *unfinished* task in the ambient chain, or None.
 
-    Skipping finished handles is what makes the answer correct however the
-    contextvar tokens were reset — see `TaskHandle._unbind()`. A finished
-    task must never become a parent.
+    Skipping finished handles is what keeps the answer right when the
+    contextvar tokens were reset out of order — see `TaskHandle._unbind()`.
+    A finished task must never become a parent.
+
+    The walk follows `_prev_ambient`, the handle that was ambient when this
+    one was *entered* — not `_parent`, which is where it was *created*. Those
+    differ: a handle built at module scope and entered inside some other
+    task has no creation-time link to it, so walking `_parent` would step
+    straight past a task whose `with` block is still open and orphan the new
+    one. Everything reachable through the ambient slot was entered, so
+    `_prev_ambient` is always set on it.
     """
     candidate = _current_task.get()
     while candidate is not None and candidate._ended:
-        candidate = candidate._parent
+        candidate = candidate._prev_ambient
     return candidate
 
 
@@ -144,6 +161,9 @@ class TaskHandle:
         # row with no `start` to anchor it. Rows are all-or-nothing.
         self._started = False
         self._token: contextvars.Token[TaskHandle | None] | None = None
+        #: What was ambient when this handle was *entered*. `_ambient_parent()`
+        #: walks this, not `_parent` — see there.
+        self._prev_ambient: TaskHandle | None = None
         self._otel_token: object | None = None
         # Not 0.0: that only makes the first tick fire because
         # `time.monotonic()` happens to count from boot on CPython's main
@@ -163,9 +183,16 @@ class TaskHandle:
         self._emit("start", self._current, self._total)
 
     def __enter__(self) -> TaskHandle:
-        if self._token is not None or self._ended:
-            raise RuntimeError(f"task {self.label!r} cannot be entered twice")
-        self._token = _current_task.set(self)
+        # Check and claim under the lock. Unsynchronized this is a
+        # check-then-act: two threads entering the same handle both passed
+        # the test and both "entered", one silently clobbering the other's
+        # token — measured at 3 occurrences in 2000 attempts on a GIL build,
+        # and the window is wider without one.
+        with self._lock:
+            if self._token is not None or self._ended:
+                raise RuntimeError(f"task {self.label!r} cannot be entered twice")
+            self._prev_ambient = _current_task.get()
+            self._token = _current_task.set(self)
         if self._span is not None:
             self._otel_token = otel.attach(self._span)
         return self
@@ -176,10 +203,18 @@ class TaskHandle:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        token, self._token = self._token, None
+        # Released before `end()`, which takes the same non-reentrant lock.
+        with self._lock:
+            token, self._token = self._token, None
         otel_token, self._otel_token = self._otel_token, None
         try:
-            self.end(exc)
+            # `GeneratorExit` is control flow, not failure: it is what a
+            # user's generator gets when the consumer stops early, and
+            # `track()`'s own early `break` records a clean end. Treating it
+            # as an error would put a traceback on the ERROR channel — the
+            # one line a user actually needs to see — for a normal `break`,
+            # and would mark the span failed.
+            self.end(None if isinstance(exc, GeneratorExit) else exc)
         finally:
             otel.detach(otel_token)
             self._unbind(token)

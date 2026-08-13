@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import threading
 from collections.abc import Iterator
 
 import pytest
 
 import lumberjack
+from lumberjack import tracking
 from lumberjack.schema import StoredRecord
 from lumberjack.store import SQLiteRecordStore
 from lumberjack.tracking import TASK_LOGGER_NAME, TICK_INTERVAL
@@ -260,8 +262,10 @@ def test_a_nested_task_records_its_parent(session):
 
 
 def test_a_bare_handle_never_becomes_a_parent(session):
-    """Only `__enter__` establishes ambient parentage, which is what makes an
-    out-of-order contextvar reset structurally impossible."""
+    """Only `__enter__` establishes ambient parentage, so a handle used bare
+    holds no token and cannot be the one whose reset misfires. That narrows
+    the out-of-order-reset problem; it does not remove it — see the
+    interleaved-generator tests below."""
     outer = lumberjack.task("never entered")
     try:
         with lumberjack.task("sibling") as sibling:
@@ -522,8 +526,6 @@ def test_an_earlier_exit_does_not_evict_a_still_open_later_task(session):
     first.close()  # the earlier one goes first
     next(second, None)  # `second` is still open and must still be ambient
 
-    live = [t for t in (first, second)]
-    del live
     assert seen and seen[0] is not None, "the still-open task stopped parenting"
 
 
@@ -570,9 +572,9 @@ def test_concurrent_advances_are_not_lost(session):
 
     Honest caveat: on a GIL build this passes with the lock removed too —
     measured over several runs at `sys.setswitchinterval(1e-9)`, the update
-    never tore. The lock is there for free-threaded builds (3.13t onward,
-    and 3.14 is in the CI matrix), where the race is real. This test pins
-    the contract; it cannot demonstrate the mechanism on CPython-with-GIL."""
+    never tore. The lock is there for free-threaded builds, which CI does not
+    currently run — every matrix leg is a GIL build. This test pins the
+    contract; it cannot demonstrate the mechanism."""
     threads, per_thread = 8, 20_000
 
     with lumberjack.task("counted") as t:
@@ -588,27 +590,45 @@ def test_concurrent_advances_are_not_lost(session):
     assert session.read()[-1].progress_current == threads * per_thread
 
 
-def test_the_end_row_is_last_even_under_concurrent_advances(session):
+def test_the_end_row_is_last_when_end_races_in_flight_advances(session, monkeypatch):
     """Emission happens under the lock, so an `update` in flight on another
-    thread cannot land after the `end` row. Readers treat `end` as terminal."""
-    stop = threading.Event()
+    thread cannot land after the `end` row. Readers treat `end` as terminal,
+    and the whole defence of sampling is that it carries the final count.
 
-    with lumberjack.task("racing") as t:
-        workers = [
-            threading.Thread(
-                target=lambda: [t.advance() for _ in range(50_000) if not stop.is_set()]
-            )
-            for _ in range(4)
-        ]
+    `end()` has to be called *while* workers are advancing — joining them
+    first makes the test unfalsifiable. The barrier guarantees every worker
+    is inside the loop, and a zero tick interval makes every advance emit,
+    so the window is as wide as it gets.
+    """
+    monkeypatch.setattr(tracking, "TICK_INTERVAL", 0.0)
+    workers_n, rounds = 4, 20
+    handles = []
+
+    for _ in range(rounds):
+        running = threading.Barrier(workers_n + 1)
+        stop = threading.Event()
+        t = lumberjack.task("racing")
+        handles.append(t)
+
+        def worker(t=t, running=running, stop=stop) -> None:
+            running.wait()
+            while not stop.is_set():
+                t.advance()
+
+        workers = [threading.Thread(target=worker) for _ in range(workers_n)]
         for w in workers:
             w.start()
+        running.wait()
+        t.end()
         stop.set()
         for w in workers:
             w.join()
 
-    events = [r.task_event for r in session.read()]
-    assert events[-1] == "end"
-    assert events.count("end") == 1
+    rows = session.read()
+    for t in handles:
+        events = [r.task_event for r in rows if r.task_id == t.task_id]
+        assert events[-1] == "end", f"an update landed after end: {events[-5:]}"
+        assert events.count("end") == 1
 
 
 # --- level filtering --------------------------------------------------------
@@ -706,3 +726,87 @@ def test_a_level_raised_mid_task_still_leaves_the_start_row_anchored(session):
             pass
     logger.setLevel(logging.NOTSET)
     assert session.events() == [("start", "interrupted")]
+
+
+def test_a_handle_entered_inside_another_task_walks_back_to_it(session):
+    """The ambient walk follows where a handle was *entered*, not where it was
+    created. A handle built before the enclosing task has no creation-time
+    link to it, so walking `_parent` would step straight past a `with` block
+    that is still open and orphan the next task."""
+
+    def entering(handle):
+        with handle:
+            yield
+
+    def running(name):
+        with lumberjack.task(name):
+            yield
+
+    outside = lumberjack.task("built outside")
+    with lumberjack.task("enclosing") as enclosing:
+        first = entering(outside)
+        second = running("inner")
+        next(first)  # enters `outside` while `enclosing` is ambient
+        next(second)  # enters `inner`, whose parent is `outside`
+        first.close()  # out of order: reset skipped, `outside` ends
+        second.close()  # restores the ended `outside` as ambient
+        with lumberjack.task("after") as after:
+            assert after.parent_task_id == enclosing.task_id
+
+
+def test_two_threads_cannot_both_enter_one_handle(session):
+    """`__enter__` claims under the lock. Unsynchronized it is a
+    check-then-act, and both threads passed — measured at 3 double-entries
+    in 2000 attempts on a GIL build, one token silently clobbering the
+    other's."""
+    entered, rejected = [], []
+    prev_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-9)  # widen the check-then-act window
+    attempts = 2000
+    try:
+        for _ in range(attempts):
+            handle = lumberjack.task("raced")
+            ready = threading.Barrier(2)
+
+            def enter(h=handle, b=ready) -> None:
+                b.wait()
+                try:
+                    h.__enter__()
+                    entered.append(1)
+                except RuntimeError:
+                    rejected.append(1)
+
+            pair = [threading.Thread(target=enter) for _ in range(2)]
+            for w in pair:
+                w.start()
+            for w in pair:
+                w.join()
+            handle.end()
+            tracking._current_task.set(None)
+    finally:
+        sys.setswitchinterval(prev_interval)
+
+    assert len(entered) == attempts, f"{len(entered)} entered, expected one each"
+    assert len(rejected) == attempts
+
+
+def test_closing_a_generator_early_is_not_a_task_failure(session):
+    """`GeneratorExit` is control flow, not an error: it is what a user's
+    generator receives when the consumer stops early. `track()`'s own early
+    `break` already records a clean end, and a bare `with` inside a generator
+    must agree — otherwise an ordinary `break` puts a traceback on the ERROR
+    channel, which is the one place a user's attention is guaranteed."""
+
+    def stage():
+        with lumberjack.task("stage"):
+            yield from range(100)
+
+    for item in stage():
+        if item == 2:
+            break
+
+    end = session.read()[-1]
+    assert end.task_event == "end"
+    assert end.level_name == "INFO"
+    assert end.exc_text is None
+    assert "failed" not in end.message

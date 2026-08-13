@@ -57,8 +57,8 @@ def transform(parent: lumberjack.TaskHandle, rows: list[int]) -> None:
     # does the counting. An uncounted task is indeterminate, not broken.
     with parent.subtask("transform"):
         # `track()` counts for you when you are already iterating something.
-        # It takes its total from `len()`, and nests under `t` because `t` is
-        # entered — this thread's ambient task.
+        # It takes its total from `len()`, and nests under the subtask above
+        # because that subtask is entered — this thread's ambient task.
         for i in lumberjack.track(rows, name="normalize"):
             log.debug("normalized record %d", i)
             if i == len(rows) // 2:
