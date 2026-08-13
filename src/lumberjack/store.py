@@ -147,12 +147,21 @@ class SQLiteRecordStore(RecordStore):
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
-        with self._lock:
-            if path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
-            self._reject_a_foreign_schema()
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+        try:
+            with self._lock:
+                if path != ":memory:":
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                self._reject_a_foreign_schema()
+                self._conn.executescript(_SCHEMA)
+                self._conn.commit()
+        except BaseException:
+            # Failing here must not leave the connection open and unreachable
+            # — the same rule `init()` follows for a store it created. From
+            # 3.13 an unclosed connection also emits a ResourceWarning at
+            # collection, which this suite turns into an error, so a leak
+            # here fails an unrelated test later.
+            self._conn.close()
+            raise
 
     def _reject_a_foreign_schema(self) -> None:
         """Fail loudly on a store file an older lumberjack wrote.

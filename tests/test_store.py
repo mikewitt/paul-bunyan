@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 import time
 
@@ -227,3 +228,20 @@ def test_a_fresh_store_file_opens_and_reopens(tmp_path, make_row):
         assert [r.message for r in second.recent()] == ["written"]
     finally:
         second.close()
+
+
+def test_a_rejected_store_file_does_not_leak_its_connection(tmp_path, recwarn):
+    """Raising from `__init__` must still close the connection it opened.
+    From 3.13 an unclosed one emits a ResourceWarning when collected, and
+    `filterwarnings = ["error"]` turns that into a failure in whichever
+    unrelated test happens to trigger the collection."""
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, msg TEXT)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError):
+        SQLiteRecordStore(path)
+    gc.collect()
+    assert not [w for w in recwarn if issubclass(w.category, ResourceWarning)]
