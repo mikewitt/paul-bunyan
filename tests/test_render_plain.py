@@ -32,6 +32,26 @@ def test_json_lines_mode_is_valid_json_per_line(make_row):
     assert not any(_ANSI_RE.search(line) for line in lines)
 
 
+def test_json_lines_mode_carries_the_progress_columns(make_row):
+    """`asdict()` picks up new fields for free, so this guards the guarantee
+    rather than the mechanism: a JSON consumer sees progress without a join."""
+    stream = io.StringIO()
+    renderer = PlainTextRenderer(stream=stream, json_lines=True)
+    renderer.render(
+        make_row(
+            task_label="reindex",
+            task_event="update",
+            task_id=7,
+            progress_current=40,
+            progress_total=100,
+        )
+    )
+    parsed = json.loads(stream.getvalue())
+    assert parsed["task_label"] == "reindex"
+    assert parsed["task_event"] == "update"
+    assert (parsed["progress_current"], parsed["progress_total"]) == (40, 100)
+
+
 def test_render_writes_through_immediately(make_row):
     stream = io.StringIO()
     renderer = PlainTextRenderer(stream=stream)

@@ -82,8 +82,13 @@ jobs:
   bare:
     # Design principle 8: `pip install lumberjack` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
-    # `test` installs rich, so without this job the no-rich path — the whole
-    # `except ImportError` guard in rich_renderer.py — never runs in CI.
+    # `test` installs every extra, so without this job no `except ImportError`
+    # guard in the package — rich_renderer.py's or otel.py's — ever runs in CI.
+    #
+    # The job name is stale (it now guards three optional dependencies, not
+    # one) but deliberately unchanged: `name:` is the check name GitHub
+    # reports, so renaming it orphans the required status check in trunk's
+    # branch protection. Not worth blocking a merge on a settings change.
     name: bare install (no rich)
     runs-on: ubuntu-latest
     steps:
@@ -94,14 +99,23 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       # No --all-extras: dev tooling, but none of the optional dependencies.
       - run: uv sync
-      - name: Assert rich really is absent
+      - name: Assert the optional dependencies really are absent
         # Without this the job silently becomes a duplicate of `test` the day
-        # rich turns up in the default install.
+        # one of them turns up in the default install. Principle 9 owes a
+        # degradation test per optional dependency, so all three are named.
         run: |
           uv run python - <<'EOF'
           import importlib.util, sys
-          if importlib.util.find_spec("rich") is not None:
-              sys.exit("rich is installed; this job no longer tests the bare install")
+          present = [
+              name
+              for name in ("rich", "opentelemetry", "duckdb")
+              if importlib.util.find_spec(name) is not None
+          ]
+          if present:
+              sys.exit(
+                  f"{', '.join(present)} installed; this job no longer tests "
+                  "the bare install"
+              )
           EOF
       - run: uv run pytest
 
@@ -129,13 +143,23 @@ jobs:
           cd /tmp
           /tmp/wheeltest/bin/python - <<'EOF'
           import importlib.resources, logging, lumberjack
+          # The tracking API before init(), in the only genuinely
+          # zero-dependency environment CI has: a library instrumenting with
+          # bare lumberjack installed must be inert, not broken.
+          with lumberjack.task("before init", total=2) as t:
+              for _ in lumberjack.track(range(2), name="items"):
+                  t.advance()
           # Zero required dependencies: importing must not need the extras.
           lumberjack.init(output_mode="plain", flush_interval=0)
           logging.getLogger("smoke").warning("installed wheel works")
           store = lumberjack.current_store()
           assert store is not None
+          with lumberjack.task("after init"):
+              pass
           lumberjack.flush()
-          assert len(store.recent()) == 1, "record never reached the store"
+          rows = store.recent()
+          assert len(rows) == 3, f"expected the log line and two task rows, got {len(rows)}"
+          assert [r.task_event for r in rows if r.task_event] == ["start", "end"]
           lumberjack.shutdown()
           # py.typed has to be in the wheel or downstream type checking of
           # lumberjack silently does nothing.

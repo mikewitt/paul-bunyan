@@ -7,12 +7,15 @@ A drop-in UX layer for Python's stdlib `logging`. Capture every log record at
 full fidelity into a queryable store, while rendering something concise —
 instead of a thousand scrolling `DEBUG` lines, render progress.
 
-**Status: early scaffolding.** Capture, storage (SQLite), output-mode
-detection, plain/rich rendering, and a first live progress bar are in place.
+**Status: early, and pre-1.0.** Capture, storage (SQLite), output-mode
+detection, plain/rich rendering, a live progress bar, and the explicit
+`track()` / `task()` API with outbound OpenTelemetry spans are in place.
 The bar's repetition detection is deliberately crude for now — records are
 grouped by *source location*, so a log call inside a loop becomes one bar.
-Template-based repetition analysis and the explicit `track`/`task` API are
-later phases and do not exist yet — see `CLAUDE.md` for the full plan.
+Template-based repetition analysis is a later phase, and so is drawing
+`task()`'s exact counts as named, determinate bars — today those counts go
+into the store rather than onto the display. See `CLAUDE.md` for the full
+plan.
 
 ## Install
 
@@ -23,8 +26,8 @@ pip install lumberjack[recommended]  # + rich, for interactive terminal output (
 
 ## What use looks like
 
-Three rungs, and you stop at the one you need. The first is the normal case;
-the other two are opt-in.
+Four rungs, and you stop at the one you need. The first is the normal case;
+the rest are opt-in.
 
 ### 1. Drop it in
 
@@ -69,12 +72,12 @@ One bar per source location — three loops, three bars, no concurrency-specific
 setup. (Grouping is by source location, not by worker: two threads running the
 same loop share a bar today, though thread and process are still recorded on
 every record.) The count climbs but there is no percentage, because nothing
-here knows how many iterations are still coming; exact totals are what the
-`track()` / `task()` API will add in a later phase.
+here knows how many iterations are still coming. [Telling it](#2-tell-it-what-the-work-is)
+is what `track()` and `task()` are for.
 
 Nothing is lost to the collapse:
 
-- every record is in the store, queryable — that is [rung 2](#2-read-back-what-was-captured);
+- every record is in the store, queryable — that is [rung 3](#3-read-back-what-was-captured);
 - `WARNING` and above still prints above the bars, because the one line you
   actually needed to see must not be hidden by the thing that hides noise;
 - when the display is the lossy kind, the last 50 records are replayed at exit,
@@ -125,9 +128,72 @@ on the way out. The background flush thread is a daemon, so it never delays
 interpreter shutdown either.
 
 `shutdown()` is for the cases where process exit is *not* the end of the story
-— [rung 3](#3-manage-the-lifecycle-if-you-need-to).
+— [rung 4](#4-manage-the-lifecycle-if-you-need-to).
 
-### 2. Read back what was captured
+### 2. Tell it what the work is
+
+Rung 1 infers progress from how often a log line repeats, which can show that
+work is happening but never how much is left. `task()` and `track()` are how
+code says so outright.
+
+```python
+import lumberjack
+
+for doc in lumberjack.track(docs, name="reindex"):
+    index(doc)
+
+# or, when you are not iterating anything:
+with lumberjack.task("migrate", total=len(tables)) as t:
+    for table in tables:
+        migrate(table)
+        t.advance()
+```
+
+`track()` mirrors `tqdm`; `task()` mirrors an OpenTelemetry span. Tasks nest,
+and `t.subtask("name")` parents a child explicitly — which is what you want
+off the main thread, since context does not propagate into a bare
+`threading.Thread`:
+
+```python
+with lumberjack.task("etl run") as run:
+    threading.Thread(target=worker, args=(run,)).start()
+
+def worker(parent):
+    with parent.subtask("extract", total=700) as t:
+        ...
+        t.advance()
+```
+
+**This works in libraries, and imposes nothing on their users.** Unlike
+`init()`, the tracking API has no import-time or call-time dependency on
+anything being configured. What your `task()` call *becomes* is decided
+entirely by the application that runs your code:
+
+| The application has | Your `task()` produces |
+| --- | --- |
+| just `pip install lumberjack` | nothing at all — no output, no log line |
+| OpenTelemetry configured the normal way | OTel spans |
+| called `lumberjack.init()` | records in the store, and the display |
+| both | both |
+
+So a library can instrument freely: no imposed dependency, and no lines
+printed into a host application's logs unless that application asked for
+them.
+
+Two things worth knowing:
+
+- **Progress ticks are sampled** — roughly one record per 50ms, not one per
+  `advance()`. Piped to a file, output is write-through: a record per item
+  would print a line per item, which is the thing this package exists to
+  avoid. Counts stay exact regardless, because the value is absolute and the
+  closing record carries the final one.
+- **The live bars are still rung-1 bars.** Task counts and hierarchy go into
+  the store today; drawing them as named, determinate bars is the next phase.
+  Read them back with `current_store()` in the meantime.
+
+`examples/tracking.py` is the whole thing end to end.
+
+### 3. Read back what was captured
 
 The display is lossy on purpose. The store is not, and `current_store()` is
 the supported way in.
@@ -157,8 +223,8 @@ timestamp); with neither, it returns the lot. Each record carries stdlib
 `LogRecord`'s attributes — `message`, `level_name`, `level_no`, `logger_name`,
 `pathname`, `filename`, `func_name`, `lineno`, `created`, `exc_text` — plus
 the attribution lumberjack captures at write time: `thread_name`,
-`process_name`, `task_name` (asyncio), and columns held for the task hierarchy
-and template clustering that later phases fill in.
+`process_name`, `asyncio_task_name` / `asyncio_task_id`, and columns held for
+the task hierarchy and template clustering that later phases fill in.
 
 The `flush()` is only needed because the read happens immediately after the
 writes. A background pump drains the buffer into the store every 200ms, so in
@@ -168,7 +234,7 @@ a real run the store is already near-current; `flush()` just removes the race.
 `examples/demo.py` uses a couple of them. Treat the rest as unstable for now:
 it is the interface the renderers are still being built against.
 
-### 3. Manage the lifecycle, if you need to
+### 4. Manage the lifecycle, if you need to
 
 `shutdown()` reverses `init()`: it stops the pump, flushes the buffer, tears
 down the live display, puts back the root logger's handlers *and* its level,
@@ -228,7 +294,9 @@ def test_the_worker_reports_progress(records):
 
 | Function | When |
 | --- | --- |
-| `init(**options)` | Always. For most applications it is the only call. Returns the handler. |
+| `init(**options)` | Applications only. For most of them it is the only call. Returns the handler. |
+| `track(iterable, name=...)` | Wrapping a loop you are already writing. Works in libraries, with or without `init()`. |
+| `task(name, total=...)` | Naming a unit of work that is not a loop, or one with subtasks. Same everywhere rules. |
 | `current_store()` | To query captured records — `current_store().recent()`. |
 | `flush()` | To drain the write buffer into the store now rather than waiting up to one pump interval. |
 | `shutdown()` | Only when the process outlives the run: tests, notebooks, code handing the root logger back. |

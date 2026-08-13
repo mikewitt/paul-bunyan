@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 
 from lumberjack.handler import DEFAULT_BUFFER_SIZE, LumberjackHandler
+from lumberjack.schema import EXTRA_KEY, TaskEvent
+from lumberjack.store import SQLiteRecordStore
 
 
 def _emit(handler: LumberjackHandler, message: str) -> None:
@@ -74,3 +76,41 @@ def test_on_record_callback_invoked_per_record():
 
 def test_default_buffer_size_is_positive():
     assert DEFAULT_BUFFER_SIZE > 0
+
+
+def test_a_task_event_travels_extra_through_the_handler_to_the_store():
+    """The whole seam, end to end on real objects: a `logging` call carrying
+    `extra={EXTRA_KEY: TaskEvent(...)}` comes back out of the store with its
+    progress columns intact. This is the route the tracking API takes, and the
+    reason it needs no side-channel write of its own — the handler stays the
+    only writer."""
+    handler = LumberjackHandler(level=logging.DEBUG)
+    store = SQLiteRecordStore(":memory:")
+    logger = logging.getLogger("task-event-roundtrip")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        logger.info(
+            "task progress: reindex 40/100",
+            extra={
+                EXTRA_KEY: TaskEvent(
+                    label="reindex",
+                    kind="update",
+                    task_id=7,
+                    parent_task_id=3,
+                    current=40,
+                    total=100,
+                )
+            },
+        )
+        store.append(handler.drain())
+        (row,) = store.recent()
+    finally:
+        logger.removeHandler(handler)
+        store.close()
+    assert row.task_label == "reindex"
+    assert row.task_event == "update"
+    assert (row.task_id, row.parent_task_id) == (7, 3)
+    assert (row.progress_current, row.progress_total) == (40, 100)
+    assert row.message == "task progress: reindex 40/100"

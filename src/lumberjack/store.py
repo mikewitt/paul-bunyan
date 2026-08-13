@@ -50,9 +50,14 @@ _COLUMNS = (
     "process_name",
     "exc_text",
     "stack_text",
-    "task_name",
+    "asyncio_task_name",
+    "asyncio_task_id",
     "task_id",
     "parent_task_id",
+    "task_label",
+    "task_event",
+    "progress_current",
+    "progress_total",
     "template_id",
 )
 _GET_COLUMNS = attrgetter(*_COLUMNS)
@@ -117,9 +122,14 @@ CREATE TABLE IF NOT EXISTS records (
     process_name    TEXT NOT NULL,
     exc_text        TEXT,
     stack_text      TEXT,
-    task_name       TEXT,
+    asyncio_task_name TEXT,
+    asyncio_task_id INTEGER,
     task_id         INTEGER,
     parent_task_id  INTEGER,
+    task_label      TEXT,
+    task_event      TEXT,
+    progress_current INTEGER,
+    progress_total  INTEGER,
     template_id     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_records_created     ON records(created);
@@ -137,11 +147,49 @@ class SQLiteRecordStore(RecordStore):
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
-        with self._lock:
-            if path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+        try:
+            with self._lock:
+                if path != ":memory:":
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                self._reject_a_foreign_schema()
+                self._conn.executescript(_SCHEMA)
+                self._conn.commit()
+        except BaseException:
+            # Failing here must not leave the connection open and unreachable
+            # — the same rule `init()` follows for a store it created. From
+            # 3.13 an unclosed connection also emits a ResourceWarning at
+            # collection, which this suite turns into an error, so a leak
+            # here fails an unrelated test later.
+            self._conn.close()
+            raise
+
+    def _reject_a_foreign_schema(self) -> None:
+        """Fail loudly on a store file an older lumberjack wrote.
+
+        `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a file
+        predating a schema change keeps its old columns and every `INSERT`
+        raises. Nothing would surface that: the flush pump swallows exceptions
+        per tick by design, and so does teardown's final flush — the run would
+        record nothing and say nothing. Pre-1.0 means we may break such a file;
+        it does not mean breaking it in silence.
+
+        Checked before `_SCHEMA` runs, so the message names the mismatch rather
+        than whichever `CREATE INDEX` happens to trip over a missing column.
+        """
+        found = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(records)").fetchall()
+        }
+        if not found:
+            return  # no table yet, which is the ordinary case
+        missing = sorted(set(_COLUMNS) - found)
+        if missing:
+            raise RuntimeError(
+                f"{self._path!r} holds a `records` table from a different "
+                f"lumberjack schema, missing {missing}. lumberjack is pre-1.0 "
+                "with no migration path yet: delete the file or point at a new "
+                "one."
+            )
 
     def append(self, rows: Sequence[LogRecordRow]) -> None:
         if not rows:
