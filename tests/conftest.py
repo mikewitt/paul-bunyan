@@ -66,6 +66,10 @@ def make_row() -> Callable[..., LogRecordRow]:
             asyncio_task_id=None,
             task_id=None,
             parent_task_id=None,
+            task_label=None,
+            task_event=None,
+            progress_current=None,
+            progress_total=None,
             template_id=None,
         )
         fields.update(overrides)

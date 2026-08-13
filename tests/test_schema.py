@@ -6,7 +6,7 @@ import gc
 import logging
 import sys
 
-from lumberjack.schema import LogRecordRow, StoredRecord
+from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord, TaskEvent
 
 
 def _make_record(**overrides: object) -> logging.LogRecord:
@@ -40,6 +40,53 @@ def test_from_log_record_reserved_fields_default_to_none():
     assert row.task_id is None
     assert row.parent_task_id is None
     assert row.template_id is None
+
+
+# --- the `extra=` seam the tracking API writes through ----------------------
+
+
+def _record_carrying(payload: object) -> logging.LogRecord:
+    """A record with `payload` under the extra key.
+
+    `setattr` after construction is precisely what `logging` does with
+    `extra=` — `Logger.makeRecord` copies the mapping onto `record.__dict__`.
+    """
+    record = _make_record()
+    setattr(record, EXTRA_KEY, payload)
+    return record
+
+
+def test_a_task_event_populates_the_progress_columns():
+    event = TaskEvent(
+        label="reindex",
+        kind="update",
+        task_id=7,
+        parent_task_id=3,
+        current=40,
+        total=100,
+    )
+    row = LogRecordRow.from_log_record(_record_carrying(event))
+    assert (row.task_label, row.task_event) == ("reindex", "update")
+    assert (row.task_id, row.parent_task_id) == (7, 3)
+    assert (row.progress_current, row.progress_total) == (40, 100)
+
+
+def test_a_task_event_without_progress_leaves_those_columns_null():
+    """An indeterminate task is the common case: `task()` with no total."""
+    event = TaskEvent(label="migrate", kind="start", task_id=1)
+    row = LogRecordRow.from_log_record(_record_carrying(event))
+    assert (row.task_label, row.task_event) == ("migrate", "start")
+    assert (row.progress_current, row.progress_total) == (None, None)
+    assert row.parent_task_id is None
+
+
+def test_a_foreign_attribute_under_our_key_is_ignored():
+    """Somebody else's `extra={"lumberjack": ...}` must not crash `emit()` for
+    every record in the process — it degrades to a record with no task data."""
+    row = LogRecordRow.from_log_record(_record_carrying({"label": "not ours"}))
+    assert row.task_label is None
+    assert row.task_event is None
+    assert row.task_id is None
 
 
 def test_from_log_record_captures_exception_text():

@@ -11,7 +11,13 @@ import asyncio
 import dataclasses
 import itertools
 import logging
-from typing import NamedTuple
+from typing import Literal, NamedTuple
+
+#: The single `extra=` key the tracking API attaches its payload under.
+#: Verified not to collide with any existing `LogRecord` attribute — unlike
+#: `taskName`, which does exist and is why asyncio attribution had to be
+#: renamed.
+EXTRA_KEY = "lumberjack"
 
 #: Source of the per-task ids below. `id()` is not usable: CPython reuses the
 #: address of a collected object, so two tasks that never overlap in time can
@@ -22,6 +28,28 @@ _asyncio_task_ids = itertools.count(1)
 #: task keeps the counter monotonic *and* the id stable for the task's life,
 #: which a bare `next()` per record would not be.
 _TASK_ID_ATTR = "_lumberjack_task_id"
+
+
+#: Where a task event sits in the task's life. Stored as text.
+TaskEventKind = Literal["start", "update", "end"]
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class TaskEvent:
+    """What the tracking API attaches to a `LogRecord`, under one `extra=` key.
+
+    One typed key rather than four loose `extra` names: one collision surface
+    instead of four, and the `isinstance` check at the read end means a foreign
+    `record.lumberjack` from some other library degrades to "no task data"
+    rather than crashing `emit()` for every record in the process.
+    """
+
+    label: str
+    kind: TaskEventKind
+    task_id: int
+    parent_task_id: int | None = None
+    current: int | None = None
+    total: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -51,6 +79,16 @@ class LogRecordRow:
     asyncio_task_id: int | None
     task_id: int | None
     parent_task_id: int | None
+
+    # Progress, as four columns rather than a blob: structure at write time
+    # (Principle 3), and `progress_current`/`progress_total` are the two
+    # numbers a determinate bar reads. A JSON blob would need JSON1, which
+    # does not carry over to DuckDB.
+    task_label: str | None
+    task_event: TaskEventKind | None
+    progress_current: int | None
+    progress_total: int | None
+
     template_id: int | None
 
     @classmethod
@@ -59,6 +97,12 @@ class LogRecordRow:
         if exc_text is None and record.exc_info:
             # lumberjack: see issue #18 (formatter could be a singleton)
             exc_text = logging.Formatter().formatException(record.exc_info)
+
+        # A foreign attribute under our key is somebody else's, not a bug to
+        # raise on: ignore it and store the record without task data.
+        event = getattr(record, EXTRA_KEY, None)
+        if not isinstance(event, TaskEvent):
+            event = None
 
         return cls(
             logger_name=record.name,
@@ -80,8 +124,12 @@ class LogRecordRow:
             stack_text=record.stack_info,
             asyncio_task_name=getattr(record, "taskName", None),
             asyncio_task_id=_current_asyncio_task_id(),
-            task_id=None,
-            parent_task_id=None,
+            task_id=event.task_id if event else None,
+            parent_task_id=event.parent_task_id if event else None,
+            task_label=event.label if event else None,
+            task_event=event.kind if event else None,
+            progress_current=event.current if event else None,
+            progress_total=event.total if event else None,
             template_id=None,
         )
 

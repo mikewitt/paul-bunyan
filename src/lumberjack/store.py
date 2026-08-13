@@ -54,6 +54,10 @@ _COLUMNS = (
     "asyncio_task_id",
     "task_id",
     "parent_task_id",
+    "task_label",
+    "task_event",
+    "progress_current",
+    "progress_total",
     "template_id",
 )
 _GET_COLUMNS = attrgetter(*_COLUMNS)
@@ -122,6 +126,10 @@ CREATE TABLE IF NOT EXISTS records (
     asyncio_task_id INTEGER,
     task_id         INTEGER,
     parent_task_id  INTEGER,
+    task_label      TEXT,
+    task_event      TEXT,
+    progress_current INTEGER,
+    progress_total  INTEGER,
     template_id     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_records_created     ON records(created);
