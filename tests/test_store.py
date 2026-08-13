@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import dataclasses
+import sqlite3
 import time
 
 import pytest
 
-from lumberjack.schema import LogRecordRow, SourceKey, StoredRecord
+from lumberjack.schema import SourceKey
 from lumberjack.store import _COLUMNS, SQLiteRecordStore
 
 
@@ -168,19 +168,7 @@ def test_append_empty_is_noop(store):
     assert store.recent() == []
 
 
-# --- schema/column parity, SQLite-specific -------------------------------
-#
-# Three lists have to agree: the dataclass fields, the INSERT column tuple,
-# and the CREATE TABLE. Nothing links them, and `kw_only=True` means a field
-# with a default now constructs fine while silently never reaching the store.
-
-
-def test_row_fields_and_insert_columns_agree():
-    assert {f.name for f in dataclasses.fields(LogRecordRow)} == set(_COLUMNS)
-
-
-def test_stored_record_is_a_row_plus_id():
-    assert {f.name for f in dataclasses.fields(StoredRecord)} == set(_COLUMNS) | {"id"}
+# --- the created table matches the INSERT, SQLite-specific ------------
 
 
 def test_insert_columns_and_created_table_agree():
@@ -191,3 +179,51 @@ def test_insert_columns_and_created_table_agree():
     finally:
         sqlite_store.close()
     assert {r["name"] for r in rows} == set(_COLUMNS) | {"id"}
+
+
+def test_a_store_file_from_an_older_schema_fails_loudly(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` leaves an old table alone, so every INSERT
+    would raise — and both the pump and teardown swallow exceptions by design,
+    so the run would record nothing and say nothing. Pre-1.0 lets us break such
+    a file; it does not let us break it in silence.
+
+    The fixture is the real pre-rename table, not a toy: it keeps every column
+    the indexes touch, so `_SCHEMA` itself runs clean and only the writes would
+    have failed. A table missing `created` would trip `CREATE INDEX` instead
+    and prove nothing about the case that actually goes quiet.
+    """
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    added_since = {
+        "asyncio_task_name",
+        "asyncio_task_id",
+        "task_label",
+        "task_event",
+        "progress_current",
+        "progress_total",
+    }
+    old_columns = [c for c in _COLUMNS if c not in added_since] + ["task_name"]
+    conn.execute(
+        "CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        + ", ".join(f"{c} TEXT" for c in old_columns)
+        + ")"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="different lumberjack schema"):
+        SQLiteRecordStore(path)
+
+
+def test_a_fresh_store_file_opens_and_reopens(tmp_path, make_row):
+    """The guard must not fire on a file lumberjack itself just wrote."""
+    path = str(tmp_path / "fresh.db")
+    first = SQLiteRecordStore(path)
+    first.append([make_row(message="written")])
+    first.close()
+
+    second = SQLiteRecordStore(path)
+    try:
+        assert [r.message for r in second.recent()] == ["written"]
+    finally:
+        second.close()

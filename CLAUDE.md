@@ -26,15 +26,16 @@ The intended experience is a value ladder:
 1. **Zero-config first run.** `init()` visibly improves output with no other changes.
 2. **Store, then render.** Records are captured into a store first; every renderer reads from that store rather than transforming the log stream inline. This is what allows a live TTY view and a plain file consumer simultaneously without divergent logic.
 3. **Concurrency-aware by design.** Source attribution (thread/process/asyncio task) is captured as structured metadata at write time — never inferred later from message text.
-4. **`init()` is for applications, never libraries.** Standard Python convention: apps configure logging, libraries attach a `NullHandler` and stay quiet. `init()` takes exclusive ownership of output (replaces existing root logger handlers by default, opt-out to layer instead). Corollary: the tracking API (`track`/`task`) must work *without* `init()` having been called — a library can use it and, absent initialization, it is **inert**: no store to write to, so nothing is written, and no log line either. What it produces depends on three independent axes, and the library controls none of them:
+4. **`init()` is for applications, never libraries.** Standard Python convention: apps configure logging, libraries attach a `NullHandler` and stay quiet. `init()` takes exclusive ownership of output (replaces existing root logger handlers by default, opt-out to layer instead). Corollary: the tracking API (`track`/`task`) must work *without* `init()` having been called — a library can use it and, absent initialization, it is **inert**: no store to write to, so nothing is written, and no log line either. What it produces is decided by two independent switches the *application* owns, never the library:
 
-| App has | `task()` produces |
-|---|---|
-| bare lumberjack, no `init()` | nothing |
-| OTel configured normally (the app calls `set_tracer_provider`) | OTel spans |
-| `lumberjack.init()` | records in the store, and thence the display |
+   | OTel configured? | `init()` called? | `task()` produces |
+   |---|---|---|
+   | no | no | nothing |
+   | yes | no | OTel spans |
+   | no | yes | records in the store, and thence the display |
+   | yes | yes | both |
 
-OTel spans depend on **OTel's** configuration, never on `init()` — an unconfigured OTel no-ops through its own `NoOpTracer`, so lumberjack adds no gating of its own. No import-time or call-time dependency on `init()`. (Emitting task events as ordinary log lines when there is no session is deliberately *not* the default — it would print a library's instrumentation into any host app that configured logging. See issue #31.)
+   OTel spans depend on **OTel's** configuration, never on `init()` — an unconfigured OTel no-ops through its own `NoOpTracer`, so lumberjack adds no gating of its own. Calling the tracking API before `init()` is legal, cheap, and never raises; there is no import-time or call-time *requirement* that `init()` has run. (Emitting task events as ordinary log lines when there is no session is deliberately *not* the default — it would print a library's instrumentation into any host app that configured logging. See issue #31.)
 5. **Never assume a human is watching.** Live-redraw output (ANSI, cursor control, in-place bars) is harmful when piped to a file or another program. Detect the consumer (TTY vs pipe/file) and pick a mode accordingly, with an explicit override.
 6. **Lossy display, lossless store — and never corrupt a traceback.** The store→display path is deliberately lossy (that's the product: verbose logging in, concise progress out). The buffer→store path must not drop records. Separately: a live TTY display must be torn down cleanly on exit *and* on unhandled exception, before Python's excepthook prints — otherwise the traceback gets mangled by cursor control or overwritten by a redraw. An `atexit` dump of the last N records is a cheap diagnostic on top of that.
 7. **Standard-library-native.** Built on `logging.Handler`/`Filter`/`LogRecord`. Never require replacing `logging` calls.
@@ -57,7 +58,7 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 ### Components
 
 - `lumberjack.init()` — installs the handler, takes ownership of the root logger, starts the store and renderer(s).
-- `Session` — the components one `init()` owns (handler, store, renderer, output mode, pump) plus what `shutdown()` must put back (the root logger's prior handlers and level). `init()` and `teardown` share one instance rather than each keeping their own copies; `_session is None` is the single "is lumberjack running" question.
+- `Session` — the components one `init()` owns (handler, store, renderer, output mode, pump) plus what `shutdown()` must put back (the root logger's prior handlers and level). `init()` and `teardown` share one instance rather than each keeping their own copies of its parts. The instance lives in `session.py`, and `current_session() is None` is the single "is lumberjack running" question. `teardown` deliberately keeps its *own* reference to it, as an install token: it is installed and uninstalled on its own lifecycle, and its whole test suite drives it with fakes and no `init()` at all.
 - `LumberjackHandler` — `logging.Handler` subclass; writes to a bounded write buffer (`collections.deque`) with source attribution. The bound is real: overflow evicts unread records, so the handler counts them and teardown reports the total at exit.
 - `RecordStore` — pluggable interface (SQLite default/stdlib, DuckDB optional) behind the shared write buffer. Roughly: `append(records)`, `recent(n | since)`, `count_by_template(window)`, `count_by_source(window)`, `count_by_source_since(after_id)`, `evict(before | keep_last)`, `templates()`. One implementation, two SQL dialects, one parametrized test suite across installed backends. `recent(n)` returns the last n oldest-first, which is also what the exit dump reads — there is deliberately no separate `tail()`. `count_by_source_since()` is the one anything on a timer should call: it groups only rows past a watermark, so a redraw costs what arrived rather than what the store holds.
 - Tracking API (`lumberjack.track`, `lumberjack.task`) — explicit progress reporting. When a session exists its events become `logging` records that travel the normal handler→buffer→store path, so the handler stays the only writer; with no session it emits nothing (see Design Principle 4). `task()` mirrors an OTel span; `track()` mirrors `tqdm`. Object model: `task(...)` returns a handle that is itself the context manager (`__enter__` returns `self`); `.subtask()` returns the same type for nesting.
@@ -77,7 +78,7 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 
 ### Record schema
 
-Derived from `logging.LogRecord`'s standard attributes (`name`, `levelname`, `levelno`, `msg`, `args`, `pathname`, `lineno`, `funcName`, `created`, `thread`, `threadName`, `process`, `processName`, `exc_info`, ...) plus lumberjack's own columns: asyncio task name (where determinable), task id / parent task id (from the tracking API, for hierarchy), template id (assigned once repetition analysis identifies a recurring shape).
+Derived from `logging.LogRecord`'s standard attributes (`name`, `levelname`, `levelno`, `msg`, `args`, `pathname`, `lineno`, `funcName`, `created`, `thread`, `threadName`, `process`, `processName`, `exc_info`, ...) plus lumberjack's own columns: asyncio task name and asyncio task id (where determinable), task id / parent task id (from the tracking API, for hierarchy), template id (assigned once repetition analysis identifies a recurring shape).
 
 ### Storage backends
 

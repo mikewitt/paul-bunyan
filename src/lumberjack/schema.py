@@ -19,15 +19,36 @@ from typing import Literal, NamedTuple
 #: renamed.
 EXTRA_KEY = "lumberjack"
 
-#: Source of the per-task ids below. `id()` is not usable: CPython reuses the
-#: address of a collected object, so two tasks that never overlap in time can
-#: share an id and their records merge into one apparent task.
 _asyncio_task_ids = itertools.count(1)
-
-#: Attribute the id is cached under, on the task object itself. Keying off the
-#: task keeps the counter monotonic *and* the id stable for the task's life,
-#: which a bare `next()` per record would not be.
 _TASK_ID_ATTR = "_lumberjack_task_id"
+
+
+def _current_asyncio_task_id() -> int | None:
+    """A collision-free id for the running asyncio task, or None outside one.
+
+    `id()` is not usable: it is the object's address, and CPython hands the
+    address of a collected task to the next one of the same shape, so two
+    tasks that never overlapped in time merge into one apparent task. The id
+    comes from a counter instead, cached on the task object so it stays stable
+    for that task's life. lumberjack: closes issue #4.
+
+    No lock: `itertools.count.__next__` is a single C call, and
+    `asyncio.current_task()` only ever returns a task owned by the calling
+    thread's loop, so one thread ever writes a given task's attribute.
+    """
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    if task is None:
+        return None
+    task_id: int | None = getattr(task, _TASK_ID_ATTR, None)
+    if task_id is None:
+        task_id = next(_asyncio_task_ids)
+        # `_asyncio.Task` accepts instance attributes despite exposing no
+        # `__dict__`; a `__slots__` subclass inherits that same storage.
+        setattr(task, _TASK_ID_ATTR, task_id)
+    return task_id
 
 
 #: Where a task event sits in the task's life. Stored as text.
@@ -132,28 +153,6 @@ class LogRecordRow:
             progress_total=event.total if event else None,
             template_id=None,
         )
-
-
-def _current_asyncio_task_id() -> int | None:
-    """A collision-free id for the running asyncio task, or None outside one.
-
-    Cached on the task object so every record from one task reports the same
-    id, and drawn from a counter so a task collected before the next one
-    starts cannot hand its id on. lumberjack: closes issue #4.
-    """
-    try:
-        task = asyncio.current_task()
-    except RuntimeError:
-        return None
-    if task is None:
-        return None
-    task_id: int | None = getattr(task, _TASK_ID_ATTR, None)
-    if task_id is None:
-        task_id = next(_asyncio_task_ids)
-        # Sticks even on the C `_asyncio.Task`, and on a `__slots__` subclass
-        # of it, both of which keep a `__dict__` from the un-slotted base.
-        setattr(task, _TASK_ID_ATTR, task_id)
-    return task_id
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)

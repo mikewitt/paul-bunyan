@@ -5,12 +5,17 @@ parallel module globals in both places meant two sets of names with nothing
 keeping them in step — plus a `X is not None` guard at every use, because
 each name was independently optional even though they are only ever set and
 cleared together. One object instead: holding the `Session` means holding
-all of it, and `current_session() is None` is the single question worth asking.
+all of it, and `current_session() is None` is the single question worth
+asking of `init()`.
+
+`teardown` keeps its own reference to the same object on purpose, as an
+install token rather than a second copy of this state — it owns the
+excepthook and the atexit hook on its own lifecycle, and its tests drive it
+with fakes and no `init()` at all.
 
 The registry lives here rather than in `__init__.py` so that modules
 `__init__.py` imports can still ask whether lumberjack is running.
-`tracking.py` needs exactly that and cannot import `lumberjack` at module
-level without a cycle.
+`tracking.py` needs exactly that.
 """
 
 from __future__ import annotations

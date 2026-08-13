@@ -5,8 +5,10 @@ import dataclasses
 import gc
 import logging
 import sys
+import threading
 
 from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord, TaskEvent
+from lumberjack.store import _COLUMNS
 
 
 def _make_record(**overrides: object) -> logging.LogRecord:
@@ -189,3 +191,47 @@ def test_concurrent_asyncio_tasks_get_distinct_ids():
 
     asyncio.run(main())
     assert len(set(ids)) == 5
+
+
+def test_tasks_in_separate_event_loops_get_distinct_ids():
+    """The counter is process-wide but the loops are not. Two threads each
+    running their own loop is the shape Principle 3 exists for, and the one
+    a single-loop test cannot speak to."""
+    ids: list[int | None] = []
+    guard = threading.Lock()
+    threads, per_loop = 6, 10
+
+    async def inner() -> None:
+        task_id = LogRecordRow.from_log_record(_make_record()).asyncio_task_id
+        with guard:
+            ids.append(task_id)
+        await asyncio.sleep(0)
+
+    async def main() -> None:
+        await asyncio.gather(*(inner() for _ in range(per_loop)))
+
+    workers = [
+        threading.Thread(target=lambda: asyncio.run(main())) for _ in range(threads)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert len(ids) == threads * per_loop
+    assert len(set(ids)) == len(ids)
+
+
+# --- schema/column parity ---------------------------------------------------
+#
+# Three lists have to agree: the dataclass fields, the INSERT column tuple,
+# and the CREATE TABLE. Nothing links them, and `kw_only=True` means a field
+# with a default now constructs fine while silently never reaching the store.
+
+
+def test_row_fields_and_insert_columns_agree():
+    assert {f.name for f in dataclasses.fields(LogRecordRow)} == set(_COLUMNS)
+
+
+def test_stored_record_is_a_row_plus_id():
+    assert {f.name for f in dataclasses.fields(StoredRecord)} == set(_COLUMNS) | {"id"}
