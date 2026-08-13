@@ -15,7 +15,7 @@ from lumberjack.detect import OutputMode, OutputModeDetector
 from lumberjack.handler import DEFAULT_BUFFER_SIZE, LumberjackHandler
 from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
 from lumberjack.renderers import Renderer, create_renderer
-from lumberjack.session import Session
+from lumberjack.session import Session, current_session, set_current_session
 from lumberjack.store import RecordStore, SQLiteRecordStore
 
 try:
@@ -34,10 +34,6 @@ __all__ = [
     "current_output_mode",
     "__version__",
 ]
-
-# The one piece of module state, and it is unguarded by any lock.
-# lumberjack: see issue #11
-_session: Session | None = None
 
 
 def init(
@@ -64,8 +60,7 @@ def init(
     Failing partway through leaves the process as it was found: a store
     created here is closed again rather than left open and unreachable.
     """
-    global _session
-    if _session is not None:
+    if current_session() is not None:
         raise RuntimeError(
             "lumberjack.init() already called; call lumberjack.shutdown() first"
         )
@@ -108,7 +103,7 @@ def init(
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
-    _session = session
+    set_current_session(session)
 
     if flush_interval > 0:
         session.pump = FlushPump(interval=flush_interval, flush=flush)
@@ -127,8 +122,7 @@ def shutdown() -> None:
     Closes the store only if lumberjack created it — a store the caller passed
     to `init()` stays open so it can still be queried afterward.
     """
-    global _session
-    session = _session
+    session = current_session()
     if session is None:
         return
     if session.pump is not None:
@@ -145,12 +139,12 @@ def shutdown() -> None:
     root.setLevel(session.prev_level)
     if session.owns_store:
         session.store.close()
-    _session = None
+    set_current_session(None)
 
 
 def flush() -> None:
     """Drain the handler's buffer into the store on demand."""
-    session = _session
+    session = current_session()
     if session is None:
         return
     rows = session.handler.drain()
@@ -160,12 +154,13 @@ def flush() -> None:
 
 def is_initialized() -> bool:
     """True between a successful `init()` and the matching `shutdown()`."""
-    return _session is not None
+    return current_session() is not None
 
 
 def current_handler() -> LumberjackHandler | None:
     """The installed handler, or None if `init()` hasn't run."""
-    return _session.handler if _session is not None else None
+    session = current_session()
+    return session.handler if session is not None else None
 
 
 def current_store() -> RecordStore | None:
@@ -178,14 +173,17 @@ def current_store() -> RecordStore | None:
         assert store is not None  # init() ran
         rows = store.recent(n=100)
     """
-    return _session.store if _session is not None else None
+    session = current_session()
+    return session.store if session is not None else None
 
 
 def current_renderer() -> Renderer | None:
     """The renderer chosen for the detected output mode, or None."""
-    return _session.renderer if _session is not None else None
+    session = current_session()
+    return session.renderer if session is not None else None
 
 
 def current_output_mode() -> OutputMode | None:
     """The output mode `init()` resolved to, after override/env/TTY detection."""
-    return _session.output_mode if _session is not None else None
+    session = current_session()
+    return session.output_mode if session is not None else None

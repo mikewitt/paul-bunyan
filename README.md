@@ -157,8 +157,8 @@ timestamp); with neither, it returns the lot. Each record carries stdlib
 `LogRecord`'s attributes — `message`, `level_name`, `level_no`, `logger_name`,
 `pathname`, `filename`, `func_name`, `lineno`, `created`, `exc_text` — plus
 the attribution lumberjack captures at write time: `thread_name`,
-`process_name`, `task_name` (asyncio), and columns held for the task hierarchy
-and template clustering that later phases fill in.
+`process_name`, `asyncio_task_name` / `asyncio_task_id`, and columns held for
+the task hierarchy and template clustering that later phases fill in.
 
 The `flush()` is only needed because the read happens immediately after the
 writes. A background pump drains the buffer into the store every 200ms, so in

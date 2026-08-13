@@ -1,11 +1,16 @@
-"""The state a single `init()` owns.
+"""The state a single `init()` owns, and the registry holding the live one.
 
 `init()` and `teardown` need the same live components, and keeping them as
 parallel module globals in both places meant two sets of names with nothing
 keeping them in step — plus a `X is not None` guard at every use, because
 each name was independently optional even though they are only ever set and
 cleared together. One object instead: holding the `Session` means holding
-all of it, and `_session is None` is the single question worth asking.
+all of it, and `current_session() is None` is the single question worth asking.
+
+The registry lives here rather than in `__init__.py` so that modules
+`__init__.py` imports can still ask whether lumberjack is running.
+`tracking.py` needs exactly that and cannot import `lumberjack` at module
+level without a cycle.
 """
 
 from __future__ import annotations
@@ -40,3 +45,19 @@ class Session:
     prev_level: int
     #: Absent when `flush_interval=0` — the only genuinely optional member.
     pump: FlushPump | None = None
+
+
+# The one piece of module state, and it is unguarded by any lock.
+# lumberjack: see issue #11
+_current: Session | None = None
+
+
+def current_session() -> Session | None:
+    """The session `init()` installed, or None if lumberjack is not running."""
+    return _current
+
+
+def set_current_session(session: Session | None) -> None:
+    """Publish (or clear) the live session. Called by `init()`/`shutdown()`."""
+    global _current
+    _current = session

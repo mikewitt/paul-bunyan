@@ -9,11 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import logging
 from typing import NamedTuple
 
+#: Source of the per-task ids below. `id()` is not usable: CPython reuses the
+#: address of a collected object, so two tasks that never overlap in time can
+#: share an id and their records merge into one apparent task.
+_asyncio_task_ids = itertools.count(1)
 
-@dataclasses.dataclass(frozen=True, slots=True)
+#: Attribute the id is cached under, on the task object itself. Keying off the
+#: task keeps the counter monotonic *and* the id stable for the task's life,
+#: which a bare `next()` per record would not be.
+_TASK_ID_ATTR = "_lumberjack_task_id"
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class LogRecordRow:
     logger_name: str
     level_name: str
@@ -33,8 +44,11 @@ class LogRecordRow:
     exc_text: str | None
     stack_text: str | None
 
-    # lumberjack attribution
-    task_name: str | None
+    # lumberjack attribution. `asyncio_*` is where the record ran; `task_id` /
+    # `parent_task_id` are the tracking API's, and stay None for records it
+    # did not emit.
+    asyncio_task_name: str | None
+    asyncio_task_id: int | None
     task_id: int | None
     parent_task_id: int | None
     template_id: int | None
@@ -45,16 +59,6 @@ class LogRecordRow:
         if exc_text is None and record.exc_info:
             # lumberjack: see issue #18 (formatter could be a singleton)
             exc_text = logging.Formatter().formatException(record.exc_info)
-
-        task_id: int | None = None
-        try:
-            task = asyncio.current_task()
-        except RuntimeError:
-            task = None
-        if task is not None:
-            # id() is reused after GC, so sequential tasks can collide.
-            # lumberjack: see issue #4
-            task_id = id(task)
 
         return cls(
             logger_name=record.name,
@@ -74,14 +78,37 @@ class LogRecordRow:
             process_name=record.processName or "",
             exc_text=exc_text,
             stack_text=record.stack_info,
-            task_name=getattr(record, "taskName", None),
-            task_id=task_id,
+            asyncio_task_name=getattr(record, "taskName", None),
+            asyncio_task_id=_current_asyncio_task_id(),
+            task_id=None,
             parent_task_id=None,
             template_id=None,
         )
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
+def _current_asyncio_task_id() -> int | None:
+    """A collision-free id for the running asyncio task, or None outside one.
+
+    Cached on the task object so every record from one task reports the same
+    id, and drawn from a counter so a task collected before the next one
+    starts cannot hand its id on. lumberjack: closes issue #4.
+    """
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    if task is None:
+        return None
+    task_id: int | None = getattr(task, _TASK_ID_ATTR, None)
+    if task_id is None:
+        task_id = next(_asyncio_task_ids)
+        # Sticks even on the C `_asyncio.Task`, and on a `__slots__` subclass
+        # of it, both of which keep a `__dict__` from the un-slotted base.
+        setattr(task, _TASK_ID_ATTR, task_id)
+    return task_id
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class StoredRecord(LogRecordRow):
     id: int
 

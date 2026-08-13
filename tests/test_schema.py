@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import gc
 import logging
 import sys
 
@@ -35,7 +36,8 @@ def test_from_log_record_basic_fields():
 def test_from_log_record_reserved_fields_default_to_none():
     record = _make_record()
     row = LogRecordRow.from_log_record(record)
-    assert row.task_name is None
+    assert row.asyncio_task_name is None
+    assert row.task_id is None
     assert row.parent_task_id is None
     assert row.template_id is None
 
@@ -68,10 +70,75 @@ def test_task_attribution_inside_asyncio_task():
 
     asyncio.run(inner())
     row = captured["row"]
-    assert row.task_id is not None
+    assert row.asyncio_task_id is not None
 
 
 def test_no_task_attribution_outside_asyncio():
     record = _make_record()
     row = LogRecordRow.from_log_record(record)
-    assert row.task_id is None
+    assert row.asyncio_task_id is None
+
+
+def test_no_task_attribution_in_a_bare_loop_callback():
+    """A running loop is not a running task. `current_task()` returns None
+    rather than raising inside a `call_soon` callback, so that is a third
+    case, distinct from both 'in a task' and 'no loop at all'."""
+    ids: list[int | None] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        done = loop.create_future()
+
+        def callback() -> None:
+            ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
+            done.set_result(None)
+
+        loop.call_soon(callback)
+        await done
+
+    asyncio.run(main())
+    assert ids == [None]
+
+
+def test_one_task_keeps_one_id_across_records():
+    """Grouping by task is only meaningful if the id holds for the task's life."""
+    ids: list[int | None] = []
+
+    async def inner() -> None:
+        for _ in range(3):
+            ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
+            await asyncio.sleep(0)
+
+    asyncio.run(inner())
+    assert len(set(ids)) == 1
+
+
+def test_sequential_asyncio_tasks_never_share_an_id():
+    """The bug issue #4 was filed for: `id()` returns the object's address, and
+    CPython hands the freed address to the next task of the same shape. Two
+    tasks that never overlapped in time then merged into one apparent task.
+    Measured against the pre-fix code: these 20 runs yielded 5 distinct ids."""
+    ids: list[int | None] = []
+
+    async def inner() -> None:
+        ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
+
+    for _ in range(20):
+        asyncio.run(inner())
+        gc.collect()
+
+    assert len(set(ids)) == len(ids)
+
+
+def test_concurrent_asyncio_tasks_get_distinct_ids():
+    ids: list[int | None] = []
+
+    async def inner() -> None:
+        ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
+        await asyncio.sleep(0)
+
+    async def main() -> None:
+        await asyncio.gather(*(inner() for _ in range(5)))
+
+    asyncio.run(main())
+    assert len(set(ids)) == 5
