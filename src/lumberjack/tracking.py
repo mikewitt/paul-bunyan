@@ -1,17 +1,19 @@
 """The tracking API: `task()` and `track()`, rung 2 of the value ladder.
 
 Instrumentation that is always present and produces whatever the *application*
-has installed and configured — nothing otherwise. Three independent axes:
+has installed and configured — nothing otherwise. Two switches the application
+owns, and a library calling `task()` controls neither:
 
-===========================================  ===============================
-App has                                      `task()` produces
-===========================================  ===============================
-bare lumberjack, no `init()`                 nothing
-OTel configured normally                     OTel spans
-`lumberjack.init()`                          records in the store
-===========================================  ===============================
+==================  =================  ====================================
+OTel configured?    `init()` called?   `task()` produces
+==================  =================  ====================================
+no                  no                 nothing
+yes                 no                 OTel spans
+no                  yes                records in the store
+yes                 yes                both
+==================  =================  ====================================
 
-None of them gates the others, and a library calling `task()` imposes no
+Neither switch gates the other, so a library calling `task()` imposes no
 dependency and no output on its downstream users.
 
 The no-session check below is a runtime degradation, not the "call-time
@@ -35,12 +37,15 @@ import time
 from collections.abc import Sized
 from typing import TYPE_CHECKING
 
+from lumberjack import otel
 from lumberjack.schema import EXTRA_KEY, TaskEvent, TaskEventKind
 from lumberjack.session import current_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from types import TracebackType
+
+    from opentelemetry.trace import Span
 
 #: Every task event goes to this one logger, so an application layering with
 #: `init(replace_handlers=False)` can route or silence the lot with a single
@@ -116,15 +121,27 @@ class TaskHandle:
         self._total = total
         self._ended = False
         self._token: contextvars.Token[TaskHandle | None] | None = None
+        self._otel_token: object | None = None
         self._last_tick = 0.0
-        # The start row is written here rather than in `__enter__`: a handle
-        # exists from the moment it is created, whether or not it is entered.
+        # Both the span and the start row are opened here rather than in
+        # `__enter__`: a handle exists from the moment it is created, whether
+        # or not it is entered. Making the span current is the part that
+        # belongs to `__enter__`, below.
+        self._span: Span | None = None
+        tracer = otel.tracer()
+        if tracer is not None:
+            parent_span = parent._span if parent is not None else None
+            self._span = tracer.start_span(
+                label, context=otel.context_with_span(parent_span)
+            )
         self._emit("start", self._current, self._total)
 
     def __enter__(self) -> TaskHandle:
         if self._token is not None or self._ended:
             raise RuntimeError(f"task {self.label!r} cannot be entered twice")
         self._token = _current_task.set(self)
+        if self._span is not None:
+            self._otel_token = otel.attach(self._span)
         return self
 
     def __exit__(
@@ -134,9 +151,11 @@ class TaskHandle:
         tb: TracebackType | None,
     ) -> None:
         token, self._token = self._token, None
+        otel_token, self._otel_token = self._otel_token, None
         try:
             self.end(exc)
         finally:
+            otel.detach(otel_token)
             # `token is not None` because `__exit__` only follows `__enter__`;
             # the check is for the type checker.
             if token is not None:
@@ -187,10 +206,12 @@ class TaskHandle:
         self._bump(current, total, absolute=True)
 
     def end(self, exc: BaseException | None = None) -> None:
-        """Emit the final record. Idempotent — `__exit__` relies on that.
+        """Emit the final record and close the span. Idempotent — `__exit__`
+        relies on that.
 
         The `end` record carries the final `progress_current`, so it doubles
-        as the unsampled last tick.
+        as the unsampled last tick. Progress lands on the span once, here,
+        never per tick.
         """
         with self._lock:
             if self._ended:
@@ -199,6 +220,13 @@ class TaskHandle:
             current, total = self._current, self._total
         level = logging.ERROR if exc is not None else self._level
         self._emit("end", current, total, level=level, exc=exc)
+        if self._span is not None:
+            self._span.set_attribute("lumberjack.progress.current", current)
+            if total is not None:
+                self._span.set_attribute("lumberjack.progress.total", total)
+            if exc is not None:
+                otel.record_failure(self._span, exc)
+            self._span.end()
 
     def _bump(self, value: int, total: int | None, *, absolute: bool) -> None:
         now = time.monotonic()
