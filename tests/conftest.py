@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from lumberjack import tracking
 from lumberjack.schema import LogRecordRow
 from lumberjack.store import RecordStore, SQLiteRecordStore
 
@@ -115,3 +116,6 @@ def _reset_lumberjack_state() -> Iterator[None]:
     # the handlers *it* replaced, but tests that add one to the root logger
     # and never init — or that init and fail — leave it behind otherwise.
     root.handlers[:] = prev_handlers
+    # A test that leaves a task handle entered would otherwise make the next
+    # test's tasks children of a dead one.
+    tracking._current_task.set(None)

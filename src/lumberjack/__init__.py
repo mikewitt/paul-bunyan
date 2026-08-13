@@ -1,8 +1,8 @@
 """lumberjack: a drop-in UX layer for stdlib logging.
 
 `init()` is for applications only — it takes exclusive ownership of the root
-logger's handlers. Libraries should never call it; the future tracking API
-(`track`/`task`) is designed to work whether or not `init()` has run.
+logger's handlers. Libraries should never call it; the tracking API (`task`)
+works whether or not `init()` has run, and is inert without it.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
 from lumberjack.renderers import Renderer, create_renderer
 from lumberjack.session import Session
 from lumberjack.store import RecordStore, SQLiteRecordStore
+from lumberjack.tracking import TaskHandle, task
 
 try:
     __version__ = importlib.metadata.version("lumberjack")
@@ -28,6 +29,8 @@ __all__ = [
     "init",
     "shutdown",
     "flush",
+    "task",
+    "TaskHandle",
     "is_initialized",
     "current_handler",
     "current_store",
