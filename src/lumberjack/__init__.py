@@ -18,7 +18,7 @@ from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
 from lumberjack.renderers import Renderer, create_renderer
 from lumberjack.session import Session
 from lumberjack.store import RecordStore, SQLiteRecordStore
-from lumberjack.tracking import TaskHandle, task
+from lumberjack.tracking import TaskHandle, task, track
 
 try:
     __version__ = importlib.metadata.version("lumberjack")
@@ -30,6 +30,7 @@ __all__ = [
     "shutdown",
     "flush",
     "task",
+    "track",
     "TaskHandle",
     "is_initialized",
     "current_handler",

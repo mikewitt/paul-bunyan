@@ -32,12 +32,14 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Sized
 from typing import TYPE_CHECKING
 
 from lumberjack.schema import EXTRA_KEY, TaskEvent, TaskEventKind
 from lumberjack.session import current_session
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
     from types import TracebackType
 
 #: Every task event goes to this one logger, so an application layering with
@@ -299,3 +301,55 @@ def task(
         total=total,
         parent=_current_task.get(),
     )
+
+
+def track[T](
+    iterable: Iterable[T],
+    *,
+    name: str | None = None,
+    level: int = logging.INFO,
+    total: int | None = None,
+) -> Iterator[T]:
+    """Wrap an iterable so iterating it reports progress. Mirrors `tqdm`::
+
+        for doc in lumberjack.track(docs, name="reindex"):
+            index(doc)
+
+    `total` is taken from `len()` when the iterable is `Sized` and no total
+    was given. A bare generator has no length and is never consumed to find
+    one, so it reports an indeterminate count.
+
+    Ticks are sampled — see `TaskHandle.advance()`. The count stays exact
+    regardless, because the `end` record carries the final absolute value.
+
+    A plain function, not a generator function: a generator function's body
+    does not run until the first `next()`, which would attribute the task to
+    whoever iterates it rather than to this call site, and would delay the
+    task's start until then.
+    """
+    if total is None and isinstance(iterable, Sized):
+        total = len(iterable)
+    handle = task(
+        name if name is not None else _describe(iterable),
+        level=level,
+        total=total,
+        _origin=_caller_origin(),
+    )
+    return _ticking(iterable, handle)
+
+
+def _ticking[T](iterable: Iterable[T], handle: TaskHandle) -> Iterator[T]:
+    # `finally` rather than a `with`: an early `break` closes the generator
+    # with `GeneratorExit`, and the task has to end on that path too.
+    try:
+        for item in iterable:
+            yield item
+            handle.advance()
+    finally:
+        handle.end()
+
+
+def _describe(iterable: Iterable[object]) -> str:
+    """A label for an unnamed `track()`. The type name is the only thing
+    generically available, and it beats an empty bar."""
+    return type(iterable).__name__

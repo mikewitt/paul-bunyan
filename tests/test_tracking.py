@@ -364,3 +364,101 @@ def test_exiting_in_a_different_context_does_not_mask_the_real_exception():
                 raise
 
     asyncio.run(main())
+
+
+# --- track() ----------------------------------------------------------------
+
+
+def test_track_yields_every_item(session):
+    assert list(lumberjack.track([1, 2, 3], name="items")) == [1, 2, 3]
+
+
+def test_track_takes_its_total_from_len(session):
+    list(lumberjack.track(["a", "b", "c"], name="items"))
+    assert {r.progress_total for r in session.read()} == {3}
+
+
+def test_track_never_consumes_a_generator_to_find_a_total(session):
+    """Measuring the length of a stream would defeat streaming it."""
+    consumed: list[int] = []
+
+    def stream():
+        for i in range(3):
+            consumed.append(i)
+            yield i
+
+    generator = lumberjack.track(stream(), name="stream")
+    assert consumed == [], "the source was drained before the first next()"
+    assert next(generator) == 0
+    assert consumed == [0]
+    generator.close()
+    assert {r.progress_total for r in session.read()} == {None}
+
+
+def test_track_starts_the_task_before_the_first_next(session):
+    """A generator function's body would not run until the first `next()`,
+    which is why `track()` is a plain function returning an inner generator."""
+    lumberjack.track([1, 2, 3], name="eager")
+    assert session.events() == [("start", "eager")]
+
+
+def test_track_is_attributed_to_its_own_call_site(session):
+    """`_origin=` forwarding: without it the task lands on `tracking.py` and
+    every `track()` in the program collapses into one bar."""
+    list(lumberjack.track([1], name="items"))
+    for row in session.read():
+        assert row.filename == "test_tracking.py"
+        assert row.func_name == "test_track_is_attributed_to_its_own_call_site"
+
+
+def test_track_ends_the_task_on_an_early_break(session):
+    """`break` closes the generator with `GeneratorExit`, and the `finally`
+    has to end the task on that path too."""
+    for item in lumberjack.track(range(100), name="aborted"):
+        if item == 2:
+            break
+    assert session.events()[-1] == ("end", "aborted")
+
+
+def test_track_ends_the_task_when_the_body_raises(session):
+    with pytest.raises(ValueError):
+        for _ in lumberjack.track(range(100), name="doomed"):
+            raise ValueError("boom")
+    assert session.events()[-1] == ("end", "doomed")
+
+
+def test_track_counts_every_item_despite_sampling(session):
+    """Sampling is lossless because `end` carries the final absolute count."""
+    count = 20_000
+    for _ in lumberjack.track(range(count), name="hot"):
+        pass
+    rows = session.read()
+    assert rows[-1].progress_current == count
+    assert len(rows) < 20, f"{len(rows)} rows for {count} items — not sampled"
+    handler = lumberjack.current_handler()
+    assert handler is not None and handler.dropped == 0
+
+
+def test_track_without_a_name_labels_by_type(session):
+    list(lumberjack.track([1, 2]))
+    assert {r.task_label for r in session.read()} == {"list"}
+
+
+def test_track_nests_under_an_open_task(session):
+    with lumberjack.task("outer") as outer:
+        list(lumberjack.track([1], name="inner"))
+    inner = [r for r in session.read() if r.task_label == "inner"]
+    assert inner and {r.parent_task_id for r in inner} == {outer.task_id}
+
+
+def test_track_without_init_emits_nothing(capsys):
+    root = logging.getLogger()
+    handler = logging.StreamHandler()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        assert list(lumberjack.track([1, 2], name="quiet")) == [1, 2]
+    finally:
+        root.removeHandler(handler)
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
