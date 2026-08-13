@@ -8,6 +8,7 @@ contract: what a user of `init()` can actually query afterwards.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from collections.abc import Iterator
@@ -165,8 +166,17 @@ def test_the_message_text_is_the_documented_contract(session):
     assert [r.message for r in session.read()] == [
         "task start: reindex",
         "task progress: reindex 4/10",
-        "task end: reindex",
+        "task end: reindex 4/10",
     ]
+
+
+def test_the_end_message_carries_the_count_for_plain_text_readers(session):
+    """`PlainTextRenderer` prints `message` and nothing else, so a non-TTY
+    user gets no bar and no columns — the end line is the only place the
+    final count can reach them, and it is what justifies sampling ticks."""
+    with lumberjack.task("scan") as t:
+        t.set_progress(9)
+    assert session.read()[-1].message == "task end: scan 9"
 
 
 def test_progress_without_a_total_reads_as_a_bare_count(session):
@@ -249,13 +259,14 @@ def test_a_nested_task_records_its_parent(session):
     assert {r.parent_task_id for r in inner_rows} == {outer.task_id}
 
 
-def test_a_bare_handle_never_becomes_a_parent():
+def test_a_bare_handle_never_becomes_a_parent(session):
     """Only `__enter__` establishes ambient parentage, which is what makes an
     out-of-order contextvar reset structurally impossible."""
     outer = lumberjack.task("never entered")
     try:
         with lumberjack.task("sibling") as sibling:
             assert sibling.parent_task_id is None
+        assert all(r.parent_task_id is None for r in session.read())
     finally:
         outer.end()
 
@@ -309,20 +320,23 @@ def test_nesting_unwinds_in_order():
 # --- lifecycle --------------------------------------------------------------
 
 
-def test_end_is_idempotent():
+def test_end_is_idempotent(session):
+    """Idempotence means "writes no second end row", which is only visible
+    with a session — without one nothing is written either way."""
     t = lumberjack.task("once")
     t.end()
-    t.end()  # must not raise
+    t.end()
+    assert session.events() == [("start", "once"), ("end", "once")]
 
 
-def test_a_handle_cannot_be_entered_twice():
+def test_a_handle_cannot_be_entered_twice(session):
     t = lumberjack.task("once")
     with t:
         with pytest.raises(RuntimeError, match="cannot be entered twice"):
             t.__enter__()
 
 
-def test_a_finished_handle_cannot_be_re_entered():
+def test_a_finished_handle_cannot_be_re_entered(session):
     t = lumberjack.task("once")
     with t:
         pass
@@ -330,13 +344,14 @@ def test_a_finished_handle_cannot_be_re_entered():
         t.__enter__()
 
 
-def test_advancing_after_the_end_is_a_noop():
+def test_advancing_after_the_end_is_a_noop(session):
     t = lumberjack.task("done")
     t.end()
-    t.advance()  # must not raise
+    t.advance()
+    assert session.events() == [("start", "done"), ("end", "done")]
 
 
-def test_an_exception_propagates_out_of_the_with():
+def test_an_exception_propagates_out_of_the_with(session):
     with pytest.raises(ValueError, match="boom"):
         with lumberjack.task("doomed"):
             raise ValueError("boom")
@@ -462,3 +477,232 @@ def test_track_without_init_emits_nothing(capsys):
         root.removeHandler(handler)
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
+
+
+# --- the contextvar chain under interleaving --------------------------------
+
+
+def test_interleaved_generators_do_not_leave_a_dead_task_ambient(session):
+    """`with` is LIFO within one frame, but two suspended generators each
+    holding one interleave freely — and `ContextVar.reset()` does *not* raise
+    for an out-of-order token from the same Context. It silently writes the
+    old value back, which used to leave a *finished* handle ambient and parent
+    every later task in the thread to a dead one. `track()` returns
+    generators, so this is reachable rather than theoretical."""
+
+    def held(name):
+        with lumberjack.task(name):
+            yield
+
+    first, second = held("first"), held("second")
+    next(first)
+    next(second)
+    first.close()  # out of order
+    second.close()
+
+    with lumberjack.task("after") as after:
+        assert after.parent_task_id is None
+
+
+def test_an_earlier_exit_does_not_evict_a_still_open_later_task(session):
+    """The other half of the same fix. When the *first*-opened generator
+    closes first, a blind `reset()` writes back the value from before it —
+    evicting the second generator's task, which is still running."""
+
+    def held(name, seen):
+        with lumberjack.task(name):
+            yield
+            with lumberjack.task(f"{name}-child") as child:
+                seen.append(child.parent_task_id)
+
+    seen: list[int | None] = []
+    first, second = held("first", seen), held("second", seen)
+    next(first)
+    next(second)
+    first.close()  # the earlier one goes first
+    next(second, None)  # `second` is still open and must still be ambient
+
+    live = [t for t in (first, second)]
+    del live
+    assert seen and seen[0] is not None, "the still-open task stopped parenting"
+
+
+def test_a_finished_task_is_never_a_parent(session):
+    """Whatever the token bookkeeping does, the ambient lookup walks past
+    handles that have already ended."""
+    with lumberjack.task("outer") as outer:
+        with lumberjack.task("middle") as middle:
+            middle.end()
+            with lumberjack.task("child") as child:
+                assert child.parent_task_id == outer.task_id
+
+
+def test_a_cross_context_exit_does_not_orphan_an_enclosing_task(session):
+    """`ContextVar.reset()` raises when the token came from another Context.
+    Reachable by entering in the outer context and exiting inside an asyncio
+    task, which runs on a *copy* — so the handle is ambient there but the
+    token is foreign. Nothing may escape `__exit__`'s `finally`, and the
+    enclosing task must survive untouched."""
+    seen: list[int | None] = []
+
+    async def main() -> None:
+        with lumberjack.task("outer"):
+            crossing = lumberjack.task("crossing")
+            crossing.__enter__()
+
+            async def leave() -> None:
+                crossing.__exit__(None, None, None)
+
+            await asyncio.create_task(leave())
+            with lumberjack.task("sibling") as sibling:
+                seen.append(sibling.parent_task_id)
+
+    asyncio.run(main())
+    assert seen and seen[0] is not None, "the enclosing task was orphaned"
+
+
+# --- concurrency ------------------------------------------------------------
+
+
+def test_concurrent_advances_are_not_lost(session):
+    """`self._current += n` is a read-modify-write, so the handle's lock is
+    what makes this exact.
+
+    Honest caveat: on a GIL build this passes with the lock removed too —
+    measured over several runs at `sys.setswitchinterval(1e-9)`, the update
+    never tore. The lock is there for free-threaded builds (3.13t onward,
+    and 3.14 is in the CI matrix), where the race is real. This test pins
+    the contract; it cannot demonstrate the mechanism on CPython-with-GIL."""
+    threads, per_thread = 8, 20_000
+
+    with lumberjack.task("counted") as t:
+        workers = [
+            threading.Thread(target=lambda: [t.advance() for _ in range(per_thread)])
+            for _ in range(threads)
+        ]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+    assert session.read()[-1].progress_current == threads * per_thread
+
+
+def test_the_end_row_is_last_even_under_concurrent_advances(session):
+    """Emission happens under the lock, so an `update` in flight on another
+    thread cannot land after the `end` row. Readers treat `end` as terminal."""
+    stop = threading.Event()
+
+    with lumberjack.task("racing") as t:
+        workers = [
+            threading.Thread(
+                target=lambda: [t.advance() for _ in range(50_000) if not stop.is_set()]
+            )
+            for _ in range(4)
+        ]
+        for w in workers:
+            w.start()
+        stop.set()
+        for w in workers:
+            w.join()
+
+    events = [r.task_event for r in session.read()]
+    assert events[-1] == "end"
+    assert events.count("end") == 1
+
+
+# --- level filtering --------------------------------------------------------
+
+
+def test_a_task_filtered_out_at_start_emits_no_rows_at_all():
+    """Filtering is per record and `end()` promotes to ERROR on failure, so
+    without an all-or-nothing gate a failing task under `init(level=WARNING)`
+    would write a lone `end` row with no `start` to anchor it."""
+    store = SQLiteRecordStore(":memory:")
+    lumberjack.init(
+        store=store, output_mode="plain", flush_interval=0, level=logging.WARNING
+    )
+    try:
+        with pytest.raises(ValueError):
+            with lumberjack.task("filtered"):
+                raise ValueError("boom")
+        lumberjack.flush()
+        assert [r for r in store.recent() if r.task_event] == []
+    finally:
+        lumberjack.shutdown()
+        store.close()
+
+
+# --- the remaining public surface -------------------------------------------
+
+
+def test_advance_takes_a_step_size(session):
+    with lumberjack.task("batched", total=100) as t:
+        t.advance(25)
+    assert session.read()[-1].progress_current == 25
+
+
+def test_set_progress_can_revise_the_total(session):
+    with lumberjack.task("resized") as t:
+        t.set_progress(3, total=30)
+    end = session.read()[-1]
+    assert (end.progress_current, end.progress_total) == (3, 30)
+
+
+def test_task_honours_an_explicit_level(session):
+    with lumberjack.task("chatty", level=logging.WARNING):
+        pass
+    assert {r.level_name for r in session.read()} == {"WARNING"}
+
+
+def test_a_subtask_inherits_its_parents_level(session):
+    with lumberjack.task("parent", level=logging.WARNING) as parent:
+        parent.subtask("child").end()
+    child = [r for r in session.read() if r.task_label == "child"]
+    assert child and {r.level_name for r in child} == {"WARNING"}
+
+
+def test_a_subtask_takes_its_own_total(session):
+    with lumberjack.task("parent") as parent:
+        with parent.subtask("child", total=5) as child:
+            child.advance()
+    rows = [r for r in session.read() if r.task_label == "child"]
+    assert rows[-1].progress_total == 5
+
+
+def test_the_failure_row_carries_a_traceback(session):
+    """The one record type with an exception in hand should fill the column
+    the schema keeps for one."""
+    with pytest.raises(ValueError):
+        with lumberjack.task("doomed"):
+            raise ValueError("boom")
+    end = session.read()[-1]
+    assert end.exc_text is not None
+    assert "ValueError: boom" in end.exc_text
+
+
+def test_exiting_without_entering_is_harmless(session):
+    """Reachable for real: `contextlib.ExitStack.push()` registers a handle's
+    `__exit__` without ever calling `__enter__`."""
+    handle = lumberjack.task("pushed")
+    with contextlib.ExitStack() as stack:
+        stack.push(handle)
+    assert session.events() == [("start", "pushed"), ("end", "pushed")]
+    with lumberjack.task("after") as after:
+        assert after.parent_task_id is None
+
+
+def test_a_level_raised_mid_task_still_leaves_the_start_row_anchored(session):
+    """The other side of the all-or-nothing gate: once a `start` row exists,
+    silencing the logger drops the later rows but cannot un-write it. A
+    reader sees a task that started and never finished — which is true —
+    rather than a contradiction."""
+    logger = logging.getLogger(TASK_LOGGER_NAME)
+    with lumberjack.task("interrupted") as t:
+        logger.setLevel(logging.CRITICAL)
+        try:
+            t.advance()
+        finally:
+            pass
+    logger.setLevel(logging.NOTSET)
+    assert session.events() == [("start", "interrupted")]
