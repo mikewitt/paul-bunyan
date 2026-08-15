@@ -886,3 +886,26 @@ def test_a_withdrawn_claim_unfreezes_the_clock(task_rig, monkeypatch):
         t.set_progress(25)
         task_rig.tick()
         assert _task_bar(task_rig.renderer).finished_time is None, "clock stayed frozen"
+
+
+def test_a_container_task_finishes_at_a_hundred_percent(task_rig):
+    """A task that only ever held subtasks has no count of its own, so its
+    total is 0 — and rich renders 0-of-0 as a full bar labelled 0%, which
+    reads as a failure rather than as completion."""
+    with lumberjack.task("etl run"):
+        pass
+    task_rig.tick()
+    line = _line(_strip_ansi(task_rig.output()), "etl run")
+    assert "100%" in line
+    assert " 0%" not in line, "0 of 0 rendered as a full bar labelled 0%"
+
+
+def test_a_task_that_ends_short_of_its_total_keeps_both_numbers(task_rig):
+    """Stopping at 5 of a claimed 10 is a fact about the run. Filling the bar
+    would overwrite it with a claim of 10, which is the opposite of what
+    finishing a bar is supposed to communicate."""
+    with lumberjack.task("gave up early", total=10) as t:
+        t.set_progress(5)
+    task_rig.tick()
+    line = _line(_strip_ansi(task_rig.output()), "gave up early")
+    assert "50%" in line and "5/10" in line

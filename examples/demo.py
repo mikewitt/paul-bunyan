@@ -109,14 +109,24 @@ def main() -> None:
     store = lumberjack.current_store()
     assert store is not None
     records = store.recent()
+    by_source = sorted(store.count_by_source().items(), key=lambda kv: -kv[1])
+    renderer_name = type(lumberjack.current_renderer()).__name__
+    mode = lumberjack.current_output_mode()
+
+    # Everything the summary needs is now in local variables, so the display
+    # comes down *before* a line of it is printed. A program's own output and
+    # a live redraw must not share a terminal: lumberjack deliberately leaves
+    # stdout alone, so nothing is there to interleave the two politely, and
+    # printing over a live frame is how a summary ends up shredded.
+    lumberjack.shutdown()
 
     print("\n--- the display was lossy; the store was not ---")
     print(f"records captured : {len(records)}")
-    print(f"renderer         : {type(lumberjack.current_renderer()).__name__}")
-    print(f"output mode      : {lumberjack.current_output_mode()}")
+    print(f"renderer         : {renderer_name}")
+    print(f"output mode      : {mode}")
 
     print("\nrecords per log site (this grouping is what drives the bars):")
-    for source, count in sorted(store.count_by_source().items(), key=lambda kv: -kv[1]):
+    for source, count in by_source:
         print(f"  {source.func_name:<12} line {source.lineno:<4} {count:>5} records")
 
     print("\nrecords per thread (attributed at write time, never inferred):")
@@ -130,8 +140,6 @@ def main() -> None:
     print(f"\nwarnings (shown above the bars, and still stored): {len(warnings)}")
     for record in warnings:
         print(f"  {record.level_name} {record.message}")
-
-    lumberjack.shutdown()
 
 
 if __name__ == "__main__":

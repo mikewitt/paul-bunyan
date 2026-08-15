@@ -101,6 +101,9 @@ def main() -> None:
     records = store.recent()
     events = [r for r in records if r.task_event]
 
+    # Display down before the summary goes out — see the note in demo.py.
+    lumberjack.shutdown()
+
     print("\n--- what the instrumentation added ---")
     print(f"records captured  : {len(records)}")
     print(f"of those, task events: {len(events)}")
@@ -117,8 +120,6 @@ def main() -> None:
         "\nnot how many times a log line happened to repeat. Ticks are sampled"
         "\nfor the display, but the end row carries the true final count."
     )
-
-    lumberjack.shutdown()
 
 
 if __name__ == "__main__":

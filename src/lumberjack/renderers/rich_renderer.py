@@ -393,11 +393,22 @@ class RichProgressRenderer:
                 # for subtasks. A bare "0" beside a pulsing bar reads as
                 # "stuck at zero" rather than "no count was claimed".
                 count = ""
-            if bar.done:
-                drawn_total: int | None = max(bar.total or 0, bar.current)
+            completed: int = bar.current
+            drawn_total: int | None
+            if bar.done and bar.total is None:
+                # Nothing was ever claimed, so completion can only be
+                # expressed as "all of whatever it did". Floored at 1 because
+                # a container task — one that only held subtasks and reported
+                # no count of its own — is 0 of 0, which rich renders as a
+                # full bar labelled 0% and which reads as a failure.
+                drawn_total = max(bar.current, 1)
+                completed = drawn_total
             elif bar.total is not None and bar.current > bar.total:
                 drawn_total = None
             else:
+                # A task that ended *short* of a total it claimed keeps both
+                # numbers: stopping at 5/10 is a fact, and filling the bar
+                # would overwrite it with a claim of 10.
                 drawn_total = bar.total
             rich_id = self._task_bars.get(bar.task_id)
             if rich_id is None:
@@ -411,7 +422,7 @@ class RichProgressRenderer:
             self._task_progress.update(
                 rich_id,
                 description=label,
-                completed=bar.current,
+                completed=completed,
                 count=count,
             )
             if bar.done:

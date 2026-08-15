@@ -514,9 +514,16 @@ class RepeatingSourceModel:
         Walked rather than stored for the same reason `TaskProgressModel` does
         it: the chain is shallow, the walk is a dict lookup per level, and
         storing it would mean recomputing every descendant whenever one
-        pairing freezes. The `seen` guard is for a cycle — `_levels()` orders
-        strictly by period so it cannot produce one, but a bug that did would
-        hang the render thread rather than draw something odd.
+        pairing freezes.
+
+        The `seen` guard is load-bearing against real data, not just against a
+        hypothetical bug. `_levels()` orders strictly by period, so no single
+        poll can produce a cycle — but a frozen pairing is *historical*, and
+        periods keep moving. Freeze A as B's parent, let A slow down until its
+        period falls below B's, and A becomes an eligible child of B on a later
+        poll. Without the guard that pair walks forever and hangs the render
+        thread; with it the cost is two bars indented oddly, which is the
+        cheaper wrong answer.
         """
         depth = 0
         seen = {source}
