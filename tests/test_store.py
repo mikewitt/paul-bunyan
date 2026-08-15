@@ -9,7 +9,7 @@ import time
 import pytest
 
 from lumberjack.schema import SourceKey
-from lumberjack.store import _COLUMNS, SQLiteRecordStore
+from lumberjack.store import _COLUMNS, SQLiteRecordStore, WorkerKey
 
 
 def test_append_and_recent(store, make_row):
@@ -344,3 +344,53 @@ def test_the_source_delta_watermark_advances_past_task_rows(store, make_row):
     second = store.count_by_source_since(first.last_id)
     assert second.counts == {}
     assert second.last_id > first.last_id, "the watermark stalled behind task rows"
+
+
+def test_the_source_delta_reports_which_workers_ran_each_line(store, make_row):
+    """Structural analysis needs this to tell one loop nested inside another
+    from two unrelated loops on two threads."""
+    store.append(
+        [
+            make_row(lineno=1, thread=7),
+            make_row(lineno=1, thread=9),
+            make_row(lineno=1, thread=7),
+            make_row(lineno=2, thread=7),
+        ]
+    )
+    workers = store.count_by_source_since(0).workers
+    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 1, "bar")]} == {7, 9}
+    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 2, "bar")]} == {7}
+
+
+def test_a_worker_is_process_thread_and_asyncio_task(store, make_row):
+    """Thread ids repeat across processes, and one event loop runs many tasks
+    on one thread, so no single column identifies a worker."""
+    store.append(
+        [
+            make_row(process=1, thread=1, asyncio_task_id=None),
+            make_row(process=2, thread=1, asyncio_task_id=None),
+            make_row(process=1, thread=1, asyncio_task_id=5),
+        ]
+    )
+    workers = store.count_by_source_since(0).workers[
+        SourceKey("/tmp/foo.py", 10, "bar")
+    ]
+    assert workers == frozenset(
+        {WorkerKey(1, 1, None), WorkerKey(2, 1, None), WorkerKey(1, 1, 5)}
+    )
+
+
+def test_the_source_delta_still_folds_per_worker_rows_back_together(store, make_row):
+    """Grouping by worker splits each source into several rows; the counts and
+    the span a caller reads must still describe the source as a whole."""
+    store.append(
+        [
+            make_row(thread=1, created=100.0),
+            make_row(thread=2, created=101.0),
+            make_row(thread=1, created=102.0),
+        ]
+    )
+    delta = store.count_by_source_since(0)
+    key = SourceKey("/tmp/foo.py", 10, "bar")
+    assert delta.counts[key] == 3
+    assert (delta.first_at[key], delta.last_at[key]) == (100.0, 102.0)

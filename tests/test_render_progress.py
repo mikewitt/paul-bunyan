@@ -16,6 +16,7 @@ import io
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -611,3 +612,128 @@ def test_a_task_that_overshoots_its_total_goes_back_to_pulsing(task_rig):
     assert "25/10" in line, "the real numbers must stay visible"
     assert "100%" not in line, "an overshooting task must not read as finished"
     assert "%" not in line, "and must not claim a percentage at all"
+
+
+# --- inferred structure on screen ------------------------------------------
+#
+# The model decides all of this; what these pin is that the display says what
+# the model concluded, and says nothing it did not conclude.
+
+
+def _nested_frame(store: RecordStore, make_row, *, polls: int) -> str:
+    """Draw an outer loop on line 4 with an inner loop of eight on line 6."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    # Ending flush against "now", so nothing has been quiet long enough to
+    # retire — retirement is its own test below and would mask this one.
+    at = time.time() - ((polls - 1) * 8.0 + 7.0)
+    try:
+        for _ in range(polls):
+            rows = [make_row(lineno=4, func_name="outer", created=at)]
+            rows += [
+                make_row(lineno=6, func_name="inner", created=at + i) for i in range(8)
+            ]
+            store.append(rows)
+            at += 8.0
+            renderer.refresh()
+        return _strip_ansi(stream.getvalue())
+    finally:
+        renderer.close()
+
+
+def _line(frame: str, needle: str) -> str:
+    """The needle's line as the *last* frame drew it.
+
+    A live display rewrites in place, so the captured stream holds every frame
+    since the first, separated by carriage returns as well as newlines. The
+    interesting one is always the most recent.
+    """
+    return next(ln for ln in reversed(re.split(r"[\r\n]", frame)) if needle in ln)
+
+
+def test_an_inferred_inner_loop_is_indented_under_its_parent(
+    as_terminal, store: RecordStore, make_row
+):
+    frame = _nested_frame(store, make_row, polls=5)
+    outer, inner = _line(frame, "foo.py:4"), _line(frame, "foo.py:6")
+    assert inner.index("foo.py:6") > outer.index("foo.py:4"), "the inner bar sits flush"
+
+
+def test_an_inferred_inner_loop_shows_its_position_in_the_cycle(
+    as_terminal, store: RecordStore, make_row
+):
+    """The cycle position is the inferred half and the cumulative count is the
+    certain one, so both are shown — a reader can see the guess beside the
+    fact it was made from."""
+    frame = _nested_frame(store, make_row, polls=5)
+    assert "/8 · " in _line(frame, "foo.py:6")
+
+
+def test_an_outermost_loop_never_claims_a_cycle(
+    as_terminal, store: RecordStore, make_row
+):
+    """Nothing encloses it, so nothing says how long it is. Pulsing forever is
+    the correct rendering rather than a missing feature."""
+    frame = _nested_frame(store, make_row, polls=5)
+    line = _line(frame, "foo.py:4")
+    assert "·" not in line and "records" in line
+
+
+def test_nothing_is_claimed_before_the_inference_settles(
+    as_terminal, store: RecordStore, make_row
+):
+    frame = _nested_frame(store, make_row, polls=1)
+    assert "·" not in frame, "a total was drawn on first sight"
+
+
+def test_a_loop_that_went_quiet_says_so(as_terminal, store: RecordStore, make_row):
+    """ "idle" rather than "done", because idleness is what was measured — no
+    log line announces the end of a loop."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(created=100.0 + i) for i in range(5)])
+        renderer.refresh()
+        assert "idle" in _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+    finally:
+        renderer.close()
+
+
+def test_a_loop_still_running_shows_its_rate_instead(
+    as_terminal, store: RecordStore, make_row
+):
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    now = time.time()
+    try:
+        store.append([make_row(created=now - 0.4 + i * 0.1) for i in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "10/s" in line and "idle" not in line
+    finally:
+        renderer.close()
+
+
+def test_an_untimed_loop_shows_no_rate_at_all(
+    as_terminal, store: RecordStore, make_row
+):
+    """Every record inside one clock tick, so there is no interval to report.
+    Blank rather than "0/s" or "∞/s": a made-up number is worse than none."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(created=100.0) for _ in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "/s" not in line and "idle" not in line
+        assert "5 records" in line
+    finally:
+        renderer.close()

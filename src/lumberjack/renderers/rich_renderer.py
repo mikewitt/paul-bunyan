@@ -62,19 +62,39 @@ _LEVEL_STYLES = {
 }
 
 
-def _format_rate(rate: float | None) -> str:
-    """How fast a source is repeating, or blank while that is unknown.
+def _format_rate(bar: BarState) -> str:
+    """How fast a source is repeating, or what stopped it.
 
     Rate rather than period because "12/s" is what a reader wants from a
     loop, and sub-1/s loops are the ones where the period is the readable
     form instead. Blank until two records have been seen: one record
     establishes no interval, and a made-up number is worse than none.
+
+    "idle" rather than "done", because idleness is what was measured — no log
+    line announces the end of a loop, so a silence long enough to retire the
+    bar is the whole of the evidence.
     """
-    if rate is None:
+    if bar.idle:
+        return "idle"
+    if bar.rate is None:
         return ""
-    if rate >= 1:
-        return f"{rate:,.0f}/s"
-    return f"{1 / rate:,.1f}s each"
+    if bar.rate >= 1:
+        return f"{bar.rate:,.0f}/s"
+    return f"{1 / bar.rate:,.1f}s each"
+
+
+def _format_source_detail(bar: BarState) -> str:
+    """The count column: cumulative always, cycle position when inferred.
+
+    Both numbers earn their place. The cumulative count is the one thing here
+    that is certainly true, and it is what the exit dump will corroborate;
+    the cycle position is the inferred part and is what the bar's fill is
+    showing, so a reader can see the guess beside the fact.
+    """
+    records = f"{bar.count:,} records"
+    if not bar.is_determinate:
+        return records
+    return f"{bar.cycle_current}/{bar.total} · {records}"
 
 
 def _format_record(row: LogRecordRow) -> Text:
@@ -115,9 +135,11 @@ class RichProgressRenderer:
     * **Named bars** (`TaskProgressModel`) come from `task()` and `track()`.
       Every number was stated outright by the instrumented code, so these are
       determinate whenever a total was given and finish on an `end` row.
-    * **Source bars** (`RepeatingSourceModel`) are the Phase 1 proof: a
+    * **Source bars** (`RepeatingSourceModel`) are the inferred ones: a
       `logger.debug(...)` inside a loop stops scrolling and becomes a bar that
-      advances. These only ever count records — no total, no completion.
+      advances. Nothing declared them, so they are pulsing counters until the
+      model works out what encloses them, determinate once it has, and
+      retired when the loop goes quiet.
 
     Both read the store rather than this renderer's own callback, so a bar and
     a plain log file describe the same run without divergent logic.
@@ -176,7 +198,10 @@ class RichProgressRenderer:
                 "{task.description}", style="progress.description", markup=False
             ),
             BarColumn(),
-            TextColumn("{task.completed} records"),
+            # `completed` drives the bar's fill, which is the *cycle* position
+            # once one is inferred, so the counts a reader wants are a field
+            # rather than the bar's own numbers.
+            TextColumn("{task.fields[detail]}", markup=False),
             TextColumn("{task.fields[rate]}", style="progress.remaining"),
             TimeElapsedColumn(),
         )
@@ -244,18 +269,50 @@ class RichProgressRenderer:
             # registering the ones we will never draw costs a redraw each.
             bars = bars[: self._max_bars]
         for bar in bars:
-            task_id = self._tasks.get(bar.source)
-            if task_id is None:
-                # total=None → an indeterminate bar: this proof knows how many
-                # records have arrived, never how many are still coming.
-                task_id = self._source_progress.add_task(
-                    bar.label, total=None, fields={"rate": ""}
-                )
-                self._tasks[bar.source] = task_id
-            self._source_progress.update(
-                task_id, completed=bar.count, rate=_format_rate(bar.rate)
-            )
+            self._draw_source_bar(bar)
         self._live.refresh()
+
+    def _draw_source_bar(self, bar: BarState) -> None:
+        """One inferred bar: pulsing, determinate, or retired.
+
+        Three states, and which one applies is entirely the model's call:
+
+        * **Pulsing** (`total=None`) while nothing bounds the loop. That is
+          the permanent state of an outermost loop — nothing encloses it, so
+          nothing says how long it is — and the starting state of every other
+          one until containment analysis has held an answer for two polls.
+        * **Determinate** once an enclosing loop gives the cycle a length.
+          The fill shows position *within the current cycle*, so a nested bar
+          fills, resets and fills again, while the count column keeps the
+          cumulative total.
+        * **Retired**, when the source has been quiet for long enough that
+          the loop is presumed over. The bar is filled to mark it finished:
+          idleness is the only completion signal this data has, so acting on
+          it is the claim being made, and the rate column says "idle" rather
+          than a stale rate so the claim is legible rather than implied.
+        """
+        label = f"{'  ' * bar.depth}{bar.label}"
+        if bar.idle:
+            total: int | None = bar.count
+            completed = bar.count
+        elif bar.is_determinate:
+            total, completed = bar.total, bar.cycle_current
+        else:
+            total, completed = None, bar.count
+        task_id = self._tasks.get(bar.source)
+        if task_id is None:
+            task_id = self._source_progress.add_task(
+                label, total=total, fields={"rate": "", "detail": ""}
+            )
+            self._tasks[bar.source] = task_id
+        self._source_progress.update(
+            task_id,
+            description=label,
+            total=total,
+            completed=completed,
+            rate=_format_rate(bar),
+            detail=_format_source_detail(bar),
+        )
 
     def _refresh_task_bars(self) -> None:
         """Draw what `task()` and `track()` reported. No inference.

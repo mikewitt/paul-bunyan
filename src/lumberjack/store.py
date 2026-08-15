@@ -20,6 +20,20 @@ from typing import NamedTuple
 from lumberjack.schema import LogRecordRow, SourceKey, StoredRecord
 
 
+class WorkerKey(NamedTuple):
+    """Which concurrent worker a record came from.
+
+    All three parts are needed and none is redundant: thread ids repeat
+    across processes, and an asyncio event loop runs many tasks on one
+    thread. `asyncio_task_id` is None outside a running loop, which is the
+    ordinary case and is a perfectly good worker identity on its own.
+    """
+
+    process: int
+    thread: int
+    asyncio_task_id: int | None
+
+
 class SourceDelta(NamedTuple):
     """Records appended since a watermark, grouped by source location.
 
@@ -30,13 +44,20 @@ class SourceDelta(NamedTuple):
     `first_at` and `last_at` are the oldest and newest `created` in each
     group. They are what lets a reader work out how fast a source is
     repeating without a second query — a source's own recurrence interval is
-    its loop's period. They carry the same keys as `counts`, always.
+    its loop's period.
+
+    `workers` is which concurrent workers each source was seen on, which is
+    what tells structural analysis that two sources *could* be one loop
+    nested in another rather than two unrelated loops on two threads.
+
+    All three carry the same keys as `counts`, always.
     """
 
     counts: Mapping[SourceKey, int]
     last_id: int
     first_at: Mapping[SourceKey, float]
     last_at: Mapping[SourceKey, float]
+    workers: Mapping[SourceKey, frozenset[WorkerKey]]
 
 
 class TaskEventRow(NamedTuple):
@@ -312,26 +333,51 @@ class SQLiteRecordStore(RecordStore):
         still allowing the INTEGER PRIMARY KEY, so the plan becomes a rowid
         range seek plus a sort of the delta. Measured over 1M rows: 32ms
         against 0.5ms.
+
+        Grouping by worker as well as by source costs a wider sort key and one
+        group per (source, worker) pair instead of per source. Measured at a
+        5,000-row delta over 1M rows with 20 sources across 8 threads: 5.2ms
+        against 3.3ms, 160 rows against 20. Still linear in what arrived
+        rather than in what the store holds, which is the property that
+        matters; the multiplier is how many workers actually touch a line,
+        which for real code is small.
         """
         sql = (
             "SELECT pathname, lineno, func_name, task_event IS NULL AS is_plain, "
+            "process, thread, asyncio_task_id, "
             "COUNT(*) AS cnt, MAX(id) AS max_id, "
             "MIN(created) AS first_at, MAX(created) AS last_at "
             "FROM records NOT INDEXED WHERE id > ? "
-            "GROUP BY pathname, lineno, func_name, is_plain"
+            "GROUP BY pathname, lineno, func_name, is_plain, "
+            "process, thread, asyncio_task_id"
         )
         with self._lock:
             rows = self._conn.execute(sql, (after_id,)).fetchall()
-        plain = [r for r in rows if r["is_plain"]]
-        keyed = {
-            SourceKey(r["pathname"], r["lineno"], r["func_name"]): r for r in plain
-        }
+        # Grouping by worker as well as by source splits each source into one
+        # row per worker, so the per-source figures are refolded here. That is
+        # cheaper than it looks — the extra groups are bounded by how many
+        # workers touch a line, and the whole delta is already in memory.
+        counts: dict[SourceKey, int] = {}
+        first_at: dict[SourceKey, float] = {}
+        last_at: dict[SourceKey, float] = {}
+        workers: dict[SourceKey, set[WorkerKey]] = {}
+        for row in rows:
+            if not row["is_plain"]:
+                continue
+            key = SourceKey(row["pathname"], row["lineno"], row["func_name"])
+            counts[key] = counts.get(key, 0) + row["cnt"]
+            first_at[key] = min(first_at.get(key, row["first_at"]), row["first_at"])
+            last_at[key] = max(last_at.get(key, row["last_at"]), row["last_at"])
+            workers.setdefault(key, set()).add(
+                WorkerKey(row["process"], row["thread"], row["asyncio_task_id"])
+            )
         # No new rows leaves the watermark where it was; never move it back.
         return SourceDelta(
-            counts={k: r["cnt"] for k, r in keyed.items()},
+            counts=counts,
             last_id=max((r["max_id"] for r in rows), default=after_id),
-            first_at={k: r["first_at"] for k, r in keyed.items()},
-            last_at={k: r["last_at"] for k, r in keyed.items()},
+            first_at=first_at,
+            last_at=last_at,
+            workers={k: frozenset(v) for k, v in workers.items()},
         )
 
     def task_events_since(self, after_id: int) -> TaskDelta:
