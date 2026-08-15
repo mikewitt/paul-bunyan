@@ -83,6 +83,35 @@ def _format_rate(bar: BarState) -> str:
     return f"{1 / bar.rate:,.1f}s each"
 
 
+def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
+    """Set a rich task's total, including *back* to None.
+
+    `Progress.update(total=None)` does not withdraw a total — rich documents
+    it as "updates task.total if not None", so None reads as "not supplied"
+    and the old total survives. `Progress.reset()` says the same thing in the
+    same words. There is no public way to make a determinate task
+    indeterminate again, so this reaches for `_tasks` under the progress's own
+    lock, which is exactly what `reset()` does.
+
+    Without it every path back to a pulse is silently a no-op, and rich clamps
+    the stale `completed > total` to a full bar — a bar reading "finished"
+    while the work runs on, which is the one thing the pulse rule exists to
+    prevent.
+
+    `finished_time` is cleared with it. rich latches that the moment
+    `completed >= total` and `Task.elapsed` returns it forever after, so a bar
+    that touched 100% before the claim was withdrawn would keep a frozen
+    clock. Only on an actual change, so a legitimately finished bar keeps its
+    stopped timer.
+    """
+    with progress._lock:  # noqa: SLF001 - no public withdrawal exists; see above
+        task = progress._tasks[task_id]  # noqa: SLF001
+        if task.total == total:
+            return
+        task.total = total
+        task.finished_time = None
+
+
 def _format_source_detail(bar: BarState) -> str:
     """The count column: cumulative always, cycle position when inferred.
 
@@ -318,10 +347,14 @@ class RichProgressRenderer:
                 label, total=total, fields={"rate": "", "detail": ""}
             )
             self._tasks[bar.source] = task_id
+        # Via `_set_total` rather than `update(total=...)`, which cannot
+        # withdraw a total. Both directions matter here: a promoted bar that
+        # overruns has to go back to pulsing, and a retired bar that resumes
+        # has to shed the total that filling it in implied.
+        _set_total(self._source_progress, task_id, total)
         self._source_progress.update(
             task_id,
             description=label,
-            total=total,
             completed=completed,
             rate=_format_rate(bar),
             detail=_format_source_detail(bar),
@@ -340,6 +373,12 @@ class RichProgressRenderer:
         Pulsing withdraws the claim instead, and the count column keeps
         showing the real numbers so the overshoot is visible rather than
         merely implied.
+
+        A task that *ends* is filled, whatever it claimed on the way. Its
+        `end` row is an exact completion signal — the one kind of bar here
+        that has one — so leaving an indeterminate task pulsing after it
+        would say "still working" about work that is provably over, and would
+        leave the elapsed clock running with it.
         """
         for bar in self._task_model.poll():
             label = f"{'  ' * bar.depth}{bar.label}"
@@ -352,22 +391,32 @@ class RichProgressRenderer:
                 # for subtasks. A bare "0" beside a pulsing bar reads as
                 # "stuck at zero" rather than "no count was claimed".
                 count = ""
-            drawn_total = (
-                None if bar.total is not None and bar.current > bar.total else bar.total
-            )
+            if bar.done:
+                drawn_total: int | None = max(bar.total or 0, bar.current)
+            elif bar.total is not None and bar.current > bar.total:
+                drawn_total = None
+            else:
+                drawn_total = bar.total
             rich_id = self._task_bars.get(bar.task_id)
             if rich_id is None:
                 rich_id = self._task_progress.add_task(
                     label, total=drawn_total, fields={"count": count}
                 )
                 self._task_bars[bar.task_id] = rich_id
+            # See `_set_total`: `update(total=None)` would leave a stale total
+            # in place, so every withdrawal has to go through it.
+            _set_total(self._task_progress, rich_id, drawn_total)
             self._task_progress.update(
                 rich_id,
                 description=label,
-                total=drawn_total,
                 completed=bar.current,
                 count=count,
             )
+            if bar.done:
+                # Freezes the elapsed column. rich only latches it when
+                # `completed >= total`, which an under-delivering task never
+                # reaches.
+                self._task_progress.stop_task(rich_id)
 
     def bars(self) -> list[BarState]:
         """Every bar the model is tracking, drawn or not.

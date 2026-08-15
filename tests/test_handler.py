@@ -79,7 +79,7 @@ def test_a_raising_callback_does_not_escape_into_the_logging_call():
     surfaces out of an ordinary `log.info()` in code that has never heard of
     lumberjack. A dead stderr consumer is the realistic way in."""
     handler = LumberjackHandler(on_record=_raise_broken_pipe, level=logging.DEBUG)
-    handler.handleError = lambda record: None  # type: ignore[method-assign]
+    handler.handleError = lambda record: None
     logger = logging.getLogger("raising-callback")
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
@@ -95,7 +95,7 @@ def test_a_raising_callback_still_buffers_the_record():
     ran, so the store — the half that must never lose anything — still gets
     it."""
     handler = LumberjackHandler(on_record=_raise_broken_pipe)
-    handler.handleError = lambda record: None  # type: ignore[method-assign]
+    handler.handleError = lambda record: None
     _emit(handler, "survived")
     assert [row.message for row in handler.drain()] == ["survived"]
 
