@@ -155,10 +155,8 @@ class TaskHandle:
         self._current = 0
         self._total = total
         self._ended = False
-        # Whether the `start` row was actually written. Level filtering is
-        # per record, and `end()` promotes to ERROR on failure, so without
-        # this a task under `init(level=WARNING)` would emit a lone `end`
-        # row with no `start` to anchor it. Rows are all-or-nothing.
+        # Whether the `start` row was actually written — see `_emit()`, which
+        # is where the all-or-nothing rule this flag carries is explained.
         self._started = False
         self._token: contextvars.Token[TaskHandle | None] | None = None
         #: What was ambient when this handle was *entered*. `_ambient_parent()`
@@ -410,8 +408,11 @@ def task(
     Mirrors an OTel span. Nests under whatever task is ambient at the call
     site; off the main thread, use the parent's `.subtask()` instead.
 
-    INFO rather than DEBUG because `init()` defaults to INFO, and an emission
-    the default filters out does not exist as far as a first run is concerned.
+    INFO rather than DEBUG because a task boundary is not debug spam: it is
+    the thing the caller went out of their way to state. A quieter capture —
+    `init(level=logging.INFO)`, or a host application that configured logging
+    itself — must still see it, and DEBUG is the level such a configuration
+    drops first.
 
     `_origin` is internal — `track()` hands its own frame down. See
     `_caller_origin()`.

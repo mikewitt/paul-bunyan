@@ -7,8 +7,12 @@ does so guarded by try/except so importing `lumberjack.renderers` (and thus
 Two renderers live here:
 
 * `RichTerminalRenderer` — one styled line per record, still write-through.
-* `RichProgressRenderer` — the Phase 1 live bar: repeating source locations
-  become bars that advance instead of a thousand scrolling lines.
+  Only reachable by constructing it directly: `create_renderer()` returns it
+  when there is no store to read, and `init()` always has one. It is kept for
+  that direct use and for tests.
+* `RichProgressRenderer` — the live display, and the centrepiece: named bars
+  from the tracking API above inferred ones from repeating source locations,
+  in place of a thousand scrolling lines.
 """
 
 from __future__ import annotations
@@ -367,12 +371,10 @@ class RichProgressRenderer:
         honest rendering of a task that never said how much work there was.
         A task that did say gets a real percentage.
 
-        A task that *overshoots* its total goes back to pulsing. rich clamps
-        `completed > total` to a full 100% bar, which reads as "finished"
-        while the work is still running — the one thing a bar must not say.
-        Pulsing withdraws the claim instead, and the count column keeps
-        showing the real numbers so the overshoot is visible rather than
-        merely implied.
+        A task that *overshoots* its total goes back to pulsing — the
+        withdrawal rule, and `_set_total()` is what makes it reach the screen.
+        The count column keeps showing the real numbers, so the overshoot is
+        visible rather than merely implied.
 
         A task that *ends* is filled, whatever it claimed on the way. Its
         `end` row is an exact completion signal — the one kind of bar here

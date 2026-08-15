@@ -333,7 +333,7 @@ better.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `level` | `logging.INFO` | Level for the root logger and the handler. `logging.DEBUG` to capture debug spam. |
+| `level` | `logging.DEBUG` | Level for the root logger and the handler. `logging.INFO` for a quieter capture. |
 | `output_mode` | `None` (detect) | Force `"rich"`, `"plain"` or `"json"`. |
 | `replace_handlers` | `True` | Take over the root logger's handlers. `False` layers alongside them. |
 | `store` | `None` | Bring your own `RecordStore`. One you pass in is yours — `shutdown()` leaves it open. |

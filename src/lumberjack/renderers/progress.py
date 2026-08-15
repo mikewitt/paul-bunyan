@@ -1,18 +1,25 @@
-"""Naive repeating-source detection behind the Phase 1 live bar.
+"""The bar models: what is inferred from log lines, and what was declared.
 
-Deliberately *not* `RepetitionAnalyzer` (Phase 4): no template extraction, no
-masking, no clustering. "A repeating log shape" here means "records from the
-same source location", which `count_by_source()` already groups for free — a
-`logger.debug(...)` inside a loop hits the same line every iteration. Enough
-to prove the premise: a log line that recurs is progress signal, not noise.
+Two models, both reading the store and neither importing `rich`, so the whole
+display layer is swappable and testable on a bare install:
+
+* `RepeatingSourceModel` — the inferred half. Identity is the *source
+  location*: a `logger.debug(...)` inside a loop hits the same line every
+  iteration, so `(pathname, lineno, func_name)` groups a loop's ticks with no
+  template extraction, no masking and no clustering. On top of that grouping
+  it measures each source's period, sorts sources by period to recover which
+  loop encloses which, takes the ratio between an enclosing loop and an
+  enclosed one as the inner loop's iteration count, and retires a bar whose
+  source has gone quiet.
+* `TaskProgressModel` — the exact half. Every number came from a `task()` or
+  `track()` call that stated it outright, so nothing here guesses.
 
 Counts come from the store, never from tallying the handler's live callback,
-so every renderer reading that store sees the same numbers. Nothing here
-imports `rich` — the model is display-independent.
-
-The store is read forward from a watermark rather than re-tallied, so a
-redraw costs what arrived since the last one instead of what the store
-holds.
+so every renderer reading that store sees the same numbers. The store is read
+forward from a watermark rather than re-tallied, so a redraw costs what
+arrived since the last one instead of what the store holds — and every
+inference below runs per *poll*, over sources rather than rows, so log volume
+never drives its cost either.
 """
 
 from __future__ import annotations
@@ -46,8 +53,11 @@ DEFAULT_REFRESH_INTERVAL = 0.2
 #: not something to reach for in production. A bar count high enough to want
 #: it is a *symptom* — either lumberjack is grouping too finely, or the code
 #: is logging in a way that cannot be grouped — and capping hides that symptom
-#: rather than treating it. Grouping by source location is a known-crude
-#: placeholder for template clustering, so the real remedy arrives with that.
+#: rather than treating it. The specific diagnosis is that containment
+#: analysis has not merged sibling call sites into one loop's bar, which it
+#: never does: 1:1 merging is designed and deliberately unbuilt, because it
+#: needs a drawn bar to disappear. So the count measures how much structure is
+#: still uninferred, and the real remedy arrives with that.
 #: lumberjack: see issue #8
 MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
 
@@ -169,11 +179,9 @@ class BarState:
     def is_determinate(self) -> bool:
         """Whether the bar may claim a percentage.
 
-        A total that the count has already blown past is withdrawn rather than
-        clamped: rich would render 127% as a full bar, which reads as
-        "finished" while the loop is still running. Pulsing again is the
-        honest degradation, and it is the one exception to confidence only
-        ever increasing.
+        A total the count has already blown past is withdrawn rather than
+        clamped — see CLAUDE.md's "Pulse means no claim" decision for why
+        that is the one exception to confidence only increasing.
         """
         return self.total is not None and self.cycle_current <= self.total
 

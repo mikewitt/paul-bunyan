@@ -1,8 +1,11 @@
-"""The Phase 1 proof: a log line repeating inside a loop becomes a live bar.
+"""The premise on screen: log lines become bars, and the bars tell the truth.
 
 These tests drive the real path — stdlib `logging` → `LumberjackHandler` →
 `RecordStore` → bar — rather than poking the renderer directly, because the
-premise being validated is end-to-end.
+premise being validated is end-to-end. What they cover, in order: a repeating
+line collapsing into one advancing bar, the opt-in ceiling, what a lossy
+display must not swallow, the redraw timer, teardown, named bars from the
+tracking API, and the structure inferred for the rest.
 
 Timing is driven explicitly (`rig.tick()` stands in for the flush pump plus
 the redraw timer) so nothing here sleeps; the one genuinely time-dependent
