@@ -200,6 +200,8 @@ Coverage is uploaded to Codacy from the `coverage-badge` job. It comes from that
 
 Codacy's bandit engine skips `tests/` — see `.codacy.yaml`, which records why per finding. The short version: 437 of its 447 findings were `assert` used in a pytest suite, where the assert *is* the test, and the rest of the test-only findings were subprocess launches and fake `/tmp` pathnames in row fixtures. `src/` and `examples/` stay in scope, so the ten remaining findings are ones somebody has read and kept. Individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 
+**Every action is pinned to a commit SHA, with its version in a trailing comment.** A git tag is moveable: whoever owns the action can repoint `v4` at different code and every run picks it up with no diff and no review. That matters here because CI holds `contents: write` for the badge and a Codacy token. Bump with `git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'` — the `^{}` dereferences an annotated tag to the commit. The pins are currently unmanaged, so they will go stale; issue #42 holds the Renovate-or-Dependabot decision that would fix that.
+
 Every job pins its interpreter with `actions/setup-python` *before* `setup-uv`. Without it `uv sync` resolves whatever satisfies `requires-python` and the matrix silently stops testing six versions — verified from run logs that the legs really do run distinct interpreters.
 
 `.pre-commit-config.yaml` pins `ruff`/`black` by git rev while `uv` resolves them from `pyproject.toml`; nothing links the two, so `tests/test_toolchain.py` fails when they drift. Otherwise a commit passes locally and fails `lint` over a rule one version has and the other does not.
