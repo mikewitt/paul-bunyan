@@ -164,10 +164,20 @@ Written down so "does this belong here?" stops being a judgement call.
 | Phase | IN | OUT |
 |---|---|---|
 | **3 — Multiprocessing capture** | Records from child processes reaching the parent's store (WAL multi-writer if the spike says yes, otherwise a queue path). The attribution columns already exist. | Any display change. DuckDB multi-process — the queue path is its answer by design. Anything networked. |
-| **4 — Repetition analysis** *(done)* | 4a's named determinate bars from stored tracking data; then rate/count, containment ratios, pulse→promote, idle retirement (#38). Also #26, #32, #35, and #8's real fix. #37 as detection plus diagnostic only. | Message-template masking beyond the wrapper diagnostic. Hints. Caller fingerprinting (#37's later options). Multiprocessing. Bar *placement* once bars nest (#43) — that is #8's display question. |
+| **4 — Repetition analysis** *(done, closed)* | What shipped: 4a's named determinate bars from stored tracking data, then rate/count, worker-scoped containment ratios, pulse→promote, idle retirement (#38), and #26. | Everything the milestone once also claimed — see below. Message-template masking. Hints. Caller fingerprinting. Multiprocessing. |
 | **5 — Hints config** | Declarative config that overrides inference: progress step, task boundary, noise, severity. | New inference of any kind. Runtime API surface beyond reading the config. |
-| **6 — OpenTelemetry** | The inbound `OTelBridge` (SpanProcessor/MetricReader → store) and the `trace_id`/`span_id` columns (#34). | Outbound spans — Phase 2 shipped them. Exporter or sampling configuration. Rendering metrics beyond the existing bars. |
-| **7 — Polish & extensibility** | Defects in already-shipped code (#7, #11, #14, #15, #16, #18, #31, #33), renderer interface freeze, theming, performance pass, docs. | New inference or capability work. Anything owned by an earlier phase. |
+| **6 — OpenTelemetry** | The inbound `OTelBridge` (SpanProcessor/MetricReader → store), the `trace_id`/`span_id` columns (#34), and tagging ordinary records with their enclosing task (#32) — #34 and #32 are the same capture-path cost question and are decided together. | Outbound spans — Phase 2 shipped them. Exporter or sampling configuration. Rendering metrics beyond the existing bars. |
+| **7 — Polish & extensibility** | Defects in already-shipped code (#7, #11, #14, #15, #16, #18, #31, #33, #35), the bar-count and bar-placement questions (#8, #43), #37's detection-plus-diagnostic, organisational cleanup (#44, #45), renderer interface freeze, theming, performance pass, docs. | New inference. Caller fingerprinting (#37's later options). Anything owned by an earlier phase. |
+
+**Phase 4 closed without five things it had claimed, and they were re-homed rather than left to rot.** Worth recording, because the pattern will recur: a milestone accumulates issues while the phase is being designed, and shipping the phase is when you find out which of them were actually part of it.
+
+| Issue | Was | Now | Why |
+|---|---|---|---|
+| #8 | Phase 4 | Polish | The bar-count ceiling is a *display* question, and Phase 4 changed what a bar means without settling it. Retirement bounds what claims to be live; it does not bound what is drawn. |
+| #43 | Phase 4 | Polish | Filed *by* Phase 4 and blocked on #8 — same question, so the same home. |
+| #35 | Phase 4 | Polish | A Phase 2 defect that Phase 4 made visible rather than caused: a stalled task genuinely does sit at 1/100 now that named determinate bars exist. |
+| #37 | Phase 4 | Polish | The cheap half (detect the collapse, report it at exit) is polish-shaped. The expensive half — caller fingerprinting — stays out of every milestone. |
+| #32 | Phase 4 | OpenTelemetry | Not a defect at all, and never really Phase 4's: it is a capture-path cost question, and #34 says outright that the two must be decided together. |
 
 ## Toolchain
 
