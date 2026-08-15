@@ -269,7 +269,7 @@ class RepeatingSourceModel:
         for source, _ in fresh:
             self._shown.append(source)
             self._shown_set.add(source)
-        self._infer_containment()
+        self._infer_containment(delta)
         self._advance_cycles(delta)
         return self.bars()
 
@@ -358,7 +358,7 @@ class RepeatingSourceModel:
                 representative = period
         return levels
 
-    def _infer_containment(self) -> None:
+    def _infer_containment(self, delta: SourceDelta) -> None:
         """Promote a stable parent/ratio pairing into a believed one.
 
         The ratio between a level's period and its enclosing level's *is* the
@@ -367,9 +367,12 @@ class RepeatingSourceModel:
         iteration. Containment and the total come from one measurement.
 
         Nothing is believed on first sight. A pairing has to survive
-        `CONTAINMENT_CONFIRMATIONS` consecutive polls within `RATIO_TOLERANCE`,
-        which is what filters a loop still spinning up from one that has
-        settled. Once believed it is frozen: confidence only increases, and a
+        `CONTAINMENT_CONFIRMATIONS` polls *that brought new records for the
+        child* — which is the only kind that re-measures anything. Counting
+        every poll instead would confirm a pairing on the next redraw whether
+        or not a single record arrived, since periods move only when records
+        do: the guard would be a 200ms timer wearing the costume of a second
+        opinion. Once believed it is frozen: confidence only increases, and a
         bar that re-parents mid-run is worse than one that never claimed.
         """
         levels = self._levels()
@@ -377,6 +380,11 @@ class RepeatingSourceModel:
             for source in level:
                 if source in self._parent:
                     continue  # frozen; confidence only increases
+                if source not in delta.counts:
+                    # No new records, so no new measurement. Leave any
+                    # candidate standing rather than resetting it: a quiet
+                    # poll is not evidence against the pairing either.
+                    continue
                 parent = self._enclosing(source, levels[:depth])
                 if parent is None:
                     self._candidate.pop(source, None)
