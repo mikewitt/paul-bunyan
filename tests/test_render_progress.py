@@ -15,6 +15,7 @@ import dataclasses
 import io
 import logging
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -737,3 +738,43 @@ def test_an_untimed_loop_shows_no_rate_at_all(
         assert "5 records" in line
     finally:
         renderer.close()
+
+
+def test_the_live_display_leaves_stdout_alone(
+    as_terminal, store: RecordStore, make_row
+):
+    """rich redirects both streams by default, and `Live.start()` would swap
+    `sys.stdout` for a proxy writing to *this renderer's* stderr console. A
+    program run as `app.py > data.txt` would then print its results to the
+    terminal and write an empty file. lumberjack owns stderr; the channel a
+    program uses for its output is not ours to move.
+
+    Needs a terminal: rich only redirects either stream when the console is
+    one, so without `as_terminal` this passes whatever the setting is.
+    """
+    real_stdout = sys.stdout
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row() for _ in range(5)])
+        renderer.refresh()
+        assert sys.stdout is real_stdout
+    finally:
+        renderer.close()
+    assert sys.stdout is real_stdout
+
+
+def test_the_live_display_does_route_stderr(as_terminal, store: RecordStore):
+    """The other half of the decision, deliberately left as rich's default: a
+    raw `sys.stderr.write` mid-frame corrupts it, and routing it through the
+    console prints it cleanly above the bars instead."""
+    real_stderr = sys.stderr
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        assert sys.stderr is not real_stderr, "stderr was left unrouted"
+    finally:
+        renderer.close()
+    assert sys.stderr is real_stderr, "stderr was not handed back"

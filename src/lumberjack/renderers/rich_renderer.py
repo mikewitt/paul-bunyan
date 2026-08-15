@@ -216,6 +216,19 @@ class RichProgressRenderer:
             # An over-tall frame shows the first N rows plus an ellipsis with
             # correct cursor arithmetic, rather than scrolling the terminal.
             vertical_overflow="ellipsis",
+            # rich redirects **both** streams by default, and redirecting
+            # stdout is wrong here. `Live.start()` swaps `sys.stdout` for a
+            # proxy bound to this console — which writes to *stderr* — so a
+            # program doing `app.py > data.txt` would find its `print()` output
+            # on the terminal and its file empty, for as long as a bar was on
+            # screen. lumberjack owns stderr and must not touch the channel a
+            # program uses for its results.
+            redirect_stdout=False,
+            # stderr is a different question and the default is right: a raw
+            # `sys.stderr.write` lands in the middle of a live frame and
+            # corrupts it, while routed through the console it prints cleanly
+            # above the bars — the same treatment a WARNING record gets.
+            redirect_stderr=True,
         )
         self._tasks: dict[SourceKey, TaskID] = {}
         self._task_bars: dict[int, TaskID] = {}
