@@ -194,7 +194,9 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 | `package` | `uv lock --check`, builds the wheel, installs it into a clean venv, asserts `py.typed` ships |
 | `coverage-badge` | Trunk pushes only; commits the badge with `[skip ci]` |
 
-CodeQL also runs, configured outside this workflow.
+CodeQL and Codacy also run, both configured outside this workflow.
+
+Codacy's bandit engine skips `tests/` — see `.codacy.yaml`, which records why per finding. The short version: 437 of its 447 findings were `assert` used in a pytest suite, where the assert *is* the test, and the rest of the test-only findings were subprocess launches and fake `/tmp` pathnames in row fixtures. `src/` and `examples/` stay in scope, so the ten remaining findings are ones somebody has read and kept. Individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 
 Every job pins its interpreter with `actions/setup-python` *before* `setup-uv`. Without it `uv sync` resolves whatever satisfies `requires-python` and the matrix silently stops testing six versions — verified from run logs that the legs really do run distinct interpreters.
 
