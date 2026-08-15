@@ -5,8 +5,9 @@ on:
     branches: [daddy]
   pull_request:
 
-# Least privilege by default; coverage-badge opts back up to write, and is
-# the only job that needs to.
+# Least privilege throughout, and no job opts back up. Nothing here writes to
+# the repository: the coverage badge is served by Codacy from the uploaded
+# report rather than committed as a file.
 permissions:
   contents: read
 
@@ -170,13 +171,13 @@ jobs:
           EOF
 
   coverage-badge:
-    # Now does two things — uploads to Codacy on every event, and commits the
-    # badge on trunk pushes — so the name undersells it. Kept anyway: `name:`
-    # is the check name GitHub reports, and renaming orphans it if trunk's
-    # branch protection lists it. Same reasoning as the bare job above.
-    #
-    # One suite run feeding both consumers. Splitting them into two jobs
-    # would run the whole suite twice for the same numbers.
+    # The name is now wrong — this job uploads coverage and draws no badge,
+    # since Codacy renders that from the uploaded report. Kept anyway, and
+    # deliberately: `name:` is the check name GitHub reports, and trunk's
+    # branch protection lists it, so renaming orphans a required check and
+    # blocks merges until someone edits the ruleset to match. Same reasoning
+    # as the `bare install (no rich)` job above. Both are worth renaming
+    # together, once, alongside the settings change.
     #
     # Coverage comes from this single ubuntu/3.12 run, not from all six
     # `test` legs. The union across legs would be a shade higher — the
@@ -185,8 +186,6 @@ jobs:
     # workflow for a fraction of a percent.
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -224,24 +223,9 @@ jobs:
         env:
           CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
         if: env.CODACY_PROJECT_TOKEN == ''
-        run: |
-          echo "::notice title=Coverage not uploaded::CODACY_PROJECT_TOKEN is           not set for this run, so coverage was not sent to Codacy. Expected           on pull requests from forks, where GitHub withholds secrets.           Otherwise add the token under Settings > Secrets and variables >           Actions, from Codacy's Repository Settings > Coverage page."
-
-      # Installed ephemerally rather than as a dev dependency: genbadge pulls
-      # in Pillow, which local development has no reason to carry.
-      - run: uv run --with "genbadge[coverage]" genbadge coverage -i coverage.xml -o coverage.svg
-      - name: Commit badge if coverage changed
-        # Trunk pushes only. A PR must never push commits back, and a single
-        # writer keeps concurrent runs from racing on the same file.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
-        run: |
-          if git diff --quiet -- coverage.svg; then
-            echo "Coverage unchanged; nothing to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add coverage.svg
-          # [skip ci] stops this push from re-triggering the workflow.
-          git commit -m "Update coverage badge [skip ci]"
-          git push
+        run: >-
+          echo "::notice title=Coverage not uploaded::CODACY_PROJECT_TOKEN is not set for this run, so coverage was not
+          sent to Codacy. Expected on pull requests from forks, where GitHub
+          withholds secrets. Otherwise add the token under Settings > Secrets
+          and variables > Actions, using the value from Codacy's Repository
+          Settings > Coverage page."

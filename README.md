@@ -1,7 +1,8 @@
 # lumberjack
 
 [![CI](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml/badge.svg?branch=daddy)](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml)
-[![Coverage](coverage.svg)](https://github.com/mikewitt/paul-bunyan/actions/workflows/ci.yml)
+[![Coverage](https://app.codacy.com/project/badge/Coverage/cb0069a163c44c1ea01a4e86c7a16fb9)](https://app.codacy.com/gh/mikewitt/paul-bunyan/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
+[![Code quality](https://app.codacy.com/project/badge/Grade/cb0069a163c44c1ea01a4e86c7a16fb9)](https://app.codacy.com/gh/mikewitt/paul-bunyan/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 
 A drop-in UX layer for Python's stdlib `logging`. Capture every log record at
 full fidelity into a queryable store, while rendering something concise —
