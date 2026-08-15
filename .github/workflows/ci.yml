@@ -201,6 +201,10 @@ jobs:
         # case for pull requests from forks (GitHub withholds secrets there)
         # and for anyone who has cloned this without a Codacy project. A
         # coverage upload is not worth a red X on someone else's PR.
+        #
+        # The token goes through `env` because the `secrets` context is not
+        # available in a step-level `if` — only `env` is — so this indirection
+        # is the supported way to ask "was a secret provided?".
         env:
           CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
         if: env.CODACY_PROJECT_TOKEN != ''
@@ -210,6 +214,18 @@ jobs:
           # Cobertura, which is what coverage.py's `xml` writer emits and
           # what Codacy auto-detects.
           coverage-reports: coverage.xml
+
+      - name: Say so when coverage was not uploaded
+        # The skip above is silent, and a silent skip is indistinguishable
+        # from a broken upload: the job goes green either way and Codacy just
+        # never shows coverage. This turns "no coverage, no explanation" into
+        # an annotation naming the cause. It is not a failure — a fork PR
+        # legitimately lands here.
+        env:
+          CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+        if: env.CODACY_PROJECT_TOKEN == ''
+        run: |
+          echo "::notice title=Coverage not uploaded::CODACY_PROJECT_TOKEN is           not set for this run, so coverage was not sent to Codacy. Expected           on pull requests from forks, where GitHub withholds secrets.           Otherwise add the token under Settings > Secrets and variables >           Actions, from Codacy's Repository Settings > Coverage page."
 
       # Installed ephemerally rather than as a dev dependency: genbadge pulls
       # in Pillow, which local development has no reason to carry.
