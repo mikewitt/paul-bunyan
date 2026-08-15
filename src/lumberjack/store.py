@@ -26,10 +26,17 @@ class SourceDelta(NamedTuple):
     `last_id` is where the caller should resume from. It comes back in the
     same query as the counts rather than from a second `MAX(id)` call, so a
     row appended between the two can't be counted twice or skipped.
+
+    `first_at` and `last_at` are the oldest and newest `created` in each
+    group. They are what lets a reader work out how fast a source is
+    repeating without a second query — a source's own recurrence interval is
+    its loop's period. They carry the same keys as `counts`, always.
     """
 
     counts: Mapping[SourceKey, int]
     last_id: int
+    first_at: Mapping[SourceKey, float]
+    last_at: Mapping[SourceKey, float]
 
 
 class TaskEventRow(NamedTuple):
@@ -308,19 +315,24 @@ class SQLiteRecordStore(RecordStore):
         """
         sql = (
             "SELECT pathname, lineno, func_name, task_event IS NULL AS is_plain, "
-            "COUNT(*) AS cnt, MAX(id) AS max_id "
+            "COUNT(*) AS cnt, MAX(id) AS max_id, "
+            "MIN(created) AS first_at, MAX(created) AS last_at "
             "FROM records NOT INDEXED WHERE id > ? "
             "GROUP BY pathname, lineno, func_name, is_plain"
         )
         with self._lock:
             rows = self._conn.execute(sql, (after_id,)).fetchall()
-        counts = {
-            SourceKey(r["pathname"], r["lineno"], r["func_name"]): r["cnt"]
-            for r in rows
-            if r["is_plain"]
+        plain = [r for r in rows if r["is_plain"]]
+        keyed = {
+            SourceKey(r["pathname"], r["lineno"], r["func_name"]): r for r in plain
         }
         # No new rows leaves the watermark where it was; never move it back.
-        return SourceDelta(counts, max((r["max_id"] for r in rows), default=after_id))
+        return SourceDelta(
+            counts={k: r["cnt"] for k, r in keyed.items()},
+            last_id=max((r["max_id"] for r in rows), default=after_id),
+            first_at={k: r["first_at"] for k, r in keyed.items()},
+            last_at={k: r["last_at"] for k, r in keyed.items()},
+        )
 
     def task_events_since(self, after_id: int) -> TaskDelta:
         """The tracking API's rows appended after `after_id`, oldest first.

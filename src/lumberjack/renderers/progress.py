@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from lumberjack.schema import SourceKey
 
 if TYPE_CHECKING:
-    from lumberjack.store import RecordStore
+    from lumberjack.store import RecordStore, SourceDelta
 
 #: How many times a source location must have logged before it earns a bar.
 #: Low on purpose: two hits is a coincidence, three is a loop.
@@ -79,16 +79,33 @@ def resolve_max_bars(override: int | None = None) -> int | None:
     return value
 
 
+#: Weight given to the newest period sample. Low, because the estimate feeds
+#: a number a human reads off a moving display: a rate that jitters every
+#: redraw is harder to read than one that lags slightly.
+PERIOD_SMOOTHING = 0.3
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class BarState:
     """One bar's worth of state: which source it tracks and how far it has got.
 
-    There is no `total`: this proof knows how many records have arrived, never
-    how many are still coming. Exact totals are the tracking API's job (Phase 2).
+    There is no `total`: inference knows how many records have arrived and how
+    fast they are arriving, never how many are still coming. A total needs
+    either the tracking API (Phase 2) or containment analysis (#38).
     """
 
     source: SourceKey
     count: int
+    #: Seconds between records from this source, smoothed. None until two
+    #: records have been seen — one record establishes no interval.
+    period: float | None = None
+
+    @property
+    def rate(self) -> float | None:
+        """Records per second, or None while the period is unknown."""
+        if self.period is None or self.period <= 0:
+            return None
+        return 1.0 / self.period
 
     @property
     def label(self) -> str:
@@ -125,6 +142,12 @@ class RepeatingSourceModel:
         # source per poll, and a list scan there would be quadratic.
         self._shown: list[SourceKey] = []
         self._shown_set: set[SourceKey] = set()
+        # Newest `created` seen per source, and the smoothed interval between
+        # records. A source's own recurrence interval is its loop's period —
+        # no clustering needed to time a loop, only to decide how many bars
+        # to draw (#38).
+        self._last_at: dict[SourceKey, float] = {}
+        self._period: dict[SourceKey, float] = {}
         self._watermark = 0
 
     def poll(self) -> list[BarState]:
@@ -137,6 +160,7 @@ class RepeatingSourceModel:
         self._watermark = delta.last_id
         for source, count in delta.counts.items():
             self._totals[source] = self._totals.get(source, 0) + count
+            self._update_period(source, count, delta)
         # Only a source that just gained records can newly cross the
         # threshold — every source already over it was promoted on the poll
         # that took it there — so this scans the delta rather than every
@@ -156,10 +180,53 @@ class RepeatingSourceModel:
             self._shown_set.add(source)
         return self.bars()
 
+    def _update_period(self, source: SourceKey, count: int, delta: SourceDelta) -> None:
+        """Fold this delta's timing into the source's interval estimate.
+
+        Two cases, both exact rather than approximate:
+
+        * We have seen this source before, so the window runs from the last
+          record we knew about to the newest in this delta, and `count`
+          records fell inside it — one interval each.
+        * First sighting, so the only window available is the delta's own
+          span, which contains `count - 1` intervals between its `count`
+          records. A delta of one record establishes nothing and is skipped.
+
+        Smoothed rather than replaced, because a single slow iteration should
+        not make the displayed rate lurch.
+        """
+        # `last_at` carries the same keys as `counts` by construction, so a
+        # source in the delta always has a timestamp here.
+        last_at = delta.last_at[source]
+        previous = self._last_at.get(source)
+        self._last_at[source] = last_at
+        if previous is not None:
+            span, intervals = last_at - previous, count
+        else:
+            if count < 2:
+                return
+            span, intervals = last_at - delta.first_at[source], count - 1
+        if span <= 0 or intervals <= 0:
+            # Records sharing a timestamp — a burst inside one clock tick, or
+            # a coarse clock. No interval to learn from, and dividing by the
+            # span would report an infinite rate.
+            return
+        sample = span / intervals
+        known = self._period.get(source)
+        self._period[source] = (
+            sample
+            if known is None
+            else PERIOD_SMOOTHING * sample + (1 - PERIOD_SMOOTHING) * known
+        )
+
     def bars(self) -> list[BarState]:
         """The most recent poll's bars, in display order. Empty before `poll()`."""
         return [
-            BarState(source=source, count=self._totals[source])
+            BarState(
+                source=source,
+                count=self._totals[source],
+                period=self._period.get(source),
+            )
             for source in self._shown
         ]
 

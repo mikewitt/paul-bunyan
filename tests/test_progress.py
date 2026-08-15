@@ -12,6 +12,7 @@ import pytest
 from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     MAX_BARS_ENV_VAR,
+    PERIOD_SMOOTHING,
     BarState,
     RepeatingSourceModel,
     TaskProgressModel,
@@ -273,3 +274,76 @@ def test_task_bars_keep_their_slot(store, make_row):
         ]
     )
     assert [b.label for b in model.poll()] == ["first", "second"]
+
+
+# --- how fast is this loop going? -------------------------------------------
+#
+# The cheap half of #38. A source's own recurrence interval *is* its loop's
+# period, so timing needs no clustering — only deciding how many bars to draw
+# does. Nothing here infers containment.
+
+
+def test_no_period_before_two_records(store, make_row):
+    """One record establishes no interval, and a made-up number is worse
+    than none."""
+    store.append([make_row(created=100.0)])
+    model = RepeatingSourceModel(store, min_repeats=1)
+    (bar,) = model.poll()
+    assert bar.period is None and bar.rate is None
+
+
+def test_the_period_comes_from_the_deltas_own_span_on_first_sight(store, make_row):
+    """Three records a second apart: two intervals, so one second each."""
+    store.append([make_row(created=100.0 + i) for i in range(3)])
+    model = RepeatingSourceModel(store, min_repeats=1)
+    (bar,) = model.poll()
+    assert bar.period == pytest.approx(1.0)
+    assert bar.rate == pytest.approx(1.0)
+
+
+def test_the_period_spans_the_gap_between_polls(store, make_row):
+    """The window runs from the last record we already knew about, not from
+    the delta's own first record — otherwise the quiet time between polls is
+    invisible and every loop looks faster than it is."""
+    model = RepeatingSourceModel(store, min_repeats=1)
+    store.append([make_row(created=100.0), make_row(created=101.0)])
+    model.poll()
+    # One record, ten seconds after the last — a ten-second interval, even
+    # though this delta spans no time of its own.
+    store.append([make_row(created=111.0)])
+    (bar,) = model.poll()
+    assert bar.period > 1.0, "the between-poll gap was ignored"
+
+
+def test_the_period_is_smoothed_rather_than_replaced(store, make_row):
+    """A single slow iteration should not make the displayed rate lurch."""
+    model = RepeatingSourceModel(store, min_repeats=1)
+    store.append([make_row(created=100.0 + i) for i in range(5)])
+    model.poll()
+    steady = model.bars()[0].period
+    assert steady == pytest.approx(1.0)
+
+    # One record 96 seconds after the last: an outlier sample of 96s/interval.
+    store.append([make_row(created=200.0)])
+    (jolted,) = (b.period for b in model.poll())
+    blended = PERIOD_SMOOTHING * 96.0 + (1 - PERIOD_SMOOTHING) * 1.0
+    assert jolted == pytest.approx(blended)
+    assert jolted < 96.0, "the outlier replaced the estimate instead of moving it"
+
+
+def test_records_sharing_a_timestamp_report_no_rate(store, make_row):
+    """A burst inside one clock tick has no interval to learn from, and
+    dividing by the span would report an infinite rate."""
+    store.append([make_row(created=100.0) for _ in range(5)])
+    model = RepeatingSourceModel(store, min_repeats=1)
+    (bar,) = model.poll()
+    assert bar.period is None and bar.rate is None
+
+
+def test_each_source_times_itself(store, make_row):
+    store.append([make_row(lineno=10, created=100.0 + i) for i in range(3)])
+    store.append([make_row(lineno=99, created=100.0 + i * 10) for i in range(3)])
+    model = RepeatingSourceModel(store, min_repeats=1)
+    periods = {b.source.lineno: b.period for b in model.poll()}
+    assert periods[10] == pytest.approx(1.0)
+    assert periods[99] == pytest.approx(10.0)

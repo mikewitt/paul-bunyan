@@ -62,6 +62,21 @@ _LEVEL_STYLES = {
 }
 
 
+def _format_rate(rate: float | None) -> str:
+    """How fast a source is repeating, or blank while that is unknown.
+
+    Rate rather than period because "12/s" is what a reader wants from a
+    loop, and sub-1/s loops are the ones where the period is the readable
+    form instead. Blank until two records have been seen: one record
+    establishes no interval, and a made-up number is worse than none.
+    """
+    if rate is None:
+        return ""
+    if rate >= 1:
+        return f"{rate:,.0f}/s"
+    return f"{1 / rate:,.1f}s each"
+
+
 def _format_record(row: LogRecordRow) -> Text:
     style = _LEVEL_STYLES.get(row.level_name, "")
     text = Text()
@@ -162,6 +177,7 @@ class RichProgressRenderer:
             ),
             BarColumn(),
             TextColumn("{task.completed} records"),
+            TextColumn("{task.fields[rate]}", style="progress.remaining"),
             TimeElapsedColumn(),
         )
         # Exact bars first: the ellipsis crops from the bottom, so inferred
@@ -232,9 +248,13 @@ class RichProgressRenderer:
             if task_id is None:
                 # total=None → an indeterminate bar: this proof knows how many
                 # records have arrived, never how many are still coming.
-                task_id = self._source_progress.add_task(bar.label, total=None)
+                task_id = self._source_progress.add_task(
+                    bar.label, total=None, fields={"rate": ""}
+                )
                 self._tasks[bar.source] = task_id
-            self._source_progress.update(task_id, completed=bar.count)
+            self._source_progress.update(
+                task_id, completed=bar.count, rate=_format_rate(bar.rate)
+            )
         self._live.refresh()
 
     def _refresh_task_bars(self) -> None:
