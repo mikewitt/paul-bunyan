@@ -192,9 +192,11 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 | `test` | 6 legs: {ubuntu, windows} × {3.12, 3.13, 3.14} |
 | `bare install (no rich)` | Principle 8 — the zero-dependency install. Asserts `rich` is genuinely absent so it cannot rot into a duplicate of `test` |
 | `package` | `uv lock --check`, builds the wheel, installs it into a clean venv, asserts `py.typed` ships |
-| `coverage-badge` | Trunk pushes only; commits the badge with `[skip ci]` |
+| `coverage-badge` | One suite run with `--cov-report=xml`, feeding two consumers: the Codacy coverage upload on every event, and the committed badge on trunk pushes only. Name kept despite doing both — see below |
 
 CodeQL and Codacy also run, both configured outside this workflow.
+
+Coverage is uploaded to Codacy from the `coverage-badge` job. It comes from that one ubuntu/3.12 run rather than all six `test` legs: the union across legs would be marginally higher — the bare-install `skipif`, Windows path branches — but collecting it means six `--partial` uploads plus a `final` call, which is a lot of workflow for a fraction of a percent. The upload step is skipped, not failed, when `CODACY_PROJECT_TOKEN` is absent, which is the case for fork pull requests and for anyone who cloned this without a Codacy project.
 
 Codacy's bandit engine skips `tests/` — see `.codacy.yaml`, which records why per finding. The short version: 437 of its 447 findings were `assert` used in a pytest suite, where the assert *is* the test, and the rest of the test-only findings were subprocess launches and fake `/tmp` pathnames in row fixtures. `src/` and `examples/` stay in scope, so the ten remaining findings are ones somebody has read and kept. Individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 

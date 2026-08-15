@@ -170,9 +170,19 @@ jobs:
           EOF
 
   coverage-badge:
-    # Trunk pushes only. A PR must never push commits back, and a single
-    # writer keeps concurrent runs from racing on the same file.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
+    # Now does two things — uploads to Codacy on every event, and commits the
+    # badge on trunk pushes — so the name undersells it. Kept anyway: `name:`
+    # is the check name GitHub reports, and renaming orphans it if trunk's
+    # branch protection lists it. Same reasoning as the bare job above.
+    #
+    # One suite run feeding both consumers. Splitting them into two jobs
+    # would run the whole suite twice for the same numbers.
+    #
+    # Coverage comes from this single ubuntu/3.12 run, not from all six
+    # `test` legs. The union across legs would be a shade higher — the
+    # bare-install skipif, and Windows path branches — but collecting it
+    # means six `--partial` uploads plus a `final` call, which is a lot of
+    # workflow for a fraction of a percent.
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -185,10 +195,29 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-extras
       - run: uv run pytest --cov-report=xml
+
+      - name: Upload coverage to Codacy
+        # Skipped rather than failed when the secret is absent, which is the
+        # case for pull requests from forks (GitHub withholds secrets there)
+        # and for anyone who has cloned this without a Codacy project. A
+        # coverage upload is not worth a red X on someone else's PR.
+        env:
+          CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+        if: env.CODACY_PROJECT_TOKEN != ''
+        uses: codacy/codacy-coverage-reporter-action@v1.3.0
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          # Cobertura, which is what coverage.py's `xml` writer emits and
+          # what Codacy auto-detects.
+          coverage-reports: coverage.xml
+
       # Installed ephemerally rather than as a dev dependency: genbadge pulls
       # in Pillow, which local development has no reason to carry.
       - run: uv run --with "genbadge[coverage]" genbadge coverage -i coverage.xml -o coverage.svg
       - name: Commit badge if coverage changed
+        # Trunk pushes only. A PR must never push commits back, and a single
+        # writer keeps concurrent runs from racing on the same file.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
         run: |
           if git diff --quiet -- coverage.svg; then
             echo "Coverage unchanged; nothing to commit."
