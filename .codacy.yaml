@@ -1,0 +1,48 @@
+---
+# Codacy runs outside .github/workflows/ci.yml, alongside CodeQL.
+#
+# Bandit is not run over `tests/`. Every finding it produced there was a
+# false positive for a test suite, and there were 437 of them drowning any
+# real signal:
+#
+#   B101  assert_used            — 437, all in tests. The rule is about
+#                                  asserts being stripped under `python -O`
+#                                  in *production* code; in a pytest suite
+#                                  the assert IS the test.
+#   B603  subprocess_without_    — test_integration.py and test_toolchain.py
+#         shell_equals_true        launch `sys.executable` deliberately, to
+#                                  exercise atexit and excepthook paths that
+#                                  cannot run in-process.
+#   B404  import_subprocess      — same two files, same reason.
+#   B108  hardcoded_tmp_dir      — "/tmp/foo.py" in row fixtures is a fake
+#                                  `pathname` value on a record; nothing is
+#                                  opened, created or written.
+#
+# Scoped to the bandit engine rather than a global `exclude_paths`, so
+# complexity and duplication still cover the test suite.
+#
+# `src/` is deliberately NOT excluded. Its two findings are real code that
+# was looked at and kept:
+#   B110  try_except_pass        — teardown.py and pump.py, every instance
+#                                  commented: a bug in lumberjack's own
+#                                  cleanup must never hide a user's
+#                                  traceback, so the swallow is the point.
+#   B608  hardcoded_sql          — `_INSERT_SQL` is built from `_COLUMNS`, a
+#                                  module-level tuple of literal column
+#                                  names. Values go through `?` placeholders,
+#                                  and the parity tests pin `_COLUMNS`
+#                                  against the real table.
+#
+# `examples/` is not excluded either. Its two B101s are real: `assert store
+# is not None` narrows a type for mypy, and `python -O` would strip it and
+# let a None reach `.recent()`. Nobody runs the examples under -O, but the
+# warning is not wrong, so it stays visible rather than being configured
+# away. Excluding more than the noise would defeat the point of the tool.
+#
+# Individual patterns can only be disabled in the Codacy web UI, so path
+# scoping is the whole of what this file can express. After this, bandit
+# reports 10 findings instead of 447, and each of the 10 has been read.
+engines:
+  bandit:
+    exclude_paths:
+      - "tests/**"

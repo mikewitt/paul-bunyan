@@ -70,7 +70,18 @@ class LumberjackHandler(logging.Handler):
             self._buffer.append(row)
 
         if self.on_record is not None:
-            self.on_record(row)
+            try:
+                self.on_record(row)
+            except Exception:
+                # A renderer that raises must not take down the `log.info()`
+                # that reached it. `Logger.callHandlers` has no catch of its
+                # own — stdlib handlers guard their own `emit()` bodies — so
+                # without this a broken stderr pipe surfaces as an exception
+                # from an ordinary logging call in code that has never heard
+                # of lumberjack. The record is already in the buffer by now,
+                # so the store still gets it: only the live view is lost,
+                # which is the trade Principle 6 asks for.
+                self.handleError(record)
 
     def drain(self) -> list[LogRecordRow]:
         """Atomically empty and return the buffer, oldest first."""

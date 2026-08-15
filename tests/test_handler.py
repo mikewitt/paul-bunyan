@@ -74,6 +74,36 @@ def test_on_record_callback_invoked_per_record():
     assert seen == ["hi"]
 
 
+def test_a_raising_callback_does_not_escape_into_the_logging_call():
+    """`Logger.callHandlers` has no catch of its own, so an unguarded callback
+    surfaces out of an ordinary `log.info()` in code that has never heard of
+    lumberjack. A dead stderr consumer is the realistic way in."""
+    handler = LumberjackHandler(on_record=_raise_broken_pipe, level=logging.DEBUG)
+    handler.handleError = lambda record: None
+    logger = logging.getLogger("raising-callback")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        logger.info("an ordinary log line")
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_a_raising_callback_still_buffers_the_record():
+    """Only the live view is lost. The record was buffered before the callback
+    ran, so the store — the half that must never lose anything — still gets
+    it."""
+    handler = LumberjackHandler(on_record=_raise_broken_pipe)
+    handler.handleError = lambda record: None
+    _emit(handler, "survived")
+    assert [row.message for row in handler.drain()] == ["survived"]
+
+
+def _raise_broken_pipe(row: object) -> None:
+    raise BrokenPipeError("the stderr consumer died")
+
+
 def test_default_buffer_size_is_positive():
     assert DEFAULT_BUFFER_SIZE > 0
 

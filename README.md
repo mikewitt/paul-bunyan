@@ -8,14 +8,13 @@ full fidelity into a queryable store, while rendering something concise —
 instead of a thousand scrolling `DEBUG` lines, render progress.
 
 **Status: early, and pre-1.0.** Capture, storage (SQLite), output-mode
-detection, plain/rich rendering, a live progress bar, and the explicit
-`track()` / `task()` API with outbound OpenTelemetry spans are in place.
-The bar's repetition detection is deliberately crude for now — records are
-grouped by *source location*, so a log call inside a loop becomes one bar.
-Template-based repetition analysis is a later phase, and so is drawing
-`task()`'s exact counts as named, determinate bars — today those counts go
-into the store rather than onto the display. See `CLAUDE.md` for the full
-plan.
+detection, plain/rich rendering, the explicit `track()` / `task()` API with
+outbound OpenTelemetry spans, and named determinate bars driven by that API
+are in place. So is the inference on top of uninstrumented logging: log lines
+are grouped by *source location*, timed, and read for structure, so a loop
+inside a loop draws as a nested bar with a real percentage that nobody
+declared. Still to come: a hints config, the inbound OpenTelemetry bridge,
+and multiprocessing-aware capture. See `CLAUDE.md` for the plan.
 
 ## Install
 
@@ -39,7 +38,7 @@ log = logging.getLogger(__name__)
 
 
 def main():
-    lumberjack.init(level=logging.DEBUG)
+    lumberjack.init()
 
     for i in range(10_000):
         log.debug("processed item %d", i)   # this line becomes one bar
@@ -54,26 +53,44 @@ call — see [Do I have to shut it down?](#do-i-have-to-shut-it-down) below.
 `init()` returns the installed handler; ignoring the return value is normal.
 
 `level` sets both the root logger's level and the handler's, and defaults to
-`INFO`. lumberjack exists for `logger.debug()` spam, so pass
-`level=logging.DEBUG` when that is what you want captured — otherwise stdlib
-`logging` filters it out before lumberjack ever sees it.
+`DEBUG` — deliberately louder than stdlib's usual default. lumberjack exists
+for `logger.debug()` spam, and any higher default has stdlib discard those
+calls before lumberjack ever sees them, so a first run would show nothing.
+The volume is handled where it belongs: the display collapses it and the
+store absorbs it. Pass `level=logging.INFO` for a quieter capture.
 
 On an interactive terminal with `rich` installed, log lines that repeat from
-the same place stop scrolling and become bars that advance. Three worker
+the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-demo.py:43 extract()   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 700 records 0:00:02
-demo.py:49 transform() ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 450 records 0:00:02
-demo.py:60 load()      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 300 records 0:00:02
+demo.py:49 extract()     ━━━━━━━━━━━━━━━━━━━━━ 700 records         229/s 0:00:02
+  demo.py:83 reconcile() ━━━━━━━━━━━━━━━━━━━╸━ 19/20 · 480 records 191/s 0:00:02
+demo.py:55 transform()   ━━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
+demo.py:66 load()        ━━━━━━━━━━━━━━━━━━━━━ 300 records         96/s  0:00:02
+demo.py:81 reconcile()   ━━━━━━━━━━━━━━━━━━━━━ 24 records          10/s  0:00:02
 ```
 
-One bar per source location — three loops, three bars, no concurrency-specific
-setup. (Grouping is by source location, not by worker: two threads running the
-same loop share a bar today, though thread and process are still recorded on
-every record.) The count climbs but there is no percentage, because nothing
-here knows how many iterations are still coming. [Telling it](#2-tell-it-what-the-work-is)
-is what `track()` and `task()` are for.
+One bar per source location, no concurrency-specific setup. Three of those
+loops are flat, so their bars only count and pace: nothing in the stream says
+how long they are, and claiming otherwise would be a guess. `reconcile` runs a
+loop inside a loop, and *that* is in the stream — line 83 fires twenty times
+between consecutive firings of line 81 — so it draws indented under its
+parent with a real `19/20`, from a total nobody declared. When a loop goes
+quiet for long enough its bar fills and reads `idle`.
+
+Two things this deliberately does not do. It does not group by worker: two
+threads running the same loop share a bar, though thread and process are
+recorded on every record and *are* what stop two unrelated loops being read as
+nested. And it does not move a bar once drawn, which is why the indented child
+above sits above its parent rather than beneath it — see
+[#43](https://github.com/mikewitt/paul-bunyan/issues/43).
+
+Inference is an 80% solution on purpose, and it will be wrong sometimes. When
+it is, the cost is a cosmetic one: a bar that pulses when it could have had a
+percentage, or one that overshoots and goes back to pulsing. The store is
+never wrong. [Telling it outright](#2-tell-it-what-the-work-is) is what
+`track()` and `task()` are for.
 
 Nothing is lost to the collapse:
 
@@ -132,9 +149,11 @@ interpreter shutdown either.
 
 ### 2. Tell it what the work is
 
-Rung 1 infers progress from how often a log line repeats, which can show that
-work is happening but never how much is left. `task()` and `track()` are how
-code says so outright.
+Rung 1 infers what it can from how often a log line repeats, which is a great
+deal for a nested loop and nothing at all for an outermost one — no amount of
+watching a top-level loop reveals how many iterations are left. `task()` and
+`track()` are how code says so outright, and a stated total always beats an
+inferred one.
 
 ```python
 import lumberjack
@@ -187,9 +206,10 @@ Two things worth knowing:
   would print a line per item, which is the thing this package exists to
   avoid. Counts stay exact regardless, because the value is absolute and the
   closing record carries the final one.
-- **The live bars are still rung-1 bars.** Task counts and hierarchy go into
-  the store today; drawing them as named, determinate bars is the next phase.
-  Read them back with `current_store()` in the meantime.
+- **These draw as real bars.** A task with a total shows a percentage; one
+  without pulses rather than inventing a denominator; subtasks are indented
+  under their parent, and a bar finishes when its task ends. Uninstrumented
+  log lines still get the rung-1 count bars, drawn below these.
 
 `examples/tracking.py` is the whole thing end to end.
 
@@ -313,7 +333,7 @@ better.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `level` | `logging.INFO` | Level for the root logger and the handler. `logging.DEBUG` to capture debug spam. |
+| `level` | `logging.DEBUG` | Level for the root logger and the handler. `logging.INFO` for a quieter capture. |
 | `output_mode` | `None` (detect) | Force `"rich"`, `"plain"` or `"json"`. |
 | `replace_handlers` | `True` | Take over the root logger's handlers. `False` layers alongside them. |
 | `store` | `None` | Bring your own `RecordStore`. One you pass in is yours — `shutdown()` leaves it open. |

@@ -9,7 +9,7 @@ import time
 import pytest
 
 from lumberjack.schema import SourceKey
-from lumberjack.store import _COLUMNS, SQLiteRecordStore
+from lumberjack.store import _COLUMNS, SQLiteRecordStore, WorkerKey
 
 
 def test_append_and_recent(store, make_row):
@@ -245,3 +245,152 @@ def test_a_rejected_store_file_does_not_leak_its_connection(tmp_path, recwarn):
         SQLiteRecordStore(path)
     gc.collect()
     assert not [w for w in recwarn if issubclass(w.category, ResourceWarning)]
+
+
+# --- the tracking API's own rows -------------------------------------------
+
+
+def _task_row(make_row, task_id, event, **kw):
+    return make_row(
+        task_id=task_id,
+        task_event=event,
+        task_label=kw.pop("label", "job"),
+        **kw,
+    )
+
+
+def test_task_events_since_returns_only_task_rows(store, make_row):
+    store.append([make_row(message="ordinary"), _task_row(make_row, 1, "start")])
+    delta = store.task_events_since(0)
+    assert [e.event for e in delta.events] == ["start"]
+    assert delta.events[0].task_id == 1
+
+
+def test_task_events_since_returns_them_oldest_first(store, make_row):
+    store.append(
+        [
+            _task_row(make_row, 1, "start"),
+            _task_row(make_row, 1, "update", progress_current=5),
+            _task_row(make_row, 1, "end", progress_current=9),
+        ]
+    )
+    assert [e.event for e in store.task_events_since(0).events] == [
+        "start",
+        "update",
+        "end",
+    ]
+
+
+def test_task_events_since_advances_past_ordinary_records(store, make_row):
+    """The watermark spans every row in range, not just the task ones —
+    otherwise ordinary records after the last task event would be rescanned
+    on every poll, and the range would only grow."""
+    store.append([_task_row(make_row, 1, "start")])
+    first = store.task_events_since(0)
+    store.append([make_row(message="plain") for _ in range(5)])
+    second = store.task_events_since(first.last_id)
+    assert second.events == ()
+    assert second.last_id > first.last_id, "the watermark stalled behind plain rows"
+
+
+def test_task_events_since_holds_the_watermark_when_nothing_arrived(store, make_row):
+    store.append([_task_row(make_row, 1, "start")])
+    first = store.task_events_since(0)
+    again = store.task_events_since(first.last_id)
+    assert again.events == ()
+    assert again.last_id == first.last_id, "an empty delta must not rewind"
+
+
+def test_task_events_since_carries_every_column_a_bar_needs(store, make_row):
+    store.append(
+        [
+            _task_row(
+                make_row,
+                7,
+                "update",
+                label="reindex",
+                parent_task_id=3,
+                progress_current=40,
+                progress_total=100,
+            )
+        ]
+    )
+    (event,) = store.task_events_since(0).events
+    assert (event.task_id, event.parent_task_id) == (7, 3)
+    assert (event.label, event.event) == ("reindex", "update")
+    assert (event.current, event.total) == (40, 100)
+
+
+def test_the_source_delta_ignores_task_rows(store, make_row):
+    """The tracking API knows its own exact numbers and gets its own bars.
+    Counting its rows here too would draw a source-location bar beside every
+    named one — visible on the first run of examples/tracking.py."""
+    store.append(
+        [
+            make_row(pathname="a.py", lineno=1, func_name="f"),
+            _task_row(make_row, 1, "start", pathname="a.py", lineno=1, func_name="f"),
+        ]
+    )
+    assert store.count_by_source_since(0).counts == {SourceKey("a.py", 1, "f"): 1}
+
+
+def test_the_source_delta_watermark_advances_past_task_rows(store, make_row):
+    """Excluding them by grouping rather than by WHERE: filtering them out of
+    the range would leave the watermark behind a tail of task rows, and every
+    later poll would rescan a range that only grows."""
+    store.append([make_row()])
+    first = store.count_by_source_since(0)
+    store.append([_task_row(make_row, 1, "update") for _ in range(3)])
+    second = store.count_by_source_since(first.last_id)
+    assert second.counts == {}
+    assert second.last_id > first.last_id, "the watermark stalled behind task rows"
+
+
+def test_the_source_delta_reports_which_workers_ran_each_line(store, make_row):
+    """Structural analysis needs this to tell one loop nested inside another
+    from two unrelated loops on two threads."""
+    store.append(
+        [
+            make_row(lineno=1, thread=7),
+            make_row(lineno=1, thread=9),
+            make_row(lineno=1, thread=7),
+            make_row(lineno=2, thread=7),
+        ]
+    )
+    workers = store.count_by_source_since(0).workers
+    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 1, "bar")]} == {7, 9}
+    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 2, "bar")]} == {7}
+
+
+def test_a_worker_is_process_thread_and_asyncio_task(store, make_row):
+    """Thread ids repeat across processes, and one event loop runs many tasks
+    on one thread, so no single column identifies a worker."""
+    store.append(
+        [
+            make_row(process=1, thread=1, asyncio_task_id=None),
+            make_row(process=2, thread=1, asyncio_task_id=None),
+            make_row(process=1, thread=1, asyncio_task_id=5),
+        ]
+    )
+    workers = store.count_by_source_since(0).workers[
+        SourceKey("/tmp/foo.py", 10, "bar")
+    ]
+    assert workers == frozenset(
+        {WorkerKey(1, 1, None), WorkerKey(2, 1, None), WorkerKey(1, 1, 5)}
+    )
+
+
+def test_the_source_delta_still_folds_per_worker_rows_back_together(store, make_row):
+    """Grouping by worker splits each source into several rows; the counts and
+    the span a caller reads must still describe the source as a whole."""
+    store.append(
+        [
+            make_row(thread=1, created=100.0),
+            make_row(thread=2, created=101.0),
+            make_row(thread=1, created=102.0),
+        ]
+    )
+    delta = store.count_by_source_since(0)
+    key = SourceKey("/tmp/foo.py", 10, "bar")
+    assert delta.counts[key] == 3
+    assert (delta.first_at[key], delta.last_at[key]) == (100.0, 102.0)

@@ -8,11 +8,12 @@ This is the other rung: the same pipeline, instrumented with `task()` and
 `track()`, so the run *records* named tasks with exact counts and a real
 hierarchy instead of counts inferred from how often a line repeated.
 
-Note what the live bars still show, though: source locations and record
-counts, exactly as in `demo.py`. Rendering those exact counts as named,
-determinate bars is Phase 4's job — this phase establishes the data they
-will be drawn from, which is why the summary below reads it out of the
-store rather than pointing at the display.
+Those named tasks are what the top bars are drawn from: a real percentage
+where a total was given, a pulse where it was not, indented by task depth,
+and finished on the closing record. The inferred source-location bars are
+still there underneath — instrumenting some of a program never turns the
+rest of it off. The summary below reads the same numbers back out of the
+store, which is where the display got them.
 
 Nothing here requires `init()`. Comment it out and the program still runs,
 still correct, and silent — which is the point: a *library* can be written
@@ -78,7 +79,7 @@ def load(parent: lumberjack.TaskHandle, count: int) -> None:
 
 
 def main() -> None:
-    lumberjack.init(level=logging.DEBUG)
+    lumberjack.init()
 
     with lumberjack.task("etl run") as run:
         workers = [
@@ -100,6 +101,9 @@ def main() -> None:
     records = store.recent()
     events = [r for r in records if r.task_event]
 
+    # Display down before the summary goes out — see the note in demo.py.
+    lumberjack.shutdown()
+
     print("\n--- what the instrumentation added ---")
     print(f"records captured  : {len(records)}")
     print(f"of those, task events: {len(events)}")
@@ -116,8 +120,6 @@ def main() -> None:
         "\nnot how many times a log line happened to repeat. Ticks are sampled"
         "\nfor the display, but the end row carries the true final count."
     )
-
-    lumberjack.shutdown()
 
 
 if __name__ == "__main__":

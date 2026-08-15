@@ -43,7 +43,7 @@ __all__ = [
 
 def init(
     *,
-    level: int = logging.INFO,
+    level: int = logging.DEBUG,
     output_mode: OutputMode | str | None = None,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     store: RecordStore | None = None,
@@ -52,6 +52,14 @@ def init(
     flush_interval: float = DEFAULT_FLUSH_INTERVAL,
 ) -> LumberjackHandler:
     """Install lumberjack on the root logger.
+
+    `level` sets both the root logger's level and the handler's, and defaults
+    to DEBUG rather than stdlib's usual WARNING or a tidier INFO. That is the
+    whole point: `logger.debug(...)` calls inside loops are what lumberjack
+    turns into progress, and any higher default has stdlib discard them before
+    lumberjack ever sees them — a zero-config first run that shows nothing.
+    The volume is handled where it should be, by the display collapsing it and
+    the store absorbing it. Pass `level=logging.INFO` for a quieter capture.
 
     Replaces the root logger's existing handlers by default; pass
     `replace_handlers=False` to layer alongside them instead. Raises
@@ -83,6 +91,24 @@ def init(
             on_record=renderer.render,
             level=level,
         )
+        root = logging.getLogger()
+        session = Session(
+            handler=handler,
+            store=resolved_store,
+            renderer=renderer,
+            output_mode=mode,
+            owns_store=owns_store,
+            dump_last_n=dump_last_n,
+            prev_handlers=root.handlers[:] if replace_handlers else [],
+            prev_level=root.level,
+        )
+        # Inside the guard rather than after it: `install()` raises when
+        # teardown is already installed, so it is one more thing that can fail
+        # while a store this call created is still open. From 3.13 an unclosed
+        # sqlite connection also emits a ResourceWarning at collection, which
+        # this suite turns into an error in whichever unrelated test happens
+        # to trigger it.
+        teardown.install(session)
     except BaseException:
         if owns_store:
             resolved_store.close()
@@ -91,19 +117,6 @@ def init(
     # Everything that can fail is done; the root logger is only touched once
     # the install is guaranteed to complete, so there is no half-swapped state
     # to unwind here.
-    root = logging.getLogger()
-    session = Session(
-        handler=handler,
-        store=resolved_store,
-        renderer=renderer,
-        output_mode=mode,
-        owns_store=owns_store,
-        dump_last_n=dump_last_n,
-        prev_handlers=root.handlers[:] if replace_handlers else [],
-        prev_level=root.level,
-    )
-    teardown.install(session)
-
     for existing in session.prev_handlers:
         root.removeHandler(existing)
     root.addHandler(handler)

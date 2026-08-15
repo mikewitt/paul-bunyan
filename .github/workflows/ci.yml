@@ -33,11 +33,11 @@ jobs:
     # already applies with fail-fast: false.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - run: uv sync --all-extras
       # ruff lints, black formats — one tool per job, per the toolchain in
       # CLAUDE.md. `ruff format` is deliberately not run: it would be a second
@@ -48,11 +48,11 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - run: uv sync --all-extras
       # Strict for the shipped package: it ships py.typed, so downstream users
       # type-check against these annotations and a wrong one is our bug.
@@ -71,11 +71,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - run: uv sync --all-extras
       - run: uv run pytest
 
@@ -92,11 +92,11 @@ jobs:
     name: bare install (no rich)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       # No --all-extras: dev tooling, but none of the optional dependencies.
       - run: uv sync
       - name: Assert the optional dependencies really are absent
@@ -125,11 +125,11 @@ jobs:
     # packages list or a missing py.typed passes every other job here.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       # Fails if uv.lock has drifted from pyproject.toml, which would mean
       # every other job resolved something the lockfile does not describe.
       - run: uv lock --check
@@ -170,25 +170,54 @@ jobs:
           EOF
 
   coverage-badge:
-    # Trunk pushes only. A PR must never push commits back, and a single
-    # writer keeps concurrent runs from racing on the same file.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
+    # Now does two things — uploads to Codacy on every event, and commits the
+    # badge on trunk pushes — so the name undersells it. Kept anyway: `name:`
+    # is the check name GitHub reports, and renaming orphans it if trunk's
+    # branch protection lists it. Same reasoning as the bare job above.
+    #
+    # One suite run feeding both consumers. Splitting them into two jobs
+    # would run the whole suite twice for the same numbers.
+    #
+    # Coverage comes from this single ubuntu/3.12 run, not from all six
+    # `test` legs. The union across legs would be a shade higher — the
+    # bare-install skipif, and Windows path branches — but collecting it
+    # means six `--partial` uploads plus a `final` call, which is a lot of
+    # workflow for a fraction of a percent.
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - run: uv sync --all-extras
       - run: uv run pytest --cov-report=xml
+
+      - name: Upload coverage to Codacy
+        # Skipped rather than failed when the secret is absent, which is the
+        # case for pull requests from forks (GitHub withholds secrets there)
+        # and for anyone who has cloned this without a Codacy project. A
+        # coverage upload is not worth a red X on someone else's PR.
+        env:
+          CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+        if: env.CODACY_PROJECT_TOKEN != ''
+        uses: codacy/codacy-coverage-reporter-action@89d6c85cfafaec52c72b6c5e8b2878d33104c699  # v1.3.0
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          # Cobertura, which is what coverage.py's `xml` writer emits and
+          # what Codacy auto-detects.
+          coverage-reports: coverage.xml
+
       # Installed ephemerally rather than as a dev dependency: genbadge pulls
       # in Pillow, which local development has no reason to carry.
       - run: uv run --with "genbadge[coverage]" genbadge coverage -i coverage.xml -o coverage.svg
       - name: Commit badge if coverage changed
+        # Trunk pushes only. A PR must never push commits back, and a single
+        # writer keeps concurrent runs from racing on the same file.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/daddy'
         run: |
           if git diff --quiet -- coverage.svg; then
             echo "Coverage unchanged; nothing to commit."

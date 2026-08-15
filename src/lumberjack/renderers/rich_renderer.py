@@ -7,8 +7,12 @@ does so guarded by try/except so importing `lumberjack.renderers` (and thus
 Two renderers live here:
 
 * `RichTerminalRenderer` — one styled line per record, still write-through.
-* `RichProgressRenderer` — the Phase 1 live bar: repeating source locations
-  become bars that advance instead of a thousand scrolling lines.
+  Only reachable by constructing it directly: `create_renderer()` returns it
+  when there is no store to read, and `init()` always has one. It is kept for
+  that direct use and for tests.
+* `RichProgressRenderer` — the live display, and the centrepiece: named bars
+  from the tracking API above inferred ones from repeating source locations,
+  in place of a thousand scrolling lines.
 """
 
 from __future__ import annotations
@@ -18,11 +22,13 @@ import sys
 from typing import TYPE_CHECKING, TextIO
 
 try:
-    from rich.console import Console
+    from rich.console import Console, Group
+    from rich.live import Live
     from rich.progress import (
         BarColumn,
         Progress,
         TaskID,
+        TaskProgressColumn,
         TextColumn,
         TimeElapsedColumn,
     )
@@ -31,6 +37,8 @@ try:
     _RICH_IMPORT_ERROR: Exception | None = None
 except ImportError as exc:  # pragma: no cover - exercised only without rich installed
     Console = None  # type: ignore[assignment,misc]
+    Group = None  # type: ignore[assignment,misc]
+    Live = None  # type: ignore[assignment,misc]
     Progress = None  # type: ignore[assignment,misc]
     Text = None  # type: ignore[assignment,misc]
     _RICH_IMPORT_ERROR = exc
@@ -41,6 +49,7 @@ from lumberjack.renderers.progress import (
     DEFAULT_REFRESH_INTERVAL,
     BarState,
     RepeatingSourceModel,
+    TaskProgressModel,
     resolve_max_bars,
 )
 from lumberjack.schema import LogRecordRow, SourceKey
@@ -55,6 +64,70 @@ _LEVEL_STYLES = {
     "ERROR": "bold red",
     "CRITICAL": "bold white on red",
 }
+
+
+def _format_rate(bar: BarState) -> str:
+    """How fast a source is repeating, or what stopped it.
+
+    Rate rather than period because "12/s" is what a reader wants from a
+    loop, and sub-1/s loops are the ones where the period is the readable
+    form instead. Blank until two records have been seen: one record
+    establishes no interval, and a made-up number is worse than none.
+
+    "idle" rather than "done", because idleness is what was measured — no log
+    line announces the end of a loop, so a silence long enough to retire the
+    bar is the whole of the evidence.
+    """
+    if bar.idle:
+        return "idle"
+    if bar.rate is None:
+        return ""
+    if bar.rate >= 1:
+        return f"{bar.rate:,.0f}/s"
+    return f"{1 / bar.rate:,.1f}s each"
+
+
+def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
+    """Set a rich task's total, including *back* to None.
+
+    `Progress.update(total=None)` does not withdraw a total — rich documents
+    it as "updates task.total if not None", so None reads as "not supplied"
+    and the old total survives. `Progress.reset()` says the same thing in the
+    same words. There is no public way to make a determinate task
+    indeterminate again, so this reaches for `_tasks` under the progress's own
+    lock, which is exactly what `reset()` does.
+
+    Without it every path back to a pulse is silently a no-op, and rich clamps
+    the stale `completed > total` to a full bar — a bar reading "finished"
+    while the work runs on, which is the one thing the pulse rule exists to
+    prevent.
+
+    `finished_time` is cleared with it. rich latches that the moment
+    `completed >= total` and `Task.elapsed` returns it forever after, so a bar
+    that touched 100% before the claim was withdrawn would keep a frozen
+    clock. Only on an actual change, so a legitimately finished bar keeps its
+    stopped timer.
+    """
+    with progress._lock:  # noqa: SLF001 - no public withdrawal exists; see above
+        task = progress._tasks[task_id]  # noqa: SLF001
+        if task.total == total:
+            return
+        task.total = total
+        task.finished_time = None
+
+
+def _format_source_detail(bar: BarState) -> str:
+    """The count column: cumulative always, cycle position when inferred.
+
+    Both numbers earn their place. The cumulative count is the one thing here
+    that is certainly true, and it is what the exit dump will corroborate;
+    the cycle position is the inferred part and is what the bar's fill is
+    showing, so a reader can see the guess beside the fact.
+    """
+    records = f"{bar.count:,} records"
+    if not bar.is_determinate:
+        return records
+    return f"{bar.cycle_current}/{bar.total} · {records}"
 
 
 def _format_record(row: LogRecordRow) -> Text:
@@ -88,12 +161,30 @@ class RichTerminalRenderer:
 
 
 class RichProgressRenderer:
-    """Live progress bars, one per repeating source location.
+    """Live progress bars: named exact ones on top, inferred ones below.
 
-    The Phase 1 proof: a `logger.info(...)` inside a loop stops scrolling and
-    becomes a bar that advances. Counts come from the store (see
-    `RepeatingSourceModel`), never from this renderer's own callback, so a bar
-    and a plain log file describe the same run without divergent logic.
+    Two kinds, from two models, in one display:
+
+    * **Named bars** (`TaskProgressModel`) come from `task()` and `track()`.
+      Every number was stated outright by the instrumented code, so these are
+      determinate whenever a total was given and finish on an `end` row.
+    * **Source bars** (`RepeatingSourceModel`) are the inferred ones: a
+      `logger.debug(...)` inside a loop stops scrolling and becomes a bar that
+      advances. Nothing declared them, so they are pulsing counters until the
+      model works out what encloses them, determinate once it has, and
+      retired when the loop goes quiet.
+
+    Both read the store rather than this renderer's own callback, so a bar and
+    a plain log file describe the same run without divergent logic.
+
+    **One `Live`, two unstarted `Progress` objects.** `Progress.start()` would
+    start a `Live` of its own, and rich permits one per console: the second
+    becomes nested, at which point its `refresh()` re-renders the *root's*
+    renderable and its own bars never draw. Separate consoles are worse — two
+    Lives writing cursor control to one stderr corrupt the frame. So this owns
+    the `Live` and renders a `Group`, which is also what lets the exact bars
+    sit above the inferred ones: the overflow ellipsis crops from the bottom,
+    and instrumented bars must not lose their slots to guessed ones.
 
     Lossy by construction — routine records are collapsed into a count, so
     `write_through` is False and teardown replays the store's tail at exit.
@@ -116,29 +207,66 @@ class RichProgressRenderer:
         if Progress is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR
         self._model = RepeatingSourceModel(store, min_repeats=min_repeats)
+        self._task_model = TaskProgressModel(store)
         self.passthrough_level = passthrough_level
         # None here means "consult the environment", not "no ceiling" — see
         # resolve_max_bars(). The model still tracks every source either way;
         # this only bounds what gets drawn.
         self._max_bars = resolve_max_bars(max_bars)
         self._suppressed_bars = 0
-        self._progress = Progress(
-            # markup=False: the label is a file path, and a stray "[" in one
-            # must not be parsed as a rich tag.
+        self._console = Console(file=stream if stream is not None else sys.stderr)
+        # markup=False throughout: labels carry file paths and user-supplied
+        # task names, and a stray "[" in either must not parse as a rich tag.
+        self._task_progress = Progress(
             TextColumn(
                 "{task.description}", style="progress.description", markup=False
             ),
             BarColumn(),
-            TextColumn("{task.completed} records"),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[count]}", markup=False),
             TimeElapsedColumn(),
-            console=Console(file=stream if stream is not None else sys.stderr),
+        )
+        self._source_progress = Progress(
+            TextColumn(
+                "{task.description}", style="progress.description", markup=False
+            ),
+            BarColumn(),
+            # `completed` drives the bar's fill, which is the *cycle* position
+            # once one is inferred, so the counts a reader wants are a field
+            # rather than the bar's own numbers.
+            TextColumn("{task.fields[detail]}", markup=False),
+            TextColumn("{task.fields[rate]}", style="progress.remaining"),
+            TimeElapsedColumn(),
+        )
+        # Exact bars first: the ellipsis crops from the bottom, so inferred
+        # bars are the ones that should lose their slots.
+        self._live = Live(
+            Group(self._task_progress, self._source_progress),
+            console=self._console,
             # Redraws come from our own timer below, so rich never spins up a
             # second refresh thread racing it.
             auto_refresh=False,
+            # An over-tall frame shows the first N rows plus an ellipsis with
+            # correct cursor arithmetic, rather than scrolling the terminal.
+            vertical_overflow="ellipsis",
+            # rich redirects **both** streams by default, and redirecting
+            # stdout is wrong here. `Live.start()` swaps `sys.stdout` for a
+            # proxy bound to this console — which writes to *stderr* — so a
+            # program doing `app.py > data.txt` would find its `print()` output
+            # on the terminal and its file empty, for as long as a bar was on
+            # screen. lumberjack owns stderr and must not touch the channel a
+            # program uses for its results.
+            redirect_stdout=False,
+            # stderr is a different question and the default is right: a raw
+            # `sys.stderr.write` lands in the middle of a live frame and
+            # corrupts it, while routed through the console it prints cleanly
+            # above the bars — the same treatment a WARNING record gets.
+            redirect_stderr=True,
         )
         self._tasks: dict[SourceKey, TaskID] = {}
+        self._task_bars: dict[int, TaskID] = {}
         self._closed = False
-        self._progress.start()
+        self._live.start()
         # A timer, not a record counter: log volume must not drive redraws.
         # interval 0 means "no timer" — callers drive `refresh()` themselves.
         self._pump = (
@@ -162,9 +290,9 @@ class RichProgressRenderer:
         """
         if self._closed or row.level_no < self.passthrough_level:
             return
-        self._progress.console.print(_format_record(row))
+        self._console.print(_format_record(row))
         if row.exc_text:
-            self._progress.console.print(row.exc_text, style="red")
+            self._console.print(row.exc_text, style="red")
 
     @property
     def suppressed_bars(self) -> int:
@@ -178,6 +306,7 @@ class RichProgressRenderer:
         """Re-read the store and redraw. Timer-driven, never per record."""
         if self._closed:
             return
+        self._refresh_task_bars()
         bars = self._model.poll()
         if self._max_bars is not None and len(bars) > self._max_bars:
             self._suppressed_bars = len(bars) - self._max_bars
@@ -186,14 +315,121 @@ class RichProgressRenderer:
             # registering the ones we will never draw costs a redraw each.
             bars = bars[: self._max_bars]
         for bar in bars:
-            task_id = self._tasks.get(bar.source)
-            if task_id is None:
-                # total=None → an indeterminate bar: this proof knows how many
-                # records have arrived, never how many are still coming.
-                task_id = self._progress.add_task(bar.label, total=None)
-                self._tasks[bar.source] = task_id
-            self._progress.update(task_id, completed=bar.count)
-        self._progress.refresh()
+            self._draw_source_bar(bar)
+        self._live.refresh()
+
+    def _draw_source_bar(self, bar: BarState) -> None:
+        """One inferred bar: pulsing, determinate, or retired.
+
+        Three states, and which one applies is entirely the model's call:
+
+        * **Pulsing** (`total=None`) while nothing bounds the loop. That is
+          the permanent state of an outermost loop — nothing encloses it, so
+          nothing says how long it is — and the starting state of every other
+          one until containment analysis has held an answer for two polls.
+        * **Determinate** once an enclosing loop gives the cycle a length.
+          The fill shows position *within the current cycle*, so a nested bar
+          fills, resets and fills again, while the count column keeps the
+          cumulative total.
+        * **Retired**, when the source has been quiet for long enough that
+          the loop is presumed over. The bar is filled to mark it finished:
+          idleness is the only completion signal this data has, so acting on
+          it is the claim being made, and the rate column says "idle" rather
+          than a stale rate so the claim is legible rather than implied.
+        """
+        label = f"{'  ' * bar.depth}{bar.label}"
+        if bar.idle:
+            total: int | None = bar.count
+            completed = bar.count
+        elif bar.is_determinate:
+            total, completed = bar.total, bar.cycle_current
+        else:
+            total, completed = None, bar.count
+        task_id = self._tasks.get(bar.source)
+        if task_id is None:
+            task_id = self._source_progress.add_task(
+                label, total=total, fields={"rate": "", "detail": ""}
+            )
+            self._tasks[bar.source] = task_id
+        # Via `_set_total` rather than `update(total=...)`, which cannot
+        # withdraw a total. Both directions matter here: a promoted bar that
+        # overruns has to go back to pulsing, and a retired bar that resumes
+        # has to shed the total that filling it in implied.
+        _set_total(self._source_progress, task_id, total)
+        self._source_progress.update(
+            task_id,
+            description=label,
+            completed=completed,
+            rate=_format_rate(bar),
+            detail=_format_source_detail(bar),
+        )
+
+    def _refresh_task_bars(self) -> None:
+        """Draw what `task()` and `track()` reported. No inference.
+
+        `total=None` gives rich an indeterminate, pulsing bar, which is the
+        honest rendering of a task that never said how much work there was.
+        A task that did say gets a real percentage.
+
+        A task that *overshoots* its total goes back to pulsing — the
+        withdrawal rule, and `_set_total()` is what makes it reach the screen.
+        The count column keeps showing the real numbers, so the overshoot is
+        visible rather than merely implied.
+
+        A task that *ends* is filled, whatever it claimed on the way. Its
+        `end` row is an exact completion signal — the one kind of bar here
+        that has one — so leaving an indeterminate task pulsing after it
+        would say "still working" about work that is provably over, and would
+        leave the elapsed clock running with it.
+        """
+        for bar in self._task_model.poll():
+            label = f"{'  ' * bar.depth}{bar.label}"
+            if bar.total is not None:
+                count = f"{bar.current}/{bar.total}"
+            elif bar.current:
+                count = str(bar.current)
+            else:
+                # A task that never reported progress — usually a container
+                # for subtasks. A bare "0" beside a pulsing bar reads as
+                # "stuck at zero" rather than "no count was claimed".
+                count = ""
+            completed: int = bar.current
+            drawn_total: int | None
+            if bar.done and bar.total is None:
+                # Nothing was ever claimed, so completion can only be
+                # expressed as "all of whatever it did". Floored at 1 because
+                # a container task — one that only held subtasks and reported
+                # no count of its own — is 0 of 0, which rich renders as a
+                # full bar labelled 0% and which reads as a failure.
+                drawn_total = max(bar.current, 1)
+                completed = drawn_total
+            elif bar.total is not None and bar.current > bar.total:
+                drawn_total = None
+            else:
+                # A task that ended *short* of a total it claimed keeps both
+                # numbers: stopping at 5/10 is a fact, and filling the bar
+                # would overwrite it with a claim of 10.
+                drawn_total = bar.total
+            rich_id = self._task_bars.get(bar.task_id)
+            if rich_id is None:
+                rich_id = self._task_progress.add_task(
+                    label, total=drawn_total, fields={"count": count}
+                )
+                self._task_bars[bar.task_id] = rich_id
+            # See `_set_total`: `update(total=None)` would leave a stale total
+            # in place, so every withdrawal has to go through it.
+            _set_total(self._task_progress, rich_id, drawn_total)
+            self._task_progress.update(
+                rich_id,
+                description=label,
+                completed=completed,
+                count=count,
+            )
+            if bar.done:
+                # Freezes the elapsed column. rich only latches it when
+                # `completed >= total`, which an under-delivering task never
+                # reaches.
+                self._task_progress.stop_task(rich_id)
 
     def bars(self) -> list[BarState]:
         """Every bar the model is tracking, drawn or not.
@@ -224,4 +460,12 @@ class RichProgressRenderer:
             # (or mangle a traceback) — stopping the display matters more.
             pass
         self._closed = True
-        self._progress.stop()
+        # Deliberately not fixed here, despite this being the line that would
+        # do it: `Live.stop()` sets `vertical_overflow = "visible"` itself,
+        # with a comment saying it means to, so re-asserting "ellipsis" is not
+        # the fix — the renderable has to be bounded before stopping, and
+        # *which* bars survive that bound is the open question in #8. Making
+        # it transient would crop by deleting the final counts, which the
+        # "drain before closing" decision exists to preserve.
+        # lumberjack: see issue #28
+        self._live.stop()

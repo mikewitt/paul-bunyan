@@ -1,8 +1,11 @@
-"""The Phase 1 proof: a log line repeating inside a loop becomes a live bar.
+"""The premise on screen: log lines become bars, and the bars tell the truth.
 
 These tests drive the real path — stdlib `logging` → `LumberjackHandler` →
 `RecordStore` → bar — rather than poking the renderer directly, because the
-premise being validated is end-to-end.
+premise being validated is end-to-end. What they cover, in order: a repeating
+line collapsing into one advancing bar, the opt-in ceiling, what a lossy
+display must not swallow, the redraw timer, teardown, named bars from the
+tracking API, and the structure inferred for the rest.
 
 Timing is driven explicitly (`rig.tick()` stands in for the flush pump plus
 the redraw timer) so nothing here sleeps; the one genuinely time-dependent
@@ -14,7 +17,10 @@ from __future__ import annotations
 import dataclasses
 import io
 import logging
+import re
+import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -23,7 +29,11 @@ pytest.importorskip("rich")
 
 import lumberjack  # noqa: E402
 import lumberjack.renderers.rich_renderer as rich_renderer_module  # noqa: E402
-from lumberjack import teardown  # noqa: E402
+import lumberjack.tracking  # noqa: E402
+from lumberjack import (
+    session,  # noqa: E402
+    teardown,  # noqa: E402
+)
 from lumberjack.detect import OutputMode  # noqa: E402
 from lumberjack.handler import LumberjackHandler  # noqa: E402
 from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
@@ -324,7 +334,7 @@ def test_log_volume_never_triggers_a_redraw(rig: _Rig, monkeypatch):
         for i in range(500):
             rig.logger.info("processing item %d", i)
 
-    monkeypatch.setattr(rig.renderer._progress, "refresh", count_redraw)
+    monkeypatch.setattr(rig.renderer._live, "refresh", count_redraw)
     burst()
     assert redraws == 0, "a record must never reach the display on its own"
 
@@ -466,3 +476,436 @@ def test_shutdown_stops_the_live_display(store: RecordStore):
     assert _timer_threads()
     lumberjack.shutdown()
     assert _timer_threads() == []
+
+
+# --- named bars from the tracking API --------------------------------------
+#
+# The tracking API is inert without a session, so these need a published one —
+# and its records reach the handler by way of the *root* logger, which is
+# where `init()` would have put it.
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+
+
+@pytest.fixture
+def task_rig(as_terminal: None, store: RecordStore) -> Iterator[_Rig]:
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    handler = LumberjackHandler(on_record=renderer.render, level=logging.DEBUG)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    logger = logging.getLogger("progress-task-rig")
+    logger.setLevel(logging.DEBUG)
+    session.set_current_session(
+        Session(
+            handler=handler,
+            store=store,
+            renderer=renderer,
+            output_mode=OutputMode.RICH,
+            owns_store=False,
+            dump_last_n=0,
+            prev_handlers=[],
+            prev_level=root.level,
+        )
+    )
+    try:
+        yield _Rig(logger, handler, store, renderer, stream)
+    finally:
+        session.set_current_session(None)
+        root.removeHandler(handler)
+        renderer.close()
+
+
+def test_a_task_draws_a_named_determinate_bar(task_rig):
+    """Rung 2 on screen: the label the code chose, and a real percentage,
+    because `task()` said how much work there was."""
+    with lumberjack.task("reindex", total=100) as t:
+        t.set_progress(40)
+    task_rig.tick()
+    out = _strip_ansi(task_rig.output())
+    assert "reindex" in out
+    assert "40/100" in out
+    assert "40%" in out
+
+
+def test_a_task_without_a_total_pulses_instead_of_claiming_one(task_rig):
+    """`total=None` is rich's indeterminate bar. Inventing a denominator
+    would be the one thing a bar must never do.
+
+    Drawn *while the task is open*: once it ends, filling the bar is correct
+    and is what the test below pins.
+    """
+    with lumberjack.task("scan") as t:
+        t.advance()
+        task_rig.tick()
+        out = _strip_ansi(task_rig.output())
+    assert "scan" in out
+    assert "%" not in out, "an indeterminate task must not show a percentage"
+
+
+def test_a_task_that_ends_without_a_total_still_finishes(task_rig):
+    """An `end` row is an exact completion signal — the only kind of bar here
+    that has one. Leaving it pulsing would say "still working" about work that
+    is provably over."""
+    with lumberjack.task("scan") as t:
+        t.advance()
+    task_rig.tick()
+    line = _line(_strip_ansi(task_rig.output()), "scan")
+    assert "100%" in line, "an ended task was left pulsing"
+
+
+def test_a_container_task_shows_no_count_at_all(task_rig):
+    """A bare 0 beside a pulsing bar reads as "stuck at zero" rather than
+    "no count was claimed"."""
+    handle = lumberjack.task("etl run")
+    try:
+        task_rig.tick()
+        line = next(
+            ln for ln in _strip_ansi(task_rig.output()).splitlines() if "etl run" in ln
+        )
+        # Everything but the elapsed clock, which is always digits.
+        assert not re.search(r"\d", re.sub(r"\d+:\d\d:\d\d", "", line))
+    finally:
+        handle.end()
+
+
+def test_subtasks_are_indented_under_their_parent(task_rig):
+    with lumberjack.task("outer") as outer:
+        with outer.subtask("inner"):
+            task_rig.tick()
+    out = _strip_ansi(task_rig.output())
+    outer_line = next(ln for ln in out.splitlines() if "outer" in ln)
+    inner_line = next(ln for ln in out.splitlines() if "inner" in ln)
+    assert len(inner_line) - len(inner_line.lstrip()) > len(outer_line) - len(
+        outer_line.lstrip()
+    )
+
+
+def test_a_task_draws_no_duplicate_source_bar(task_rig):
+    """Task events are ordinary records located at the `task()` call line, so
+    without the store-side filter every named bar would get a pulsing
+    source-location bar drawn beside it."""
+    with lumberjack.task("reindex", total=10) as t:
+        for _ in range(5):
+            t.advance()
+    task_rig.tick()
+    assert "reindex" in _strip_ansi(task_rig.output())
+    # The source model is the observable contract here: a substring check on
+    # the frame is defeated by column truncation at narrow widths.
+    assert task_rig.renderer.bars() == [], "the task's own call site got a bar"
+
+
+def test_named_bars_are_drawn_above_source_bars(task_rig):
+    """The overflow ellipsis crops from the bottom, so exact bars must not
+    lose their slots to inferred ones."""
+    # A label that cannot occur in this test's own source-bar text, which is
+    # labelled with the enclosing function's name.
+    with lumberjack.task("zzexact", total=10) as t:
+        t.set_progress(5)
+        for i in range(5):
+            task_rig.logger.info("loop line %d", i)
+    task_rig.tick()
+    # One clean frame: the stream accumulates every redraw, and an early frame
+    # drawn before the source bar qualified would satisfy any ordering.
+    task_rig.stream.seek(0)
+    task_rig.stream.truncate(0)
+    task_rig.tick()
+    frame = _strip_ansi(task_rig.output())
+    assert "zzexact" in frame and "records" in frame
+    assert frame.index("zzexact") < frame.index("records"), "source bars drew first"
+
+
+def test_a_task_that_overshoots_its_total_goes_back_to_pulsing(task_rig):
+    """rich clamps `completed > total` to a full 100% bar, which reads as
+    "finished" while the work is still running. Withdrawing the claim is the
+    honest degradation; the count column still shows the real numbers."""
+    with lumberjack.task("underestimated", total=10) as t:
+        t.set_progress(25)
+        task_rig.tick()
+    frame = _strip_ansi(task_rig.output())
+    line = next(ln for ln in frame.splitlines() if "underestimated" in ln)
+    assert "25/10" in line, "the real numbers must stay visible"
+    assert "100%" not in line, "an overshooting task must not read as finished"
+    assert "%" not in line, "and must not claim a percentage at all"
+
+
+# --- inferred structure on screen ------------------------------------------
+#
+# The model decides all of this; what these pin is that the display says what
+# the model concluded, and says nothing it did not conclude.
+
+
+def _nested_frame(store: RecordStore, make_row, *, polls: int) -> str:
+    """Draw an outer loop on line 4 with an inner loop of eight on line 6."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    # Ending flush against "now", so nothing has been quiet long enough to
+    # retire — retirement is its own test below and would mask this one.
+    at = time.time() - ((polls - 1) * 8.0 + 7.0)
+    try:
+        for _ in range(polls):
+            rows = [make_row(lineno=4, func_name="outer", created=at)]
+            rows += [
+                make_row(lineno=6, func_name="inner", created=at + i) for i in range(8)
+            ]
+            store.append(rows)
+            at += 8.0
+            renderer.refresh()
+        return _strip_ansi(stream.getvalue())
+    finally:
+        renderer.close()
+
+
+def _line(frame: str, needle: str) -> str:
+    """The needle's line as the *last* frame drew it.
+
+    A live display rewrites in place, so the captured stream holds every frame
+    since the first, separated by carriage returns as well as newlines. The
+    interesting one is always the most recent.
+    """
+    return next(ln for ln in reversed(re.split(r"[\r\n]", frame)) if needle in ln)
+
+
+def test_an_inferred_inner_loop_is_indented_under_its_parent(
+    as_terminal, store: RecordStore, make_row
+):
+    frame = _nested_frame(store, make_row, polls=5)
+    outer, inner = _line(frame, "foo.py:4"), _line(frame, "foo.py:6")
+    assert inner.index("foo.py:6") > outer.index("foo.py:4"), "the inner bar sits flush"
+
+
+def test_an_inferred_inner_loop_shows_its_position_in_the_cycle(
+    as_terminal, store: RecordStore, make_row
+):
+    """The cycle position is the inferred half and the cumulative count is the
+    certain one, so both are shown — a reader can see the guess beside the
+    fact it was made from."""
+    frame = _nested_frame(store, make_row, polls=5)
+    assert "/8 · " in _line(frame, "foo.py:6")
+
+
+def test_an_outermost_loop_never_claims_a_cycle(
+    as_terminal, store: RecordStore, make_row
+):
+    """Nothing encloses it, so nothing says how long it is. Pulsing forever is
+    the correct rendering rather than a missing feature."""
+    frame = _nested_frame(store, make_row, polls=5)
+    line = _line(frame, "foo.py:4")
+    assert "·" not in line and "records" in line
+
+
+def test_nothing_is_claimed_before_the_inference_settles(
+    as_terminal, store: RecordStore, make_row
+):
+    frame = _nested_frame(store, make_row, polls=1)
+    assert "·" not in frame, "a total was drawn on first sight"
+
+
+def test_a_loop_that_went_quiet_says_so(as_terminal, store: RecordStore, make_row):
+    """ "idle" rather than "done", because idleness is what was measured — no
+    log line announces the end of a loop."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(created=100.0 + i) for i in range(5)])
+        renderer.refresh()
+        assert "idle" in _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+    finally:
+        renderer.close()
+
+
+def test_a_loop_still_running_shows_its_rate_instead(
+    as_terminal, store: RecordStore, make_row
+):
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    now = time.time()
+    try:
+        store.append([make_row(created=now - 0.4 + i * 0.1) for i in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "10/s" in line and "idle" not in line
+    finally:
+        renderer.close()
+
+
+def test_an_untimed_loop_shows_no_rate_at_all(
+    as_terminal, store: RecordStore, make_row
+):
+    """Every record inside one clock tick, so there is no interval to report.
+    Blank rather than "0/s" or "∞/s": a made-up number is worse than none."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(created=100.0) for _ in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "/s" not in line and "idle" not in line
+        assert "5 records" in line
+    finally:
+        renderer.close()
+
+
+def test_the_live_display_leaves_stdout_alone(
+    as_terminal, store: RecordStore, make_row
+):
+    """rich redirects both streams by default, and `Live.start()` would swap
+    `sys.stdout` for a proxy writing to *this renderer's* stderr console. A
+    program run as `app.py > data.txt` would then print its results to the
+    terminal and write an empty file. lumberjack owns stderr; the channel a
+    program uses for its output is not ours to move.
+
+    Needs a terminal: rich only redirects either stream when the console is
+    one, so without `as_terminal` this passes whatever the setting is.
+    """
+    real_stdout = sys.stdout
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row() for _ in range(5)])
+        renderer.refresh()
+        assert sys.stdout is real_stdout
+    finally:
+        renderer.close()
+    assert sys.stdout is real_stdout
+
+
+def test_the_live_display_does_route_stderr(as_terminal, store: RecordStore):
+    """The other half of the decision, deliberately left as rich's default: a
+    raw `sys.stderr.write` mid-frame corrupts it, and routing it through the
+    console prints it cleanly above the bars instead."""
+    real_stderr = sys.stderr
+    renderer = RichProgressRenderer(
+        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+    )
+    try:
+        assert sys.stderr is not real_stderr, "stderr was left unrouted"
+    finally:
+        renderer.close()
+    assert sys.stderr is real_stderr, "stderr was not handed back"
+
+
+def test_a_task_drawn_determinate_then_overshooting_withdraws_its_claim(
+    task_rig, monkeypatch
+):
+    """The overshoot case that matters, and the one an earlier test missed.
+    A bar created *already* overshot is indeterminate from birth, which
+    `add_task(total=None)` gives for free. A bar drawn determinate first has
+    to have the total taken back off it — and `Progress.update(total=None)`
+    means "leave the total alone", so that path was silently a no-op and rich
+    clamped the stale total to a finished-looking 100%.
+
+    Ticks are sampled at one per 50ms, and this needs two updates in the same
+    breath, so sampling is switched off rather than slept through.
+    """
+    monkeypatch.setattr(lumberjack.tracking, "TICK_INTERVAL", 0.0)
+    with lumberjack.task("underestimated", total=10) as t:
+        t.set_progress(5)
+        task_rig.tick()
+        assert "50%" in _line(_strip_ansi(task_rig.output()), "underestimated")
+        t.set_progress(25)
+        task_rig.tick()
+        line = _line(_strip_ansi(task_rig.output()), "underestimated")
+    assert "25/10" in line, "the real numbers must stay visible"
+    assert "%" not in line, "the withdrawn claim came back as a full bar"
+
+
+def test_a_retired_source_bar_that_resumes_stops_claiming_completion(
+    as_terminal, store: RecordStore, make_row
+):
+    """Filling an idle bar implies it finished. If the loop turns out to be
+    alive after all, that total has to come back off — the same withdrawal
+    the overshoot case needs, from the other direction."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(created=100.0 + i) for i in range(5)])
+        renderer.refresh()
+        assert "idle" in _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+
+        now = time.time()
+        store.append([make_row(created=now - 0.4 + i * 0.1) for i in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "idle" not in line
+        assert "%" not in line, "a resumed bar kept the total that retiring gave it"
+    finally:
+        renderer.close()
+
+
+# `TimeElapsedColumn` reads `Task.finished_time` and `Task.stop_time`, and at
+# test timescales every frame renders `0:00:00` whatever they hold — so these
+# two assert the fields rather than the text. They are attributes of rich's
+# public `Task`, not lumberjack internals; what is reached through privately is
+# only the renderer's handle on its own `Progress`.
+
+
+def _task_bar(renderer: RichProgressRenderer):
+    (task,) = renderer._task_progress.tasks
+    return task
+
+
+def test_an_ended_task_stops_its_clock(task_rig):
+    """A bar that ended keeps counting elapsed time unless the task is
+    stopped: rich only latches the clock when `completed >= total`, which an
+    under-delivering or indeterminate task never reaches."""
+    with lumberjack.task("scan") as t:
+        t.advance()
+        task_rig.tick()
+        assert _task_bar(task_rig.renderer).stop_time is None
+    task_rig.tick()
+    assert _task_bar(task_rig.renderer).stop_time is not None, "the clock ran on"
+
+
+def test_a_withdrawn_claim_unfreezes_the_clock(task_rig, monkeypatch):
+    """rich latches `finished_time` the moment `completed >= total`, and
+    `Task.elapsed` returns it forever after. A bar that briefly looked
+    finished before its claim was withdrawn would keep a stopped clock while
+    the work carried on."""
+    monkeypatch.setattr(lumberjack.tracking, "TICK_INTERVAL", 0.0)
+    with lumberjack.task("underestimated", total=10) as t:
+        t.set_progress(10)
+        task_rig.tick()
+        assert _task_bar(task_rig.renderer).finished_time is not None
+        t.set_progress(25)
+        task_rig.tick()
+        assert _task_bar(task_rig.renderer).finished_time is None, "clock stayed frozen"
+
+
+def test_a_container_task_finishes_at_a_hundred_percent(task_rig):
+    """A task that only ever held subtasks has no count of its own, so its
+    total is 0 — and rich renders 0-of-0 as a full bar labelled 0%, which
+    reads as a failure rather than as completion."""
+    with lumberjack.task("etl run"):
+        pass
+    task_rig.tick()
+    line = _line(_strip_ansi(task_rig.output()), "etl run")
+    assert "100%" in line
+    assert " 0%" not in line, "0 of 0 rendered as a full bar labelled 0%"
+
+
+def test_a_task_that_ends_short_of_its_total_keeps_both_numbers(task_rig):
+    """Stopping at 5 of a claimed 10 is a fact about the run. Filling the bar
+    would overwrite it with a claim of 10, which is the opposite of what
+    finishing a bar is supposed to communicate."""
+    with lumberjack.task("gave up early", total=10) as t:
+        t.set_progress(5)
+    task_rig.tick()
+    line = _line(_strip_ansi(task_rig.output()), "gave up early")
+    assert "50%" in line and "5/10" in line
