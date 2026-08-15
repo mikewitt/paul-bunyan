@@ -9,12 +9,12 @@ instead of a thousand scrolling `DEBUG` lines, render progress.
 
 **Status: early, and pre-1.0.** Capture, storage (SQLite), output-mode
 detection, plain/rich rendering, the explicit `track()` / `task()` API with
-outbound OpenTelemetry spans, and named determinate progress bars driven by
-that API are in place. What is *inferred* is still crude: uninstrumented log
-lines are grouped by *source location*, so a log call inside a loop becomes
-one indeterminate bar counting records. Turning that into real progress —
-loop periods, containment, nested bars derived rather than declared — is the
-phase in flight. See `CLAUDE.md` for the plan.
+outbound OpenTelemetry spans, and named determinate bars driven by that API
+are in place. So is the inference on top of uninstrumented logging: log lines
+are grouped by *source location*, timed, and read for structure, so a loop
+inside a loop draws as a nested bar with a real percentage that nobody
+declared. Still to come: a hints config, the inbound OpenTelemetry bridge,
+and multiprocessing-aware capture. See `CLAUDE.md` for the plan.
 
 ## Install
 
@@ -60,21 +60,37 @@ The volume is handled where it belongs: the display collapses it and the
 store absorbs it. Pass `level=logging.INFO` for a quieter capture.
 
 On an interactive terminal with `rich` installed, log lines that repeat from
-the same place stop scrolling and become bars that advance. Three worker
+the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-demo.py:43 extract()   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 700 records 0:00:02
-demo.py:49 transform() ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 450 records 0:00:02
-demo.py:60 load()      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 300 records 0:00:02
+demo.py:49 extract()     ━━━━━━━━━━━━━━━━━━━━━ 700 records         229/s 0:00:02
+  demo.py:83 reconcile() ━━━━━━━━━━━━━━━━━━━╸━ 19/20 · 480 records 191/s 0:00:02
+demo.py:55 transform()   ━━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
+demo.py:66 load()        ━━━━━━━━━━━━━━━━━━━━━ 300 records         96/s  0:00:02
+demo.py:81 reconcile()   ━━━━━━━━━━━━━━━━━━━━━ 24 records          10/s  0:00:02
 ```
 
-One bar per source location — three loops, three bars, no concurrency-specific
-setup. (Grouping is by source location, not by worker: two threads running the
-same loop share a bar today, though thread and process are still recorded on
-every record.) The count climbs but there is no percentage, because nothing
-here knows how many iterations are still coming. [Telling it](#2-tell-it-what-the-work-is)
-is what `track()` and `task()` are for.
+One bar per source location, no concurrency-specific setup. Three of those
+loops are flat, so their bars only count and pace: nothing in the stream says
+how long they are, and claiming otherwise would be a guess. `reconcile` runs a
+loop inside a loop, and *that* is in the stream — line 83 fires twenty times
+between consecutive firings of line 81 — so it draws indented under its
+parent with a real `19/20`, from a total nobody declared. When a loop goes
+quiet for long enough its bar fills and reads `idle`.
+
+Two things this deliberately does not do. It does not group by worker: two
+threads running the same loop share a bar, though thread and process are
+recorded on every record and *are* what stop two unrelated loops being read as
+nested. And it does not move a bar once drawn, which is why the indented child
+above sits above its parent rather than beneath it — see
+[#43](https://github.com/mikewitt/paul-bunyan/issues/43).
+
+Inference is an 80% solution on purpose, and it will be wrong sometimes. When
+it is, the cost is a cosmetic one: a bar that pulses when it could have had a
+percentage, or one that overshoots and goes back to pulsing. The store is
+never wrong. [Telling it outright](#2-tell-it-what-the-work-is) is what
+`track()` and `task()` are for.
 
 Nothing is lost to the collapse:
 
@@ -133,9 +149,11 @@ interpreter shutdown either.
 
 ### 2. Tell it what the work is
 
-Rung 1 infers progress from how often a log line repeats, which can show that
-work is happening but never how much is left. `task()` and `track()` are how
-code says so outright.
+Rung 1 infers what it can from how often a log line repeats, which is a great
+deal for a nested loop and nothing at all for an outermost one — no amount of
+watching a top-level loop reveals how many iterations are left. `task()` and
+`track()` are how code says so outright, and a stated total always beats an
+inferred one.
 
 ```python
 import lumberjack
