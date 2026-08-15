@@ -243,6 +243,13 @@ class RichProgressRenderer:
         `total=None` gives rich an indeterminate, pulsing bar, which is the
         honest rendering of a task that never said how much work there was.
         A task that did say gets a real percentage.
+
+        A task that *overshoots* its total goes back to pulsing. rich clamps
+        `completed > total` to a full 100% bar, which reads as "finished"
+        while the work is still running — the one thing a bar must not say.
+        Pulsing withdraws the claim instead, and the count column keeps
+        showing the real numbers so the overshoot is visible rather than
+        merely implied.
         """
         for bar in self._task_model.poll():
             label = f"{'  ' * bar.depth}{bar.label}"
@@ -255,16 +262,19 @@ class RichProgressRenderer:
                 # for subtasks. A bare "0" beside a pulsing bar reads as
                 # "stuck at zero" rather than "no count was claimed".
                 count = ""
+            drawn_total = (
+                None if bar.total is not None and bar.current > bar.total else bar.total
+            )
             rich_id = self._task_bars.get(bar.task_id)
             if rich_id is None:
                 rich_id = self._task_progress.add_task(
-                    label, total=bar.total, fields={"count": count}
+                    label, total=drawn_total, fields={"count": count}
                 )
                 self._task_bars[bar.task_id] = rich_id
             self._task_progress.update(
                 rich_id,
                 description=label,
-                total=bar.total,
+                total=drawn_total,
                 completed=bar.current,
                 count=count,
             )

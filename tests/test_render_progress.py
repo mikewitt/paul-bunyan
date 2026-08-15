@@ -597,3 +597,17 @@ def test_named_bars_are_drawn_above_source_bars(task_rig):
     frame = _strip_ansi(task_rig.output())
     assert "zzexact" in frame and "records" in frame
     assert frame.index("zzexact") < frame.index("records"), "source bars drew first"
+
+
+def test_a_task_that_overshoots_its_total_goes_back_to_pulsing(task_rig):
+    """rich clamps `completed > total` to a full 100% bar, which reads as
+    "finished" while the work is still running. Withdrawing the claim is the
+    honest degradation; the count column still shows the real numbers."""
+    with lumberjack.task("underestimated", total=10) as t:
+        t.set_progress(25)
+        task_rig.tick()
+    frame = _strip_ansi(task_rig.output())
+    line = next(ln for ln in frame.splitlines() if "underestimated" in ln)
+    assert "25/10" in line, "the real numbers must stay visible"
+    assert "100%" not in line, "an overshooting task must not read as finished"
+    assert "%" not in line, "and must not claim a percentage at all"

@@ -200,6 +200,13 @@ class TaskProgressModel:
 
     def __init__(self, store: RecordStore) -> None:
         self._store = store
+        # Unbounded, exactly as `RepeatingSourceModel._totals` is: a task that
+        # ended keeps its bar, because one that vanished mid-run would read as
+        # "this work stopped existing". A long-running process opening many
+        # short tasks therefore accumulates state. That is the exact-data
+        # analogue of the source-bar problem and belongs with it — retirement
+        # is 4b's, and what a ceiling should count once bars nest is the open
+        # question there. lumberjack: see issue #8
         self._states: dict[int, TaskBarState] = {}
         # Append-only display order, as for source bars: a bar that moves is
         # unreadable. Children land after parents for free, because a parent
