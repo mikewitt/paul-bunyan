@@ -8,7 +8,7 @@ This repository (`lumberjack`, hosted as `mikewitt/paul-bunyan`) has **Phases 0,
 
 What exists and works: capture (`LumberjackHandler`), storage (`SQLiteRecordStore`), output-mode detection, plain/JSON/rich rendering, the Phase 1 live progress bar, the flush pump, `atexit`/excepthook teardown, and the Phase 2 tracking API (`task()`, `track()`, `TaskHandle.subtask()`) with outbound OTel spans. Grouping for the bar is by *source location*, which Phase 4 keeps as the identity axis rather than replacing — what it adds is containment analysis on top (see `RepetitionAnalyzer` below).
 
-Note what Phase 2 did **not** deliver: the tracking API records exact counts and task hierarchy into the store, but the *display* still draws source-location bars labelled "N records". Turning `progress_current`/`progress_total` into named determinate bars is Phase 4, which needs a parallel model and a second `Progress` — `BarState` is `SourceKey`-shaped end to end and the rich column set hardcodes `"{task.completed} records"`.
+Note what Phase 2 did **not** deliver: the tracking API records exact counts and task hierarchy into the store, but the *display* still draws source-location bars labelled "N records". Turning `progress_current`/`progress_total` into named determinate bars is Phase 4a, which needs a parallel model — `BarState` is `SourceKey`-shaped end to end, deliberately has no `total`, and the rich column set hardcodes `"{task.completed} records"`.
 
 What does not exist yet, and must not be described as though it does: `RepetitionAnalyzer`, `HintsConfig`, the inbound `OTelBridge`, OTel metrics, the DuckDB backend, and multiprocessing-aware capture. Sections below describe the intended design for those. Check before assuming any module named here is on disk.
 
@@ -52,6 +52,7 @@ The intended experience is a value ladder:
 - **Concise, auditable code.** Small readable modules over clever abstraction.
 - **Test-driven development.** Tests pin the API shape before/alongside implementation — the test suite *is* the spec. Expect early scaffolding passes to include tests that fail against stub implementations by design.
 - **Coverage via fixtures, not speculative code.** Don't add defensive code paths nothing exercises; high coverage should fall out of writing a fixture per edge case, not be chased separately.
+- **An idea that surfaces mid-implementation becomes an issue, not a detour.** File it in the same commit that provoked it, with the milestone its scope boundary above dictates, and carry on with what you were doing. This is already how #31–#35, #37, #38 and #40 came to exist; writing it down makes it something a review can enforce. The exception is narrow and must be argued explicitly in the commit message: a fix belongs in the current change only when it is in lines that change anyway *and* the current work makes the defect worse.
 - **Edge cases become GitHub issues, semi-automated,** via a form/template, an agent-validated repro step, then a filed issue linked back via an in-code marker (`# lumberjack: see issue #NN`). This is in force — grep the marker to find known-incomplete code. Remove the marker in the same change that closes the issue.
 - **Measure before claiming a speedup, and measure again after.** Two changes in this repo were only ~3x until the query plan was checked; both are commented with the number and the reason. `EXPLAIN QUERY PLAN` is cheap and has already twice contradicted a design that looked obviously correct.
 - **Assert the observable contract, not internal state.** Where a test could read a state accessor or check the behaviour that accessor exists to describe, prefer the behaviour — several accessors were deleted precisely because tests were their only caller.
@@ -90,6 +91,7 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 ### Decisions worth not relitigating
 
 - **A high bar count is a symptom, not a display bug.** It means grouping is too granular or the code logs ungroupably. Capping by default, or collapsing the excess into a neutral "… 298 more" row, destroys that signal. The diagnosis is phase-dependent: under today's source-location grouping, 800 bars is an honest report of 800 busy call sites; under Phase 4 it would mean containment analysis has not merged sibling call sites into shared loops, or that finished bars are not retiring — so the count is a measure of how much structure has *not* been inferred yet, which is precisely the signal a cap would hide. `LUMBERJACK_MAX_BARS` exists only as a debug/terminal-compat escape hatch — opt-in, absent from the README, reported once at exit. Issue #8 is the home for the real fix.
+- **Two bar kinds share one `Live`; they are never two started `Progress` objects.** `Progress.start()` starts a `Live` of its own, and rich allows only one live per console: the second becomes `_nested`, at which point its `refresh()` re-renders *the root's* renderable and returns, so its bars never draw (verified against rich 15.0.0, `Live.refresh`). Giving each its own `Console` is worse — two Lives writing cursor control to one stderr corrupt the frame. The working shape is rich's documented one: the renderer owns a single `Live(Group(task_progress, source_progress))` and **neither `Progress` is started**. Exact bars go in the group first, because the ellipsis crops bottom-up and instrumented bars must not lose their slots to inferred ones. Owning the `Live` is also where issue #28's bounded final frame belongs.
 - **Rich crops rather than corrupts.** `Progress` runs `Live` with `vertical_overflow="ellipsis"`, so an over-tall live frame shows the first N bars plus an ellipsis with correct cursor arithmetic. Do not justify display work by claiming otherwise. `Live.stop()` does *not* crop, though — see issue #28.
 - **At exit, drain before closing the display.** A live bar draws its closing frame from the store, so `teardown.run()` flushes the buffer first; closing first leaves the final count short, or with the pump disabled draws no bar at all. The excepthook path is the opposite by design — there a traceback is imminent, so the display comes down first.
 - **Pulse means "no claim", and confidence only ever increases.** `add_task(total=None)` gives rich an indeterminate, pulsing bar, and that one mechanism carries all the uncertainty the display needs: pulsing before a cycle is detected (work is happening, nothing more is claimed), determinate once a total is known, and **pulsing again if the count exceeds the estimate** — degrading to honesty rather than showing 127% or freezing at 100%. Promotion is one-way, for the same reason bars never move: a display that oscillates between spinner and bar as confidence wobbles is worse than one that stays a spinner.
@@ -129,9 +131,11 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
 
 0. **Done.** Foundations — repo scaffolding, packaging, CI, pre-commit, test harness before implementation.
 1. **Done.** MVP — capture/store/render skeleton, including a throwaway crude end-to-end proof (one hardcoded/naively-detected repeating log shape rendered as a live bar) to validate the core premise early.
-2. Tracking API (`track`/`task`), outbound OTel only — establishes the progress/task model before inference is built on top of it.
-3. Multiprocessing-aware capture — prototype SQLite WAL multi-writer before building an IPC/queue fallback.
-4. Repetition analysis & inferred progress — the phase that delivers the core premise (recurring log line → progress tick) on top of the Phase 1-3 substrate. Structure first (rate, count, containment, nested bars); message-text analysis is a later refinement inside the phase, not its basis.
+2. **Done.** Tracking API (`track`/`task`), outbound OTel only — establishes the progress/task model before inference is built on top of it.
+3. Multiprocessing-aware capture — prototype SQLite WAL multi-writer before building an IPC/queue fallback. **Deferred behind Phase 4 — see execution order below.**
+4. **In progress.** Repetition analysis & inferred progress — the phase that delivers the core premise (recurring log line → progress tick). Structure first (rate, count, containment, nested bars); message-text analysis is a later refinement inside the phase, not its basis. Runs in two halves, exact before inferred:
+   - **4a — named determinate bars from stored tracking data, no inference at all.** Phase 2 already writes exact `task_label` / `progress_current` / `progress_total` / `task_id` / `parent_task_id`, and no renderer reads any of them. 4a is display work only: it cannot be wrong, and it builds the substrate 4b needs.
+   - **4b — the inference proper** (issue #38): per-source rate and count, containment from rate ratios, pulse→promote, idle retirement. Reuses 4a's display model rather than inventing one.
 5. Hints config.
 6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries).
 7. Polish & extensibility (renderer interface finalized, theming, performance pass, docs).
@@ -144,6 +148,20 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
 Phases 0–7 exist as milestones. **The milestone number is the phase number plus one** (Phase 0 is milestone 1, Phase 7 "Polish & extensibility" is milestone 8) — the API takes the number, not the title, so assign one issue and read it back before batching. Phases 8–10 have no milestone yet; nothing maps to them.
 
 File new work against its phase. Defects in already-shipped code and anything genuinely ambiguous go to **Polish & extensibility** — correcting minor defects is what polish means — rather than being left unassigned or forced into a phase they do not belong to.
+
+**Execution order is not phase order.** Phase 4 is being built before Phase 3. Nothing in Phase 4 touches the write path — it adds *readers* — while Phase 3 changes how records get into the store, so there is no collision and no rework. Multiprocessing capture is also infrastructure whose payoff is *more bars*, which is worth little until the bars themselves are worth multiplying. The numbers and milestones are deliberately left as they are: renumbering would invalidate "Phase 4" in every issue body that already cites it, for no gain. **The SQLite WAL multi-writer question is a one-day spike, not a phase** — if WAL genuinely supports multiple writer processes, most of Phase 3 evaporates, so run the spike opportunistically and record the answer as a milestone comment.
+
+### What each milestone is, and is not
+
+Written down so "does this belong here?" stops being a judgement call.
+
+| Phase | IN | OUT |
+|---|---|---|
+| **3 — Multiprocessing capture** | Records from child processes reaching the parent's store (WAL multi-writer if the spike says yes, otherwise a queue path). The attribution columns already exist. | Any display change. DuckDB multi-process — the queue path is its answer by design. Anything networked. |
+| **4 — Repetition analysis** | 4a's named determinate bars from stored tracking data; then rate/count, containment ratios, pulse→promote, idle retirement (#38). Also #26, #32, #35, and #8's real fix. #37 as detection plus diagnostic only. | Message-template masking beyond the wrapper diagnostic. Hints. Caller fingerprinting (#37's later options). Multiprocessing. |
+| **5 — Hints config** | Declarative config that overrides inference: progress step, task boundary, noise, severity. | New inference of any kind. Runtime API surface beyond reading the config. |
+| **6 — OpenTelemetry** | The inbound `OTelBridge` (SpanProcessor/MetricReader → store) and the `trace_id`/`span_id` columns (#34). | Outbound spans — Phase 2 shipped them. Exporter or sampling configuration. Rendering metrics beyond the existing bars. |
+| **7 — Polish & extensibility** | Defects in already-shipped code (#7, #11, #14, #15, #16, #18, #31, #33), renderer interface freeze, theming, performance pass, docs. | New inference or capability work. Anything owned by an earlier phase. |
 
 ## Toolchain
 
