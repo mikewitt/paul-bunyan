@@ -245,3 +245,102 @@ def test_a_rejected_store_file_does_not_leak_its_connection(tmp_path, recwarn):
         SQLiteRecordStore(path)
     gc.collect()
     assert not [w for w in recwarn if issubclass(w.category, ResourceWarning)]
+
+
+# --- the tracking API's own rows -------------------------------------------
+
+
+def _task_row(make_row, task_id, event, **kw):
+    return make_row(
+        task_id=task_id,
+        task_event=event,
+        task_label=kw.pop("label", "job"),
+        **kw,
+    )
+
+
+def test_task_events_since_returns_only_task_rows(store, make_row):
+    store.append([make_row(message="ordinary"), _task_row(make_row, 1, "start")])
+    delta = store.task_events_since(0)
+    assert [e.event for e in delta.events] == ["start"]
+    assert delta.events[0].task_id == 1
+
+
+def test_task_events_since_returns_them_oldest_first(store, make_row):
+    store.append(
+        [
+            _task_row(make_row, 1, "start"),
+            _task_row(make_row, 1, "update", progress_current=5),
+            _task_row(make_row, 1, "end", progress_current=9),
+        ]
+    )
+    assert [e.event for e in store.task_events_since(0).events] == [
+        "start",
+        "update",
+        "end",
+    ]
+
+
+def test_task_events_since_advances_past_ordinary_records(store, make_row):
+    """The watermark spans every row in range, not just the task ones —
+    otherwise ordinary records after the last task event would be rescanned
+    on every poll, and the range would only grow."""
+    store.append([_task_row(make_row, 1, "start")])
+    first = store.task_events_since(0)
+    store.append([make_row(message="plain") for _ in range(5)])
+    second = store.task_events_since(first.last_id)
+    assert second.events == ()
+    assert second.last_id > first.last_id, "the watermark stalled behind plain rows"
+
+
+def test_task_events_since_holds_the_watermark_when_nothing_arrived(store, make_row):
+    store.append([_task_row(make_row, 1, "start")])
+    first = store.task_events_since(0)
+    again = store.task_events_since(first.last_id)
+    assert again.events == ()
+    assert again.last_id == first.last_id, "an empty delta must not rewind"
+
+
+def test_task_events_since_carries_every_column_a_bar_needs(store, make_row):
+    store.append(
+        [
+            _task_row(
+                make_row,
+                7,
+                "update",
+                label="reindex",
+                parent_task_id=3,
+                progress_current=40,
+                progress_total=100,
+            )
+        ]
+    )
+    (event,) = store.task_events_since(0).events
+    assert (event.task_id, event.parent_task_id) == (7, 3)
+    assert (event.label, event.event) == ("reindex", "update")
+    assert (event.current, event.total) == (40, 100)
+
+
+def test_the_source_delta_ignores_task_rows(store, make_row):
+    """The tracking API knows its own exact numbers and gets its own bars.
+    Counting its rows here too would draw a source-location bar beside every
+    named one — visible on the first run of examples/tracking.py."""
+    store.append(
+        [
+            make_row(pathname="a.py", lineno=1, func_name="f"),
+            _task_row(make_row, 1, "start", pathname="a.py", lineno=1, func_name="f"),
+        ]
+    )
+    assert store.count_by_source_since(0).counts == {SourceKey("a.py", 1, "f"): 1}
+
+
+def test_the_source_delta_watermark_advances_past_task_rows(store, make_row):
+    """Excluding them by grouping rather than by WHERE: filtering them out of
+    the range would leave the watermark behind a tail of task rows, and every
+    later poll would rescan a range that only grows."""
+    store.append([make_row()])
+    first = store.count_by_source_since(0)
+    store.append([_task_row(make_row, 1, "update") for _ in range(3)])
+    second = store.count_by_source_since(first.last_id)
+    assert second.counts == {}
+    assert second.last_id > first.last_id, "the watermark stalled behind task rows"

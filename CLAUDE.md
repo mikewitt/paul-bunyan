@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-This repository (`lumberjack`, hosted as `mikewitt/paul-bunyan`) has **Phases 0, 1 and 2 complete**. Trunk is `daddy`, not `main`.
+This repository (`lumberjack`, hosted as `mikewitt/paul-bunyan`) has **Phases 0, 1 and 2 complete, and Phase 4a done**. Trunk is `daddy`, not `main`.
 
 What exists and works: capture (`LumberjackHandler`), storage (`SQLiteRecordStore`), output-mode detection, plain/JSON/rich rendering, the Phase 1 live progress bar, the flush pump, `atexit`/excepthook teardown, and the Phase 2 tracking API (`task()`, `track()`, `TaskHandle.subtask()`) with outbound OTel spans. Grouping for the bar is by *source location*, which Phase 4 keeps as the identity axis rather than replacing — what it adds is containment analysis on top (see `RepetitionAnalyzer` below).
 
-Note what Phase 2 did **not** deliver: the tracking API records exact counts and task hierarchy into the store, but the *display* still draws source-location bars labelled "N records". Turning `progress_current`/`progress_total` into named determinate bars is Phase 4a, which needs a parallel model — `BarState` is `SourceKey`-shaped end to end, deliberately has no `total`, and the rich column set hardcodes `"{task.completed} records"`.
+Phase 4a is done: `task()` and `track()` now draw named bars — determinate when a total was given, pulsing when not, indented by task depth, finishing on the `end` row. They sit above the source-location bars in one shared `Live`. No inference is involved; every number came from an instrumented call that stated it.
 
 What does not exist yet, and must not be described as though it does: `RepetitionAnalyzer`, `HintsConfig`, the inbound `OTelBridge`, OTel metrics, the DuckDB backend, and multiprocessing-aware capture. Sections below describe the intended design for those. Check before assuming any module named here is on disk.
 
@@ -133,8 +133,8 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
 1. **Done.** MVP — capture/store/render skeleton, including a throwaway crude end-to-end proof (one hardcoded/naively-detected repeating log shape rendered as a live bar) to validate the core premise early.
 2. **Done.** Tracking API (`track`/`task`), outbound OTel only — establishes the progress/task model before inference is built on top of it.
 3. Multiprocessing-aware capture — prototype SQLite WAL multi-writer before building an IPC/queue fallback. **Deferred behind Phase 4 — see execution order below.**
-4. **In progress.** Repetition analysis & inferred progress — the phase that delivers the core premise (recurring log line → progress tick). Structure first (rate, count, containment, nested bars); message-text analysis is a later refinement inside the phase, not its basis. Runs in two halves, exact before inferred:
-   - **4a — named determinate bars from stored tracking data, no inference at all.** Phase 2 already writes exact `task_label` / `progress_current` / `progress_total` / `task_id` / `parent_task_id`, and no renderer reads any of them. 4a is display work only: it cannot be wrong, and it builds the substrate 4b needs.
+4. **4a done, 4b next.** Repetition analysis & inferred progress — the phase that delivers the core premise (recurring log line → progress tick). Structure first (rate, count, containment, nested bars); message-text analysis is a later refinement inside the phase, not its basis. Runs in two halves, exact before inferred:
+   - **4a — Done.** Named determinate bars from stored tracking data, no inference at all. `TaskProgressModel` folds `store.task_events_since()` into one bar per task; the renderer draws them above the source bars in one shared `Live`.
    - **4b — the inference proper** (issue #38): per-source rate and count, containment from rate ratios, pulse→promote, idle retirement. Reuses 4a's display model rather than inventing one.
 5. Hints config.
 6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries).

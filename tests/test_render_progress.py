@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator
 
@@ -23,7 +24,10 @@ pytest.importorskip("rich")
 
 import lumberjack  # noqa: E402
 import lumberjack.renderers.rich_renderer as rich_renderer_module  # noqa: E402
-from lumberjack import teardown  # noqa: E402
+from lumberjack import (
+    session,  # noqa: E402
+    teardown,  # noqa: E402
+)
 from lumberjack.detect import OutputMode  # noqa: E402
 from lumberjack.handler import LumberjackHandler  # noqa: E402
 from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
@@ -324,7 +328,7 @@ def test_log_volume_never_triggers_a_redraw(rig: _Rig, monkeypatch):
         for i in range(500):
             rig.logger.info("processing item %d", i)
 
-    monkeypatch.setattr(rig.renderer._progress, "refresh", count_redraw)
+    monkeypatch.setattr(rig.renderer._live, "refresh", count_redraw)
     burst()
     assert redraws == 0, "a record must never reach the display on its own"
 
@@ -466,3 +470,130 @@ def test_shutdown_stops_the_live_display(store: RecordStore):
     assert _timer_threads()
     lumberjack.shutdown()
     assert _timer_threads() == []
+
+
+# --- named bars from the tracking API --------------------------------------
+#
+# The tracking API is inert without a session, so these need a published one —
+# and its records reach the handler by way of the *root* logger, which is
+# where `init()` would have put it.
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+
+
+@pytest.fixture
+def task_rig(as_terminal: None, store: RecordStore) -> Iterator[_Rig]:
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    handler = LumberjackHandler(on_record=renderer.render, level=logging.DEBUG)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    logger = logging.getLogger("progress-task-rig")
+    logger.setLevel(logging.DEBUG)
+    session.set_current_session(
+        Session(
+            handler=handler,
+            store=store,
+            renderer=renderer,
+            output_mode=OutputMode.RICH,
+            owns_store=False,
+            dump_last_n=0,
+            prev_handlers=[],
+            prev_level=root.level,
+        )
+    )
+    try:
+        yield _Rig(logger, handler, store, renderer, stream)
+    finally:
+        session.set_current_session(None)
+        root.removeHandler(handler)
+        renderer.close()
+
+
+def test_a_task_draws_a_named_determinate_bar(task_rig):
+    """Rung 2 on screen: the label the code chose, and a real percentage,
+    because `task()` said how much work there was."""
+    with lumberjack.task("reindex", total=100) as t:
+        t.set_progress(40)
+    task_rig.tick()
+    out = _strip_ansi(task_rig.output())
+    assert "reindex" in out
+    assert "40/100" in out
+    assert "40%" in out
+
+
+def test_a_task_without_a_total_pulses_instead_of_claiming_one(task_rig):
+    """`total=None` is rich's indeterminate bar. Inventing a denominator
+    would be the one thing a bar must never do."""
+    with lumberjack.task("scan") as t:
+        t.advance()
+    task_rig.tick()
+    out = _strip_ansi(task_rig.output())
+    assert "scan" in out
+    assert "%" not in out, "an indeterminate task must not show a percentage"
+
+
+def test_a_container_task_shows_no_count_at_all(task_rig):
+    """A bare 0 beside a pulsing bar reads as "stuck at zero" rather than
+    "no count was claimed"."""
+    handle = lumberjack.task("etl run")
+    try:
+        task_rig.tick()
+        line = next(
+            ln for ln in _strip_ansi(task_rig.output()).splitlines() if "etl run" in ln
+        )
+        # Everything but the elapsed clock, which is always digits.
+        assert not re.search(r"\d", re.sub(r"\d+:\d\d:\d\d", "", line))
+    finally:
+        handle.end()
+
+
+def test_subtasks_are_indented_under_their_parent(task_rig):
+    with lumberjack.task("outer") as outer:
+        with outer.subtask("inner"):
+            task_rig.tick()
+    out = _strip_ansi(task_rig.output())
+    outer_line = next(ln for ln in out.splitlines() if "outer" in ln)
+    inner_line = next(ln for ln in out.splitlines() if "inner" in ln)
+    assert len(inner_line) - len(inner_line.lstrip()) > len(outer_line) - len(
+        outer_line.lstrip()
+    )
+
+
+def test_a_task_draws_no_duplicate_source_bar(task_rig):
+    """Task events are ordinary records located at the `task()` call line, so
+    without the store-side filter every named bar would get a pulsing
+    source-location bar drawn beside it."""
+    with lumberjack.task("reindex", total=10) as t:
+        for _ in range(5):
+            t.advance()
+    task_rig.tick()
+    assert "reindex" in _strip_ansi(task_rig.output())
+    # The source model is the observable contract here: a substring check on
+    # the frame is defeated by column truncation at narrow widths.
+    assert task_rig.renderer.bars() == [], "the task's own call site got a bar"
+
+
+def test_named_bars_are_drawn_above_source_bars(task_rig):
+    """The overflow ellipsis crops from the bottom, so exact bars must not
+    lose their slots to inferred ones."""
+    # A label that cannot occur in this test's own source-bar text, which is
+    # labelled with the enclosing function's name.
+    with lumberjack.task("zzexact", total=10) as t:
+        t.set_progress(5)
+        for i in range(5):
+            task_rig.logger.info("loop line %d", i)
+    task_rig.tick()
+    # One clean frame: the stream accumulates every redraw, and an early frame
+    # drawn before the source bar qualified would satisfy any ordering.
+    task_rig.stream.seek(0)
+    task_rig.stream.truncate(0)
+    task_rig.tick()
+    frame = _strip_ansi(task_rig.output())
+    assert "zzexact" in frame and "records" in frame
+    assert frame.index("zzexact") < frame.index("records"), "source bars drew first"

@@ -8,14 +8,13 @@ full fidelity into a queryable store, while rendering something concise —
 instead of a thousand scrolling `DEBUG` lines, render progress.
 
 **Status: early, and pre-1.0.** Capture, storage (SQLite), output-mode
-detection, plain/rich rendering, a live progress bar, and the explicit
-`track()` / `task()` API with outbound OpenTelemetry spans are in place.
-The bar's repetition detection is deliberately crude for now — records are
-grouped by *source location*, so a log call inside a loop becomes one bar.
-Template-based repetition analysis is a later phase, and so is drawing
-`task()`'s exact counts as named, determinate bars — today those counts go
-into the store rather than onto the display. See `CLAUDE.md` for the full
-plan.
+detection, plain/rich rendering, the explicit `track()` / `task()` API with
+outbound OpenTelemetry spans, and named determinate progress bars driven by
+that API are in place. What is *inferred* is still crude: uninstrumented log
+lines are grouped by *source location*, so a log call inside a loop becomes
+one indeterminate bar counting records. Turning that into real progress —
+loop periods, containment, nested bars derived rather than declared — is the
+phase in flight. See `CLAUDE.md` for the plan.
 
 ## Install
 
@@ -189,9 +188,10 @@ Two things worth knowing:
   would print a line per item, which is the thing this package exists to
   avoid. Counts stay exact regardless, because the value is absolute and the
   closing record carries the final one.
-- **The live bars are still rung-1 bars.** Task counts and hierarchy go into
-  the store today; drawing them as named, determinate bars is the next phase.
-  Read them back with `current_store()` in the meantime.
+- **These draw as real bars.** A task with a total shows a percentage; one
+  without pulses rather than inventing a denominator; subtasks are indented
+  under their parent, and a bar finishes when its task ends. Uninstrumented
+  log lines still get the rung-1 count bars, drawn below these.
 
 `examples/tracking.py` is the whole thing end to end.
 
