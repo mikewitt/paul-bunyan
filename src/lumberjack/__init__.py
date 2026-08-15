@@ -91,6 +91,24 @@ def init(
             on_record=renderer.render,
             level=level,
         )
+        root = logging.getLogger()
+        session = Session(
+            handler=handler,
+            store=resolved_store,
+            renderer=renderer,
+            output_mode=mode,
+            owns_store=owns_store,
+            dump_last_n=dump_last_n,
+            prev_handlers=root.handlers[:] if replace_handlers else [],
+            prev_level=root.level,
+        )
+        # Inside the guard rather than after it: `install()` raises when
+        # teardown is already installed, so it is one more thing that can fail
+        # while a store this call created is still open. From 3.13 an unclosed
+        # sqlite connection also emits a ResourceWarning at collection, which
+        # this suite turns into an error in whichever unrelated test happens
+        # to trigger it.
+        teardown.install(session)
     except BaseException:
         if owns_store:
             resolved_store.close()
@@ -99,19 +117,6 @@ def init(
     # Everything that can fail is done; the root logger is only touched once
     # the install is guaranteed to complete, so there is no half-swapped state
     # to unwind here.
-    root = logging.getLogger()
-    session = Session(
-        handler=handler,
-        store=resolved_store,
-        renderer=renderer,
-        output_mode=mode,
-        owns_store=owns_store,
-        dump_last_n=dump_last_n,
-        prev_handlers=root.handlers[:] if replace_handlers else [],
-        prev_level=root.level,
-    )
-    teardown.install(session)
-
     for existing in session.prev_handlers:
         root.removeHandler(existing)
     root.addHandler(handler)

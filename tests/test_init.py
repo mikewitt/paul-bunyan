@@ -275,3 +275,28 @@ def test_a_quieter_capture_is_still_one_argument():
     finally:
         lumberjack.shutdown()
         store.close()
+
+
+def test_a_store_init_created_is_closed_when_teardown_refuses(monkeypatch):
+    """`teardown.install()` raises when it is already installed, and it is the
+    last thing `init()` does that can fail. A store `init()` created itself
+    has to be closed on that path too.
+
+    Asserted on the close rather than on a ResourceWarning: unclosed sqlite
+    connections only warn from 3.13, so a warning-based test would pass on
+    3.12 whether or not the store was closed.
+    """
+    closed: list[bool] = []
+
+    class _WatchedStore(SQLiteRecordStore):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(lumberjack, "SQLiteRecordStore", _WatchedStore)
+    monkeypatch.setattr(
+        teardown, "install", _raise(RuntimeError("teardown already installed"))
+    )
+    with pytest.raises(RuntimeError, match="teardown already installed"):
+        lumberjack.init(output_mode="plain")
+    assert closed == [True], "init() leaked the store it created"
