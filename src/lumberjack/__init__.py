@@ -43,7 +43,7 @@ __all__ = [
 
 def init(
     *,
-    level: int = logging.INFO,
+    level: int = logging.DEBUG,
     output_mode: OutputMode | str | None = None,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     store: RecordStore | None = None,
@@ -52,6 +52,14 @@ def init(
     flush_interval: float = DEFAULT_FLUSH_INTERVAL,
 ) -> LumberjackHandler:
     """Install lumberjack on the root logger.
+
+    `level` sets both the root logger's level and the handler's, and defaults
+    to DEBUG rather than stdlib's usual WARNING or a tidier INFO. That is the
+    whole point: `logger.debug(...)` calls inside loops are what lumberjack
+    turns into progress, and any higher default has stdlib discard them before
+    lumberjack ever sees them — a zero-config first run that shows nothing.
+    The volume is handled where it should be, by the display collapsing it and
+    the store absorbing it. Pass `level=logging.INFO` for a quieter capture.
 
     Replaces the root logger's existing handlers by default; pass
     `replace_handlers=False` to layer alongside them instead. Raises

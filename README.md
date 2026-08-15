@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 
 def main():
-    lumberjack.init(level=logging.DEBUG)
+    lumberjack.init()
 
     for i in range(10_000):
         log.debug("processed item %d", i)   # this line becomes one bar
@@ -54,9 +54,11 @@ call — see [Do I have to shut it down?](#do-i-have-to-shut-it-down) below.
 `init()` returns the installed handler; ignoring the return value is normal.
 
 `level` sets both the root logger's level and the handler's, and defaults to
-`INFO`. lumberjack exists for `logger.debug()` spam, so pass
-`level=logging.DEBUG` when that is what you want captured — otherwise stdlib
-`logging` filters it out before lumberjack ever sees it.
+`DEBUG` — deliberately louder than stdlib's usual default. lumberjack exists
+for `logger.debug()` spam, and any higher default has stdlib discard those
+calls before lumberjack ever sees them, so a first run would show nothing.
+The volume is handled where it belongs: the display collapses it and the
+store absorbs it. Pass `level=logging.INFO` for a quieter capture.
 
 On an interactive terminal with `rich` installed, log lines that repeat from
 the same place stop scrolling and become bars that advance. Three worker

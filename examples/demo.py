@@ -63,7 +63,7 @@ def load(count: int) -> None:
 
 def main() -> None:
     # The only lumberjack-aware line in the program.
-    lumberjack.init(level=logging.DEBUG)
+    lumberjack.init()
 
     random.seed(0)
     workers = [

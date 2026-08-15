@@ -239,3 +239,39 @@ def test_shutdown_leaves_a_caller_supplied_store_open():
         assert any(r.message == "still queryable" for r in store.recent())
     finally:
         store.close()
+
+
+def test_the_default_level_captures_debug():
+    """The zero-config first run has to show the thing lumberjack is for.
+
+    `logger.debug(...)` inside a loop is the product; any default above DEBUG
+    has stdlib discard those calls before the handler sees them, so `init()`
+    with no arguments would produce an empty display — Principle 1 failing on
+    the exact case Principle 1 exists for. Issue #26.
+    """
+    store = SQLiteRecordStore(":memory:")
+    lumberjack.init(store=store, output_mode="plain", flush_interval=0)
+    try:
+        logging.getLogger("zero-config").debug("the loop line")
+        lumberjack.flush()
+        assert [r.message for r in store.recent()] == ["the loop line"]
+    finally:
+        lumberjack.shutdown()
+        store.close()
+
+
+def test_a_quieter_capture_is_still_one_argument():
+    """DEBUG is a default, not a mandate."""
+    store = SQLiteRecordStore(":memory:")
+    lumberjack.init(
+        store=store, output_mode="plain", flush_interval=0, level=logging.INFO
+    )
+    try:
+        log = logging.getLogger("quieter")
+        log.debug("dropped")
+        log.info("kept")
+        lumberjack.flush()
+        assert [r.message for r in store.recent()] == ["kept"]
+    finally:
+        lumberjack.shutdown()
+        store.close()

@@ -78,7 +78,7 @@ def load(parent: lumberjack.TaskHandle, count: int) -> None:
 
 
 def main() -> None:
-    lumberjack.init(level=logging.DEBUG)
+    lumberjack.init()
 
     with lumberjack.task("etl run") as run:
         workers = [
