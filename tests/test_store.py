@@ -404,6 +404,15 @@ def test_the_source_delta_still_folds_per_worker_rows_back_together(store, make_
 # --- recent() is bounded by default (#7) ------------------------------------
 
 
+def test_the_default_limit_is_a_documented_number():
+    """Pinned as a literal on purpose. Every other test here compares against
+    the constant, so they all move together if it changes — but the value is
+    quoted in the README and in `recent()`'s docstring, which makes it a
+    contract rather than a tuning knob. Changing it should mean changing
+    those too, and this is what makes that happen."""
+    assert DEFAULT_RECENT_LIMIT == 1000
+
+
 def test_recent_is_bounded_by_default(store, make_row):
     """`recent()` is the documented way to query captured records, and the
     unbounded form builds one dataclass per row — multi-second and half a

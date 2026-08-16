@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import re
+
+import pytest
 
 from lumberjack.renderers.plain import PlainTextRenderer
 
@@ -75,3 +78,54 @@ def test_declares_write_through():
 def test_close_is_a_noop():
     renderer = PlainTextRenderer(stream=io.StringIO())
     renderer.close()
+
+
+# --- timestamps are unambiguous (#14) ---------------------------------------
+
+
+def test_the_text_timestamp_carries_a_utc_offset(make_row):
+    """This renderer is the safe choice for files and pipes, so its output is
+    what gets shipped elsewhere and read later. A bare local timestamp cannot
+    be ordered against one from another machine, or against itself across a
+    DST boundary."""
+    stream = io.StringIO()
+    PlainTextRenderer(stream=stream).render(make_row(created=1786800000.0))
+    stamp = stream.getvalue().split()[0]
+    parsed = datetime.datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None, f"naive timestamp: {stamp}"
+    assert parsed.timestamp() == pytest.approx(1786800000.0)
+
+
+def test_the_text_timestamp_keeps_milliseconds(make_row):
+    stream = io.StringIO()
+    PlainTextRenderer(stream=stream).render(make_row(created=1786800000.123))
+    stamp = stream.getvalue().split()[0]
+    assert ".123" in stamp
+    assert datetime.datetime.fromisoformat(stamp).timestamp() == pytest.approx(
+        1786800000.123
+    )
+
+
+def test_json_lines_carry_both_the_epoch_and_an_iso_string(make_row):
+    """A machine consumer wants to compare and bucket without parsing; a
+    person reading the file wants to know when. Neither should have to
+    convert, so both are present."""
+    stream = io.StringIO()
+    PlainTextRenderer(stream=stream, json_lines=True).render(
+        make_row(created=1786800000.5)
+    )
+    payload = json.loads(stream.getvalue())
+    assert payload["created"] == 1786800000.5
+    parsed = datetime.datetime.fromisoformat(payload["timestamp"])
+    assert parsed.tzinfo is not None
+    assert parsed.timestamp() == pytest.approx(1786800000.5)
+
+
+def test_both_modes_describe_the_same_instant(make_row):
+    """One renderer, two output shapes — they must not disagree about when
+    something happened."""
+    text, structured = io.StringIO(), io.StringIO()
+    row = make_row(created=1786800000.25)
+    PlainTextRenderer(stream=text).render(row)
+    PlainTextRenderer(stream=structured, json_lines=True).render(row)
+    assert text.getvalue().split()[0] == json.loads(structured.getvalue())["timestamp"]
