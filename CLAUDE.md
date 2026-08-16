@@ -164,10 +164,20 @@ Written down so "does this belong here?" stops being a judgement call.
 | Phase | IN | OUT |
 |---|---|---|
 | **3 — Multiprocessing capture** | Records from child processes reaching the parent's store (WAL multi-writer if the spike says yes, otherwise a queue path). The attribution columns already exist. | Any display change. DuckDB multi-process — the queue path is its answer by design. Anything networked. |
-| **4 — Repetition analysis** *(done)* | 4a's named determinate bars from stored tracking data; then rate/count, containment ratios, pulse→promote, idle retirement (#38). Also #26, #32, #35, and #8's real fix. #37 as detection plus diagnostic only. | Message-template masking beyond the wrapper diagnostic. Hints. Caller fingerprinting (#37's later options). Multiprocessing. Bar *placement* once bars nest (#43) — that is #8's display question. |
+| **4 — Repetition analysis** *(done, closed)* | What shipped: 4a's named determinate bars from stored tracking data, then rate/count, worker-scoped containment ratios, pulse→promote, idle retirement (#38), and #26. | Everything the milestone once also claimed — see below. Message-template masking. Hints. Caller fingerprinting. Multiprocessing. |
 | **5 — Hints config** | Declarative config that overrides inference: progress step, task boundary, noise, severity. | New inference of any kind. Runtime API surface beyond reading the config. |
-| **6 — OpenTelemetry** | The inbound `OTelBridge` (SpanProcessor/MetricReader → store) and the `trace_id`/`span_id` columns (#34). | Outbound spans — Phase 2 shipped them. Exporter or sampling configuration. Rendering metrics beyond the existing bars. |
-| **7 — Polish & extensibility** | Defects in already-shipped code (#7, #11, #14, #15, #16, #18, #31, #33), renderer interface freeze, theming, performance pass, docs. | New inference or capability work. Anything owned by an earlier phase. |
+| **6 — OpenTelemetry** | The inbound `OTelBridge` (SpanProcessor/MetricReader → store), the `trace_id`/`span_id` columns (#34), and tagging ordinary records with their enclosing task (#32) — #34 and #32 are the same capture-path cost question and are decided together. | Outbound spans — Phase 2 shipped them. Exporter or sampling configuration. Rendering metrics beyond the existing bars. |
+| **7 — Polish & extensibility** | Defects in already-shipped code (#7, #11, #14, #15, #16, #18, #31, #33, #35), the bar-count and bar-placement questions (#8, #43), #37's detection-plus-diagnostic, organisational cleanup (#44, #45), renderer interface freeze, theming, performance pass, docs. | New inference. Caller fingerprinting (#37's later options). Anything owned by an earlier phase. |
+
+**Phase 4 closed without five things it had claimed, and they were re-homed rather than left to rot.** Worth recording, because the pattern will recur: a milestone accumulates issues while the phase is being designed, and shipping the phase is when you find out which of them were actually part of it.
+
+| Issue | Was | Now | Why |
+|---|---|---|---|
+| #8 | Phase 4 | Polish | The bar-count ceiling is a *display* question, and Phase 4 changed what a bar means without settling it. Retirement bounds what claims to be live; it does not bound what is drawn. |
+| #43 | Phase 4 | Polish | Filed *by* Phase 4 and blocked on #8 — same question, so the same home. |
+| #35 | Phase 4 | Polish | A Phase 2 defect that Phase 4 made visible rather than caused: a stalled task genuinely does sit at 1/100 now that named determinate bars exist. |
+| #37 | Phase 4 | Polish | The cheap half (detect the collapse, report it at exit) is polish-shaped. The expensive half — caller fingerprinting — stays out of every milestone. |
+| #32 | Phase 4 | OpenTelemetry | Not a defect at all, and never really Phase 4's: it is a capture-path cost question, and #34 says outright that the two must be decided together. |
 
 ## Toolchain
 
@@ -198,15 +208,21 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 | `test` | 6 legs: {ubuntu, windows} × {3.12, 3.13, 3.14} |
 | `bare install (no rich)` | Principle 8 — the zero-dependency install. Asserts `rich` is genuinely absent so it cannot rot into a duplicate of `test` |
 | `package` | `uv lock --check`, builds the wheel, installs it into a clean venv, asserts `py.typed` ships |
-| `coverage-badge` | One suite run with `--cov-report=xml`, feeding two consumers: the Codacy coverage upload on every event, and the committed badge on trunk pushes only. Name kept despite doing both — see below |
+| `coverage` | One suite run with `--cov-report=xml`, uploaded to Codacy, which renders the README badge from it |
 
 CodeQL and Codacy also run, both configured outside this workflow.
 
-Coverage is uploaded to Codacy from the `coverage-badge` job. It comes from that one ubuntu/3.12 run rather than all six `test` legs: the union across legs would be marginally higher — the bare-install `skipif`, Windows path branches — but collecting it means six `--partial` uploads plus a `final` call, which is a lot of workflow for a fraction of a percent. The upload step is skipped, not failed, when `CODACY_PROJECT_TOKEN` is absent, which is the case for fork pull requests and for anyone who cloned this without a Codacy project.
+Coverage is uploaded to Codacy from the `coverage` job. It comes from that one ubuntu/3.12 run rather than all six `test` legs: the union across legs would be marginally higher — the bare-install `skipif`, Windows path branches — but collecting it means six `--partial` uploads plus a `final` call, which is a lot of workflow for a fraction of a percent. The upload step is skipped, not failed, when `CODACY_PROJECT_TOKEN` is absent, which is the case for fork pull requests and for anyone who cloned this without a Codacy project — and the skip emits a workflow notice saying so, because a silent skip is indistinguishable from a broken upload when the job goes green either way.
+
+**No job writes to the repository, and the README's coverage badge is Codacy's rather than a committed SVG.** It used to be one: the job rendered `coverage.svg` with `genbadge` and pushed it to trunk under `[skip ci]`. Branch protection ended that — a direct push cannot satisfy status checks that only run *after* a push, so every trunk push failed on that step while all eleven real checks passed. A permanently red trunk that means nothing is worse than no signal. Serving the badge from the coverage already being uploaded removes the push, the `contents: write` escalation, the `[skip ci]` dance, and a generated file the repo had to keep in sync with itself. The whole workflow now runs on a read-only token.
+
+**One job name is deliberately wrong.** `bare install (no rich)` guards three optional dependencies, not one. `name:` is the check name GitHub reports and trunk's branch protection lists this job, so renaming it orphans a required check and blocks merges until the ruleset is edited to match — worth doing only alongside that settings change. The `coverage` job used to have the same problem under its old name `coverage-badge`; it was renamed freely because the ruleset does *not* list it.
+
+**Trunk's required checks are `lint`, `typecheck`, the six `test` legs, `bare install (no rich)`, `package`, and CodeQL's `Analyze (actions)` / `Analyze (python)` — twelve.** `package` was added after this list was first written down, and it earns its place: it is the only check exercising the artefact users actually install, building the wheel, installing it into a clean venv and asserting `py.typed` ships. `coverage` is the one check that runs and is deliberately not required — a coverage upload failing, or being skipped on a fork PR with no token, is not a reason to block a merge.
 
 Codacy's bandit engine skips `tests/` — see `.codacy.yaml`, which records why per finding. The short version: 437 of its 447 findings were `assert` used in a pytest suite, where the assert *is* the test, and the rest of the test-only findings were subprocess launches and fake `/tmp` pathnames in row fixtures. `src/` and `examples/` stay in scope, so the ten remaining findings are ones somebody has read and kept. Individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 
-**Every action is pinned to a commit SHA, with its version in a trailing comment.** A git tag is moveable: whoever owns the action can repoint `v4` at different code and every run picks it up with no diff and no review. That matters here because CI holds `contents: write` for the badge and a Codacy token. Bump with `git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'` — the `^{}` dereferences an annotated tag to the commit. The pins are currently unmanaged, so they will go stale; issue #42 holds the Renovate-or-Dependabot decision that would fix that.
+**Every action is pinned to a commit SHA, with its version in a trailing comment.** A git tag is moveable: whoever owns the action can repoint `v4` at different code and every run picks it up with no diff and no review. That matters here because CI holds a Codacy token. Bump with `git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'` — the `^{}` dereferences an annotated tag to the commit. The pins are currently unmanaged, so they will go stale; issue #42 holds the Renovate-or-Dependabot decision that would fix that.
 
 Every job pins its interpreter with `actions/setup-python` *before* `setup-uv`. Without it `uv sync` resolves whatever satisfies `requires-python` and the matrix silently stops testing six versions — verified from run logs that the legs really do run distinct interpreters.
 
