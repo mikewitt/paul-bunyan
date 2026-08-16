@@ -1,19 +1,11 @@
-"""A runnable demonstration of what lumberjack does to ordinary log output.
+"""Log-stream shapes, and what lumberjack currently makes of them.
 
 Run it on a real terminal to see the point:
 
-    uv run python examples/demo.py
-
-Four worker threads log a line per iteration — roughly 2000 records in total,
-the sort of `logger.debug(...)` spam a developer writes while building
-something and then deletes once it works. Instead of scrolling past, each
-repeating log site becomes a bar that advances in place.
-
-Three of the workers run flat loops, so their bars pulse: nothing in the
-stream says how long they are. The fourth nests a loop inside a loop, and
-that *is* visible in the stream — the inner line fires twenty times per outer
-iteration — so its bar promotes itself to a real percentage and indents
-under its parent, with nobody having written a single line of instrumentation.
+    uv run python examples/demo.py                  # the pipeline scenario
+    uv run python examples/demo.py --list           # every shape available
+    uv run python examples/demo.py sequence         # one shape on its own
+    uv run python examples/demo.py --all            # all of them, in order
 
 To see what it replaces, force the plain renderer and watch the same run
 scroll by:
@@ -23,25 +15,74 @@ scroll by:
     # PowerShell:
     $env:LUMBERJACK_OUTPUT_MODE="plain"; uv run python examples/demo.py
 
-Nothing about the worker functions changes between those two runs. They call
-stdlib `logging` and know nothing about lumberjack — which is the entire
-premise: the display is a property of how the application was configured, not
-of how the library was written.
+None of the worker functions know lumberjack exists. They call stdlib
+`logging`, and the display is a property of how the *application* was
+configured — which is the entire premise.
+
+## What this file is for
+
+Two jobs, and the second one is why it is structured as scenarios.
+
+**It demonstrates the package.** The `pipeline` scenario is the original demo
+and still the one to show someone: four threads, ~2000 records, and a nested
+loop that infers its own total with no instrumentation anywhere.
+
+**It is the fixture for designing the display.** Each scenario is a *shape* of
+log stream — not a feature demo but a test case for the question "what should
+a person see here?". Several of them are shapes lumberjack currently handles
+badly or not at all, and they are here precisely for that: you cannot argue
+about how something should look without being able to run it.
+
+So every scenario states three things, and the third is deliberately unsettled:
+
+- **the stream** — what gets logged, factually
+- **today** — what lumberjack does with it now, observed rather than hoped
+- **should be** — the open design question, marked `TBD` where it is open
+
+Filling in the `should be` lines is the work. See "What the display is for" in
+CLAUDE.md for the criterion they are being judged against, and issues #8, #43,
+#53, #54 and #55 for the ones already written down.
+
+## How to log so this works
+
+The shapes below are also the advice, which inverts the usual guidance:
+
+- **Leave the `logger.debug` lines in, and add more.** Density is input
+  quality. A loop that logs once per iteration is a bar; a loop that logs
+  nothing is invisible, and no amount of inference recovers it.
+- **Log inside the body, not around it.** A line before and after a loop says
+  it started and finished. A line *in* it says how fast it is going.
+- **A line per phase of a slow body is worth more than one line per body.**
+  See `sequence`: five lines in a three-second iteration can say where you
+  are within it; one line can only say it happened.
+- **Do not build a logging wrapper without `stacklevel=`.** Identity is the
+  source location, so a shim makes every call site in your program look like
+  one line. See `wrapped`.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import random
 import threading
 import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 import lumberjack
 
 log = logging.getLogger("pipeline")
 
-# Slow enough that the bars visibly move rather than finishing instantly.
+#: Slow enough that bars visibly move rather than finishing instantly.
 TICK = 0.004
+
+
+# --------------------------------------------------------------------------
+# The scenarios. Each is an ordinary program that logs; none is lumberjack
+# aware. Keep them that way — the moment a scenario calls track() it stops
+# being a test of inference.
+# --------------------------------------------------------------------------
 
 
 def extract(count: int) -> None:
@@ -75,7 +116,7 @@ def reconcile(batches: int, rows: int) -> None:
     ratio is both the evidence the loops are nested and the length of the
     inner one — so after a couple of outer iterations the inner line stops
     being a counter and becomes a real bar that fills, resets, and fills
-    again, indented under its parent.
+    again.
     """
     for batch in range(batches):
         log.debug("reconciling batch %d", batch)
@@ -84,37 +125,386 @@ def reconcile(batches: int, rows: int) -> None:
             time.sleep(TICK * 1.25)
 
 
-def main() -> None:
-    # The only lumberjack-aware line in the program.
-    lumberjack.init()
-
-    random.seed(0)
+def run_pipeline() -> None:
     workers = [
         threading.Thread(target=extract, args=(700,), name="extract"),
         threading.Thread(target=transform, args=(450,), name="transform"),
         threading.Thread(target=load, args=(300,), name="load"),
         threading.Thread(target=reconcile, args=(24, 20), name="reconcile"),
     ]
-    for w in workers:
-        w.start()
-    for w in workers:
-        w.join()
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
 
-    # Drain anything the periodic pump hasn't picked up yet, so the summary
-    # below reflects the complete run.
+
+def run_sequence() -> None:
+    """A slow loop whose body narrates its own stages.
+
+    The shape that motivates #53. Every one of these lines fires exactly once
+    per outer iteration, so all five have the *same* period — which the level
+    analysis reads, correctly, as five log lines in one loop body. There is no
+    ratio to take, so no total, so no bar that fills.
+
+    But the information is plainly there: reaching "committing" means this
+    iteration is nearly done. That is ordinal position within a cycle, and the
+    model discards it because it only ever counts and times, never orders.
+    """
+    for batch in range(6):
+        log.debug("batch %d: opening connection", batch)
+        time.sleep(0.30)
+        log.debug("batch %d: fetching manifest", batch)
+        time.sleep(0.30)
+        log.debug("batch %d: validating checksums", batch)
+        time.sleep(0.45)
+        log.debug("batch %d: writing output", batch)
+        time.sleep(0.30)
+        log.debug("batch %d: committing", batch)
+        time.sleep(0.15)
+
+
+def run_siblings() -> None:
+    """One fast loop, several call sites in its body.
+
+    The shape that motivates #8. These lines are one loop by any reasonable
+    reading, and a person wants one row for it. Source location is the right
+    *identity* — it is exact and needs no inference — but it is the wrong
+    *display unit*, and this is the smallest case that shows the difference.
+
+    Scale it up and it is the 800-bar problem: nothing here is granular
+    because the code is badly written, it is granular because the display
+    inherited its unit from the grouping key.
+    """
+    for row in range(400):
+        log.debug("row %d: parsed", row)
+        log.debug("row %d: schema validated", row)
+        log.debug("row %d: enriched from cache", row)
+        log.debug("row %d: emitted downstream", row)
+        time.sleep(TICK * 2)
+
+
+def run_oneshot() -> None:
+    """Startup narration: every line fires exactly once.
+
+    The shape that motivates #54. A source needs repetition to have a period,
+    so none of this draws anything at all — the display is empty while the
+    program is plainly working, which is indistinguishable from hung.
+
+    This is also the honest half of the matplotlib finding: a cold `savefig`
+    logs its font-cache setup and then goes silent for the seconds that
+    actually render. Libraries narrate boundaries, not work.
+    """
+    log.info("reading configuration from /etc/pipeline.toml")
+    time.sleep(0.4)
+    log.info("connecting to warehouse at db.internal:5432")
+    time.sleep(0.6)
+    log.info("negotiated protocol version 3")
+    time.sleep(0.3)
+    log.info("warming schema cache")
+    time.sleep(0.8)
+    log.info("registered 14 table mappings")
+    time.sleep(0.4)
+    log.info("ready")
+
+
+def run_silent() -> None:
+    """Says it started, does three seconds of work, says it finished.
+
+    The case no amount of inference can rescue, and the reason a heartbeat has
+    to stay honest rather than inventing activity: there is genuinely nothing
+    in the stream between the two lines. Whatever the display does here, it
+    must not claim progress it cannot see.
+    """
+    log.info("rendering 2.4M points at dpi=200")
+    time.sleep(3.0)
+    log.info("wrote figure.png")
+
+
+def run_bursty() -> None:
+    """A loop whose iterations vary wildly in length.
+
+    Retirement is 10x the measured period, and promotion needs a ratio stable
+    across consecutive polls, so this is the shape that makes both misbehave:
+    a long pause looks like the loop ended, and the next burst resurrects it.
+
+    Principle 10 says a display that is wrong here is acceptable. This
+    scenario exists so "acceptable" is something you can look at rather than
+    something asserted in a docstring.
+    """
+    rng = random.Random(0)
+    for item in range(40):
+        log.debug("processing item %d", item)
+        # Mostly quick, occasionally a long stall — the distribution that
+        # breaks an average.
+        time.sleep(0.02 if rng.random() < 0.8 else rng.uniform(0.5, 1.2))
+
+
+def run_phases() -> None:
+    """Four loops in sequence, each finishing before the next starts.
+
+    The shape of most scripts, and the one where "what is my program doing"
+    has an obvious answer the display does not currently give. Each loop
+    retires as the next begins, so by the end there are four idle rows and no
+    indication of which one is *now*.
+
+    A retired bar is marked idle in place rather than deleted, deliberately —
+    deleting it would empty the final frame. Whether four idle rows plus one
+    live one is the right thing to *show* is the open part.
+
+    Written as four functions rather than a loop over a table of stages, and
+    that is not style. Identity is the source location, so a data-driven
+    version puts every stage on one `log.debug` line and they become a single
+    source — one row, no retirement, nothing to see. Four stages in a program
+    means four call sites, and this scenario is only honest if it has them.
+    """
+
+    def discover() -> None:
+        for i in range(60):
+            log.debug("found input file %d", i)
+            time.sleep(0.012)
+
+    def parse() -> None:
+        for i in range(200):
+            log.debug("parsed record %d", i)
+            time.sleep(0.006)
+
+    def join() -> None:
+        for i in range(120):
+            log.debug("joined row %d against reference data", i)
+            time.sleep(0.010)
+
+    def write() -> None:
+        for i in range(40):
+            log.debug("wrote partition %d", i)
+            time.sleep(0.020)
+
+    for number, (label, stage) in enumerate(
+        [
+            ("discovering input files", discover),
+            ("parsing records", parse),
+            ("joining against reference data", join),
+            ("writing partitions", write),
+        ],
+        start=1,
+    ):
+        log.info("stage %d: %s", number, label)
+        stage()
+
+
+def _log_via_wrapper(message: str, *args: object) -> None:
+    """A logging shim of the kind people write, missing `stacklevel=2`."""
+    log.debug(message, *args)
+
+
+def run_wrapped() -> None:
+    """Three unrelated loops routed through one logging helper.
+
+    Identity is the source location, so every one of these collapses onto the
+    single `log.debug` line inside `_log_via_wrapper` — one source, three
+    loops' worth of records, and a period that is the interleaving of all
+    three rather than any real one.
+
+    The fix is one keyword (`stacklevel=2`) in the wrapper, which is why this
+    is documented as a limitation with a diagnostic rather than solved by
+    inference (#37). It is here so the failure is visible rather than
+    theoretical.
+    """
+
+    def worker(name: str, count: int, pace: float) -> None:
+        for i in range(count):
+            _log_via_wrapper("%s: item %d", name, i)
+            time.sleep(pace)
+
+    threads = [
+        threading.Thread(target=worker, args=("alpha", 200, 0.008), name="alpha"),
+        threading.Thread(target=worker, args=("beta", 120, 0.014), name="beta"),
+        threading.Thread(target=worker, args=("gamma", 80, 0.021), name="gamma"),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+# --------------------------------------------------------------------------
+# Registry
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """One shape of log stream, and the design question it poses.
+
+    `today` is observed behaviour, not intent — if it stops being true, the
+    scenario has caught a change and the text is the thing to update. `should`
+    is the open question, and `TBD` in it is honest rather than lazy.
+    """
+
+    name: str
+    stream: str
+    today: str
+    should: str
+    run: Callable[[], None]
+
+    @property
+    def settled(self) -> bool:
+        return "TBD" not in self.should
+
+
+SCENARIOS: tuple[Scenario, ...] = (
+    Scenario(
+        name="pipeline",
+        stream="Four threads. Three flat loops and one genuinely nested pair.",
+        today=(
+            "Five bars. The nested inner line infers its own total (20/20) from "
+            "the ratio to its parent. The other four pulse — nothing in the "
+            "stream says how long they are."
+        ),
+        should=(
+            "Mostly right, and the reason this is still the demo to show "
+            "someone. One known defect: the nested child is indented under "
+            "whichever row precedes it, which is an unrelated loop on another "
+            "thread (#43)."
+        ),
+        run=run_pipeline,
+    ),
+    Scenario(
+        name="sequence",
+        stream="A slow loop; its body logs five distinct stages, once each.",
+        today=(
+            "Five sibling bars, each ticking once per outer iteration (~1.5s). "
+            "No sub-iteration progress: equal periods mean no ratio, so no "
+            "total."
+        ),
+        should=(
+            "TBD — the ordinal-position question (#53). Reaching 'committing' "
+            "means the iteration is nearly done, and that is progress the "
+            "model currently throws away because it counts and times but "
+            "never orders."
+        ),
+        run=run_sequence,
+    ),
+    Scenario(
+        name="siblings",
+        stream="One fast loop with four call sites in its body.",
+        today="Four separate bars, all at the same rate, for one loop.",
+        should=(
+            "TBD — one row, labelled by the enclosing function, with the four "
+            "source locations as identity underneath (#8). This is the "
+            "smallest case where display unit and identity unit come apart."
+        ),
+        run=run_siblings,
+    ),
+    Scenario(
+        name="oneshot",
+        stream="Six startup lines, each firing exactly once over ~2.5s.",
+        today="Nothing. No source repeats, so no source earns a bar.",
+        should=(
+            "TBD — a session heartbeat, so working-but-quiet is "
+            "distinguishable from hung, and possibly a counter row per source "
+            "(#54). Whatever it is, it must not imply progress toward an end "
+            "it cannot see."
+        ),
+        run=run_oneshot,
+    ),
+    Scenario(
+        name="silent",
+        stream="One line, three seconds of real work, one more line.",
+        today="Nothing, correctly — there is no signal between the two lines.",
+        should=(
+            "TBD — the honesty test for whatever #54 becomes. This is the "
+            "matplotlib case: 2.76s of rendering emits zero records. A "
+            "heartbeat driven by arrival rate goes quiet here, which is right."
+        ),
+        run=run_silent,
+    ),
+    Scenario(
+        name="bursty",
+        stream="One loop, 80% fast iterations and 20% multi-second stalls.",
+        today=(
+            "A bar that retires as idle during a stall and resurrects on the "
+            "next burst, with a rate that swings by an order of magnitude."
+        ),
+        should=(
+            "TBD — Principle 10 says being wrong here is acceptable. This "
+            "exists so 'acceptable' can be looked at rather than asserted."
+        ),
+        run=run_bursty,
+    ),
+    Scenario(
+        name="phases",
+        stream="Four loops in sequence, each finishing before the next starts.",
+        today=(
+            "Four rows accumulate and finished ones read `idle`, which is the "
+            "intended behaviour. But the once-per-stage announcement line is "
+            "itself a slow repeating source, so containment reads it as an "
+            "enclosing loop: the live stage indents under it and is given a "
+            "total from that ratio — 49 for a stage that runs 40 times."
+        ),
+        should=(
+            "TBD — two questions, and the second was found by running this. "
+            "The screen budget (#8): idle rows keep the final frame from being "
+            "empty, but whether they hold full-width rows while something else "
+            "is live is open. And a sequential announcement is not a parent — "
+            "period ordering alone cannot tell 'A encloses B' from 'A precedes "
+            "B', which is the same blind spot #53's ordering data would close."
+        ),
+        run=run_phases,
+    ),
+    Scenario(
+        name="wrapped",
+        stream="Three unrelated loops, all routed through one logging helper.",
+        today=(
+            "One bar. Every call site collapses onto the wrapper's `log.debug` "
+            "line, and its period is the interleaving of three loops."
+        ),
+        should=(
+            "Detect the collapse and say so at exit, pointing at "
+            "`stacklevel=2` (#37). Deliberately not fixed by inference — the "
+            "one-keyword fix belongs in the user's wrapper."
+        ),
+        run=run_wrapped,
+    ),
+)
+
+BY_NAME = {scenario.name: scenario for scenario in SCENARIOS}
+
+
+# --------------------------------------------------------------------------
+# Reporting
+# --------------------------------------------------------------------------
+
+
+def _wrap(text: str, width: int, indent: str) -> Iterator[str]:
+    line: list[str] = []
+    length = 0
+    for word in text.split():
+        if length + len(word) + len(line) > width and line:
+            yield indent + " ".join(line)
+            line, length = [], 0
+        line.append(word)
+        length += len(word)
+    if line:
+        yield indent + " ".join(line)
+
+
+def _report(scenario: Scenario) -> None:
+    """Print what the run actually produced, after the display is down.
+
+    Read out of the store rather than tracked alongside it: the point of the
+    package is that the store is lossless whatever the display did, and a
+    summary that kept its own counters would not be demonstrating that.
+    """
     lumberjack.flush()
-
-    # The accessors return None before init() and after shutdown(), so a
-    # type checker will make you say why you know better. init() ran above.
     store = lumberjack.current_store()
-    assert store is not None
-    # n=None is the explicit "all of it", which `recent()` no longer
-    # assumes: the summary below counts every record, and a default cap
-    # would quietly under-report it.
+    assert store is not None, "init() ran, so there is a store"
     records = store.recent(n=None)
     by_source = sorted(store.count_by_source().items(), key=lambda kv: -kv[1])
-    renderer_name = type(lumberjack.current_renderer()).__name__
-    mode = lumberjack.current_output_mode()
+
+    by_thread: dict[str, int] = {}
+    for record in records:
+        by_thread[record.thread_name] = by_thread.get(record.thread_name, 0) + 1
+    above_debug = [r for r in records if r.level_no >= logging.WARNING]
 
     # Everything the summary needs is now in local variables, so the display
     # comes down *before* a line of it is printed. A program's own output and
@@ -123,27 +513,70 @@ def main() -> None:
     # printing over a live frame is how a summary ends up shredded.
     lumberjack.shutdown()
 
-    print("\n--- the display was lossy; the store was not ---")
-    print(f"records captured : {len(records)}")
-    print(f"renderer         : {renderer_name}")
-    print(f"output mode      : {mode}")
+    print(f"\n=== {scenario.name} ===")
+    for label, text in (
+        ("stream", scenario.stream),
+        ("today", scenario.today),
+        ("should be", scenario.should),
+    ):
+        wrapped = list(_wrap(text, 66, " " * 12))
+        print(f"  {label:<9} {wrapped[0].strip()}")
+        for line in wrapped[1:]:
+            print(line)
 
-    print("\nrecords per log site (this grouping is what drives the bars):")
+    plural = "" if len(by_source) == 1 else "s"
+    print(f"\n  {len(records)} records over {len(by_source)} source location{plural}")
     for source, count in by_source:
-        print(f"  {source.func_name:<12} line {source.lineno:<4} {count:>5} records")
+        print(f"    {source.func_name:<22} line {source.lineno:<5} {count:>5} records")
+    if len(by_thread) > 1:
+        print("\n  by worker (attributed at write time, never inferred):")
+        for name, count in sorted(by_thread.items(), key=lambda kv: -kv[1]):
+            print(f"    {name:<22} {count:>5} records")
+    if above_debug:
+        print(f"\n  shown above the bars, and still stored: {len(above_debug)}")
+        for record in above_debug:
+            print(f"    {record.level_name} {record.message}")
 
-    print("\nrecords per thread (attributed at write time, never inferred):")
-    by_thread: dict[str, int] = {}
-    for record in records:
-        by_thread[record.thread_name] = by_thread.get(record.thread_name, 0) + 1
-    for name, count in sorted(by_thread.items(), key=lambda kv: -kv[1]):
-        print(f"  {name:<12} {count:>5} records")
 
-    warnings = [r for r in records if r.level_no >= logging.WARNING]
-    print(f"\nwarnings (shown above the bars, and still stored): {len(warnings)}")
-    for record in warnings:
-        print(f"  {record.level_name} {record.message}")
+def _run(scenario: Scenario) -> None:
+    # One session per scenario: each gets a clean store, so the counts below
+    # describe that shape rather than everything run so far.
+    lumberjack.init()
+    try:
+        scenario.run()
+    finally:
+        _report(scenario)
+
+
+def _list() -> None:
+    print("Log-stream shapes. Run one with: python examples/demo.py <name>\n")
+    for scenario in SCENARIOS:
+        mark = " " if scenario.settled else "*"
+        print(f" {mark} {scenario.name:<10} {scenario.stream}")
+    print("\n  * = the display's answer here is still an open question.")
+    print("    See 'What the display is for' in CLAUDE.md.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "scenario",
+        nargs="?",
+        default="pipeline",
+        choices=[s.name for s in SCENARIOS],
+        help="which shape to run (default: pipeline)",
+    )
+    parser.add_argument("--list", action="store_true", help="describe every shape")
+    parser.add_argument("--all", action="store_true", help="run all of them, in order")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        _list()
+        return 0
+    for scenario in SCENARIOS if args.all else [BY_NAME[args.scenario]]:
+        _run(scenario)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

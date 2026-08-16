@@ -65,26 +65,28 @@ the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-demo.py:49 extract()     ━━━━━━━━━━━━━━━━━━━━━ 700 records         229/s 0:00:02
-  demo.py:83 reconcile() ━━━━━━━━━━━━━━━━━━━╸━ 19/20 · 480 records 191/s 0:00:02
-demo.py:55 transform()   ━━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
-demo.py:66 load()        ━━━━━━━━━━━━━━━━━━━━━ 300 records         96/s  0:00:02
-demo.py:81 reconcile()   ━━━━━━━━━━━━━━━━━━━━━ 24 records          10/s  0:00:02
+demo.py:90 extract()      ━━━━━━━━━━━━━━━━━━━━ 700 records         238/s 0:00:02
+  demo.py:124 reconcile() ━━━━━━━━━━━━━━━━━━━╺ 19/20 · 480 records 191/s 0:00:02
+demo.py:96 transform()    ━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
+demo.py:107 load()        ━━━━━━━━━━━━━━━━━━━━ 300 records         98/s  0:00:02
+demo.py:122 reconcile()   ━━━━━━━━━━━━━━━━━━━━ 24 records          9/s   0:00:02
 ```
 
 One bar per source location, no concurrency-specific setup. Three of those
 loops are flat, so their bars only count and pace: nothing in the stream says
 how long they are, and claiming otherwise would be a guess. `reconcile` runs a
-loop inside a loop, and *that* is in the stream — line 83 fires twenty times
-between consecutive firings of line 81 — so it draws indented under its
-parent with a real `19/20`, from a total nobody declared. When a loop goes
-quiet for long enough its bar fills and reads `idle`.
+loop inside a loop, and *that* is in the stream — line 124 fires twenty times
+between consecutive firings of line 122 — so it draws indented with a real
+`19/20`, from a total nobody declared. When a loop goes quiet for long enough
+its bar fills and reads `idle`.
 
 Two things this deliberately does not do. It does not group by worker: two
 threads running the same loop share a bar, though thread and process are
 recorded on every record and *are* what stop two unrelated loops being read as
-nested. And it does not move a bar once drawn, which is why the indented child
-above sits above its parent rather than beneath it — see
+nested. And it does not move a bar once drawn — which is why the indented
+child above is sitting under `extract`, an unrelated loop on another thread,
+rather than under the `reconcile` line it actually belongs to. That one is a
+real defect, not a trade-off; see
 [#43](https://github.com/mikewitt/paul-bunyan/issues/43).
 
 Inference is an 80% solution on purpose, and it will be wrong sometimes. When
@@ -116,6 +118,20 @@ LUMBERJACK_OUTPUT_MODE=plain uv run python examples/demo.py   # the scrolling th
 The worker functions are identical between those two runs and know nothing
 about lumberjack. That is the point: the display is a property of how the
 application was configured, not of how the code was written.
+
+The demo carries other shapes of log stream too — a slow loop narrating its
+own stages, one loop with several call sites in its body, startup lines that
+never repeat, a wrapper that collapses every call site onto one:
+
+```bash
+uv run python examples/demo.py --list       # every shape, and what it exercises
+uv run python examples/demo.py sequence     # one of them on its own
+```
+
+Several are shapes lumberjack currently handles badly, and they are in there
+for that reason — each states what it logs, what the display does with it
+today, and what it *should* do, with the open questions marked. They are the
+working material for the display design, not a feature tour.
 
 #### `init()` is for applications, never libraries
 
