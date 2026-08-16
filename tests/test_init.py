@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+import threading
 
 import pytest
 
@@ -300,3 +301,55 @@ def test_a_store_init_created_is_closed_when_teardown_refuses(monkeypatch):
     with pytest.raises(RuntimeError, match="teardown already installed"):
         lumberjack.init(output_mode="plain")
     assert closed == [True], "init() leaked the store it created"
+
+
+# --- thread safety (#11) ----------------------------------------------------
+
+
+def test_flush_during_shutdown_does_not_hit_a_closed_store():
+    """The reachable race, and the reason this needs a lock at all.
+
+    A worker calling `flush()` reads the session, then writes to that
+    session's store. `shutdown()` closing the store in between raises
+    `sqlite3.ProgrammingError` — not inside lumberjack, but out of the
+    worker's own `flush()` call. This package is aimed squarely at concurrent
+    programs, so that is not an exotic interleaving.
+
+    Forced rather than raced: the store's `append` blocks until released, so
+    the worker is provably inside the critical section when `shutdown()`
+    starts. A timer releases it, because the main thread is by then blocked on
+    the lock and cannot release anything itself.
+    """
+    lumberjack.init(output_mode="plain", flush_interval=0)
+    store = lumberjack.current_store()
+    assert store is not None
+
+    inside_append = threading.Event()
+    release = threading.Event()
+    real_append = store.append
+
+    def blocking_append(rows):
+        inside_append.set()
+        release.wait(5)
+        real_append(rows)
+
+    store.append = blocking_append
+    logging.getLogger().warning("something to flush")
+
+    escaped: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            lumberjack.flush()
+        except BaseException as exc:  # noqa: BLE001 - recording it is the test
+            escaped.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert inside_append.wait(5), "worker never reached the store write"
+
+    threading.Timer(0.2, release.set).start()
+    lumberjack.shutdown()
+    thread.join(5)
+
+    assert not escaped, f"flush() raised into the caller: {escaped}"
