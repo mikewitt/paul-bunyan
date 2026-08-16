@@ -9,7 +9,12 @@ import time
 import pytest
 
 from lumberjack.schema import SourceKey
-from lumberjack.store import _COLUMNS, SQLiteRecordStore, WorkerKey
+from lumberjack.store import (
+    _COLUMNS,
+    DEFAULT_RECENT_LIMIT,
+    SQLiteRecordStore,
+    WorkerKey,
+)
 
 
 def test_append_and_recent(store, make_row):
@@ -394,3 +399,41 @@ def test_the_source_delta_still_folds_per_worker_rows_back_together(store, make_
     key = SourceKey("/tmp/foo.py", 10, "bar")
     assert delta.counts[key] == 3
     assert (delta.first_at[key], delta.last_at[key]) == (100.0, 102.0)
+
+
+# --- recent() is bounded by default (#7) ------------------------------------
+
+
+def test_recent_is_bounded_by_default(store, make_row):
+    """`recent()` is the documented way to query captured records, and the
+    unbounded form builds one dataclass per row — multi-second and half a
+    million objects at the retention target, from a call that looks free."""
+    store.append([make_row(message=str(i)) for i in range(DEFAULT_RECENT_LIMIT + 25)])
+    assert len(store.recent()) == DEFAULT_RECENT_LIMIT
+
+
+def test_the_default_keeps_the_newest_records(store, make_row):
+    """Bounded from the newest end, oldest-first within that — a tail, not a
+    head. Returning the *first* 1000 of a long run would be worse than
+    useless."""
+    store.append([make_row(message=str(i)) for i in range(DEFAULT_RECENT_LIMIT + 3)])
+    rows = store.recent()
+    assert rows[-1].message == str(DEFAULT_RECENT_LIMIT + 2)
+    assert rows[0].message == "3"
+
+
+def test_recent_none_still_means_everything(store, make_row):
+    """The escape hatch stays, it just has to be asked for."""
+    store.append([make_row() for _ in range(DEFAULT_RECENT_LIMIT + 25)])
+    assert len(store.recent(n=None)) == DEFAULT_RECENT_LIMIT + 25
+
+
+def test_the_default_does_not_override_an_explicit_since(store, make_row):
+    """`n` and `since` compose as "the last n of those at or after since",
+    and the default `n` must not change what `since` alone would select."""
+    now = time.time()
+    store.append(
+        [make_row(created=now - 100, message="old")]
+        + [make_row(created=now, message=str(i)) for i in range(5)]
+    )
+    assert [r.message for r in store.recent(since=now - 10)] == list("01234")

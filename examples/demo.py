@@ -108,7 +108,10 @@ def main() -> None:
     # type checker will make you say why you know better. init() ran above.
     store = lumberjack.current_store()
     assert store is not None
-    records = store.recent()
+    # n=None is the explicit "all of it", which `recent()` no longer
+    # assumes: the summary below counts every record, and a default cap
+    # would quietly under-report it.
+    records = store.recent(n=None)
     by_source = sorted(store.count_by_source().items(), key=lambda kv: -kv[1])
     renderer_name = type(lumberjack.current_renderer()).__name__
     mode = lumberjack.current_output_mode()
