@@ -371,5 +371,24 @@ uv run pytest
 uv run ruff check .
 uv run black --check .
 uv run mypy --strict src
-uv run mypy tests examples
+uv run mypy tests examples benchmarks
 ```
+
+### What it costs to leave the logging in
+
+`benchmarks/capture.py` measures the capture path against the alternatives a
+developer actually has — no logging at all, a `logger.debug` the level throws
+away, stdlib to a `NullHandler`, stdlib to a file, then lumberjack in each of
+its three output modes.
+
+```bash
+uv run python benchmarks/capture.py                    # the table
+uv run python benchmarks/capture.py --records 200000 --json
+```
+
+Read the **ratios**, not the nanoseconds: absolutes move with the machine and
+the interpreter build, while the relationship between the arms is what a
+regression would disturb. The script exits non-zero if any arm lost records,
+which makes it a check as well as a report — and `tests/test_benchmark.py`
+runs it at a tiny record count on every suite run, so it cannot rot against
+an API change between the times somebody looks at the numbers.

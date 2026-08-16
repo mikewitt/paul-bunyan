@@ -107,7 +107,7 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 - **A `TaskHandle` parents only inside a `with`,** and out-of-order resets are handled rather than prevented. Only `__enter__` sets the ambient contextvar and only `__exit__` clears it, so a handle used bare holds no token and cannot be the one whose reset misfires. That is *not* enough to make out-of-order resets impossible: `with` is LIFO only within one frame, two suspended generators each holding one interleave freely, and `ContextVar.reset()` does **not** raise for an out-of-order token from the same Context — it silently writes the old value back. So the ambient slot is never trusted directly. `_unbind()` resets only while still the current binding, and `_ambient_parent()` walks past any handle that has already ended, following where each was *entered* rather than where it was created. Both guards are load-bearing and separately mutation-tested; a bug was found here twice.
 - **`.subtask()` takes its parent as `self`,** never from ambient context, because contextvars propagate into asyncio tasks but **not** into a bare `threading.Thread`. It must also build the child's OTel context from `self._span`, or the log and span hierarchies disagree in exactly that threaded case.
 - **`GeneratorExit` is not a task failure.** It is what a user's generator receives when the consumer stops early, so a plain `break` must not put a traceback on the ERROR channel — the one line a user is guaranteed to see — or mark the span failed. `track()`'s own early `break` already records a clean end; a bare `with` inside a generator has to agree.
-- **Progress ticks are sampled; the `end` row is not.** `advance()` emits at most one record per 50ms. The unconditional reason is that non-TTY output is write-through, one line per record, so per-item ticks print a million lines for a million-item loop — the disease the package exists to cure, caused by the cure. A second reason is real but machine-dependent and should not be quoted as a law: an unsampled loop measures ~59,000 records/s through the handler alone and ~24,000 with the JSON-lines renderer, against a 50,000/s drain ceiling, so fast hardware overflows lumberjack's own buffer and trips its own dropped-records warning while slower hardware does not. (An earlier note here claimed 85,000/s unconditionally; it did not reproduce — measure before quoting.) Nothing is lost either way, because `progress_current` is **absolute**, not a delta, and `end()` writes the final count unsampled. Do not "fix" a bar that looks coarse by lowering the interval.
+- **Progress ticks are sampled; the `end` row is not.** `advance()` emits at most one record per 50ms. The unconditional reason is that non-TTY output is write-through, one line per record, so per-item ticks print a million lines for a million-item loop — the disease the package exists to cure, caused by the cure. A second reason is real but machine-dependent and should not be quoted as a law: an unsampled loop can emit faster than the pump drains, so fast hardware overflows lumberjack's own buffer and trips its own dropped-records warning while slower hardware does not. **Do not quote a number for this from memory — run `benchmarks/capture.py`.** Three different figures have been written down here (85,000/s, then 59,000/s, then 85,000/s again on a third box) and each contradicted the last, which is why the benchmark exists and why this sentence no longer carries one. What is durable is the *shape*: a write-through renderer costs per record and a live bar does not, so plain and JSON are several times more expensive per call than rich, and the buffer→store drain is a ceiling above which records are evicted rather than the loop being slowed. Nothing is lost either way, because `progress_current` is **absolute**, not a delta, and `end()` writes the final count unsampled. Do not "fix" a bar that looks coarse by lowering the interval.
 - **Spans are attached unconditionally, never gated on `is_recording()`.** That is also False for a span the provider sampled out, so gating on it breaks parent/child propagation under head sampling — silently, and only in production.
 
 ### Record schema
@@ -193,9 +193,24 @@ The full local gate, which is what CI runs:
 ```bash
 uv sync --all-extras
 uv run ruff check . && uv run black --check .
-uv run mypy --strict src && uv run mypy tests examples
+uv run mypy --strict src && uv run mypy tests examples benchmarks
 uv run pytest
 ```
+
+### Benchmarking
+
+`benchmarks/capture.py` answers the question the pitch depends on: what does it cost to leave the debug logging in? Seven arms — no logging, a `logger.debug` the level discards, stdlib to a `NullHandler`, stdlib to a file, then lumberjack in `plain` / `json` / `rich` — so the package is measured against the alternatives a developer actually has rather than against zero.
+
+Four things about its construction are deliberate and should survive edits:
+
+- **Two numbers per arm, because either alone lies.** *In-loop* is time inside the logging call, which is what the calling thread feels. *Total* adds the drain, forced with a final `flush()`. lumberjack defers the drain to a background thread, so in-loop understates the true cost and total overstates the felt one.
+- **The buffer is sized to the run.** At the default 10,000 a fast loop outruns the pump, the buffer evicts, and the row measures how quickly lumberjack discards a record — a different question, and one the separate `measure_drain()` answers properly. A row that lost records is not a measurement, so it is annotated and the script exits non-zero.
+- **Minimum of repeats, not mean.** Every noise source here adds time, so the fastest run is the closest to the real cost.
+- **`stored` is a correctness check, not a statistic.** `dropped == 0` only says the buffer never evicted; comparing `stored` against records-plus-warmup says they reached the store, which is Principle 6's actual promise.
+
+The drain figure it prints is the **batched best case** — one `flush()` of the whole run against the pump's many small timer-driven batches. It is an upper bound, not a rate to plan against.
+
+**Ratios are the durable part; nanoseconds are not.** They move with the machine, the interpreter build and what else is on the box — see the sampling note above for three mutually contradictory absolute figures that were each written down as fact. `tests/test_benchmark.py` runs the script at 200 records on every suite run and asserts only that it executes and loses nothing, deliberately never on timings: at that size the numbers are noise, and a threshold would fail on a busy CI runner. It exists so the benchmark cannot rot against an API change between the times somebody looks at the output. Making it a CI gate would need ratio-based thresholds against a recorded baseline, and is not worth doing until there is a baseline worth defending.
 
 ### CI
 
