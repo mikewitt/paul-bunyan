@@ -6,8 +6,8 @@ on:
   pull_request:
 
 # Least privilege throughout, and no job opts back up. Nothing here writes to
-# the repository: the coverage badge is served by Codacy from the uploaded
-# report rather than committed as a file.
+# the repository: the coverage badge is served by Codacy from the report the
+# `coverage` job uploads, rather than committed as a file.
 permissions:
   contents: read
 
@@ -170,14 +170,10 @@ jobs:
           print("wheel smoke test passed")
           EOF
 
-  coverage-badge:
-    # The name is now wrong — this job uploads coverage and draws no badge,
-    # since Codacy renders that from the uploaded report. Kept anyway, and
-    # deliberately: `name:` is the check name GitHub reports, and trunk's
-    # branch protection lists it, so renaming orphans a required check and
-    # blocks merges until someone edits the ruleset to match. Same reasoning
-    # as the `bare install (no rich)` job above. Both are worth renaming
-    # together, once, alongside the settings change.
+  coverage:
+    # Renamed from `coverage-badge` when the badge moved to Codacy. Safe to
+    # rename because trunk's branch protection does not list this job —
+    # unlike `bare install (no rich)` above, whose stale name has to stay.
     #
     # Coverage comes from this single ubuntu/3.12 run, not from all six
     # `test` legs. The union across legs would be a shade higher — the
