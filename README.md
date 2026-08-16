@@ -386,9 +386,29 @@ uv run python benchmarks/capture.py                    # the table
 uv run python benchmarks/capture.py --records 200000 --json
 ```
 
-Read the **ratios**, not the nanoseconds: absolutes move with the machine and
-the interpreter build, while the relationship between the arms is what a
-regression would disturb. The script exits non-zero if any arm lost records,
-which makes it a check as well as a report — and `tests/test_benchmark.py`
-runs it at a tiny record count on every suite run, so it cannot rot against
-an API change between the times somebody looks at the numbers.
+**Quote the ratios, not the nanoseconds.** Absolutes move with the machine and
+the interpreter build; the relationship between the arms is what survives the
+trip to someone else's box.
+
+To track a change across features, record a baseline and diff against it:
+
+```bash
+uv run python benchmarks/capture.py --json > benchmarks/baseline.local.json
+uv run python benchmarks/capture.py --compare benchmarks/baseline.local.json
+```
+
+Comparison works on the **absolute** per-arm numbers, not the ratios — on one
+machine the ratios have a tiny, noisy denominator and travel worse than what
+they are built from. Baselines are gitignored, and `--compare` withholds its
+verdicts unless the record count, the repeat count and the machine fingerprint
+all match, so a diff can never quietly span two boxes.
+
+Two limits, both measured rather than assumed: the instrument cannot resolve a
+change below about **5%**, and per-record cost is run-length dependent below
+~50k records, so a baseline is only comparable at the `--records` it was taken
+at. Two runs of unchanged code should read `noise` on every row.
+
+The script exits non-zero if any arm lost records, which makes it a check as
+well as a report — and `tests/test_benchmark.py` runs it at a tiny record count
+on every suite run, so it cannot rot against an API change between the times
+somebody looks at the numbers.

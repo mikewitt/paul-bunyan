@@ -201,16 +201,35 @@ uv run pytest
 
 `benchmarks/capture.py` answers the question the pitch depends on: what does it cost to leave the debug logging in? Seven arms — no logging, a `logger.debug` the level discards, stdlib to a `NullHandler`, stdlib to a file, then lumberjack in `plain` / `json` / `rich` — so the package is measured against the alternatives a developer actually has rather than against zero.
 
-Four things about its construction are deliberate and should survive edits:
+Five things about its construction are deliberate and should survive edits:
 
 - **Two numbers per arm, because either alone lies.** *In-loop* is time inside the logging call, which is what the calling thread feels. *Total* adds the drain, forced with a final `flush()`. lumberjack defers the drain to a background thread, so in-loop understates the true cost and total overstates the felt one.
 - **The buffer is sized to the run.** At the default 10,000 a fast loop outruns the pump, the buffer evicts, and the row measures how quickly lumberjack discards a record — a different question, and one the separate `measure_drain()` answers properly. A row that lost records is not a measurement, so it is annotated and the script exits non-zero.
-- **Minimum of repeats, not mean.** Every noise source here adds time, so the fastest run is the closest to the real cost.
-- **`stored` is a correctness check, not a statistic.** `dropped == 0` only says the buffer never evicted; comparing `stored` against records-plus-warmup says they reached the store, which is Principle 6's actual promise.
+- **Minimum of repeats, not mean, and the raw repeats are kept beside it.** The noise is one-sided — every source of it adds time and none subtracts — so the distribution is right-skewed and its lower envelope is the most reproducible feature. Measured across repeated runs the minimum was as stable as or better than the median in 12 of 14 arm×metric cells; mean±stddev is worse on both counts, since the mean tracks box load and the standard deviation assumes a symmetry the data lacks. The per-repeat values are retained anyway, because the minimum alone cannot say whether a delta cleared the noise, and because a later comparison can then compute a statistic this version did not think of without invalidating baselines already on disk.
+- **`stored` is a correctness check, not a statistic.** `dropped == 0` only says the buffer never evicted; comparing `stored` against records-plus-warmup says they reached the store, which is Principle 6's actual promise. Both checks run over **every** repeat, not the fastest one — an earlier version carried the fastest repeat's notes while reporting the worst repeat's drop count, so a set where only a slow repeat overflowed printed `dropped=500` and still exited zero. `tests/test_benchmark.py` drives that aggregation with stub samples, because no end-to-end run catches it.
+- **The floor arm declares itself with `Arm.emits`,** rather than the setup function's name being sniffed. Renaming `_no_logging` under the old scheme silently demoted the floor to a second filtered-out arm — every "vs floor" ratio shrinking about tenfold — and nothing asserted otherwise, since the corrupted floor was still the cheapest row.
 
 The drain figure it prints is the **batched best case** — one `flush()` of the whole run against the pump's many small timer-driven batches. It is an upper bound, not a rate to plan against.
 
-**Ratios are the durable part; nanoseconds are not.** They move with the machine, the interpreter build and what else is on the box — see the sampling note above for three mutually contradictory absolute figures that were each written down as fact. `tests/test_benchmark.py` runs the script at 200 records on every suite run and asserts only that it executes and loses nothing, deliberately never on timings: at that size the numbers are noise, and a threshold would fail on a busy CI runner. It exists so the benchmark cannot rot against an API change between the times somebody looks at the output. Making it a CI gate would need ratio-based thresholds against a recorded baseline, and is not worth doing until there is a baseline worth defending.
+#### What the instrument can and cannot resolve
+
+Measured on a 4-vCPU shared Xeon, and the reason `--repeats` defaults to 5 rather than 3:
+
+| | |
+|---|---|
+| Within one process, 10 repeats | MAD 0.5–2.4% of median; spread 2.5–11.3%; **every** outlier high, none low |
+| Reported minimum, run-to-run, `--repeats 3` | 7–13% |
+| Reported minimum, run-to-run, `--repeats 5`, quiet box | 1.3–5.6% |
+| Ratio against the floor, run-to-run | 8–12% |
+| `measure_drain()`, run-to-run | 13.7% |
+
+So **a sub-5% change is invisible to a single before/after pair** on this class of machine. That is a property of the instrument, and `--compare` says so rather than implying precision it does not have: verdicts are `noise` unless the two runs' repeat *ranges* are disjoint, and `suspect` when they are disjoint but the delta is under 5%. Range-disjointness rather than a t-test because five samples of a skewed one-sided distribution do not meet a parametric test's assumptions, and a reader can check non-overlap by eye against the spreads printed beside it.
+
+**Per-record cost is run-length dependent, so a baseline is only valid at its own `--records`.** The write-through modes measure ~25µs/record at 10k and ~44µs at 200k; the stdlib arms and rich are flat. The cause is the pump regime — a 10k run finishes in ~0.24s, barely one 200ms tick, so it never pays steady-state contention. The default of 100k sits in the steady state deliberately. It is *not* store growth across repeats: each `_measure()` re-runs `init()`/`shutdown()` against a fresh `:memory:` store, and later repeats measured slightly faster, so the min-of-repeats estimator is not biased by it.
+
+**Ratios are what travels between machines; absolutes are what to diff on one.** This inverts for comparison and the distinction matters: run-to-run on one box the ratios are *less* stable than the absolutes they are built from, because the denominator is 12ns of pure loop overhead carrying its own noise. Quote ratios in prose — see the sampling note above for three mutually contradictory absolute figures each written down as fact — and let `--compare` read absolutes.
+
+**Baselines are gitignored (`benchmarks/*.local.json`), never committed,** and `--compare` withholds verdicts when the record count, repeat count or machine fingerprint differs. Committing one would recreate precisely the failure the sampling note records. `tests/test_benchmark.py` also runs the script end to end at 200 records on every suite run, asserting only that it executes and loses nothing — never on timings, which at that size are noise and would flap on a busy CI runner. Making it a CI *gate* needs a dedicated runner, which does not exist; that decision lives in its own issue rather than being relitigated here.
 
 ### CI
 
