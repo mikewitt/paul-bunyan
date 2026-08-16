@@ -98,7 +98,8 @@ def main() -> None:
 
     store = lumberjack.current_store()
     assert store is not None  # init() ran above
-    records = store.recent()
+    # Explicitly unbounded — see the note in demo.py.
+    records = store.recent(n=None)
     events = [r for r in records if r.task_event]
 
     # Display down before the summary goes out — see the note in demo.py.

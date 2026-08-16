@@ -73,6 +73,32 @@ def init(
     Failing partway through leaves the process as it was found: a store
     created here is closed again rather than left open and unreachable.
     """
+    # The whole body, because the "already installed?" check and the publish
+    # that satisfies it are far apart: two threads racing here would both pass
+    # the check and the second would silently orphan the first's handler.
+    with _registry.registry_lock():
+        return _init_locked(
+            level=level,
+            output_mode=output_mode,
+            buffer_size=buffer_size,
+            store=store,
+            replace_handlers=replace_handlers,
+            dump_last_n=dump_last_n,
+            flush_interval=flush_interval,
+        )
+
+
+def _init_locked(
+    *,
+    level: int,
+    output_mode: OutputMode | str | None,
+    buffer_size: int,
+    store: RecordStore | None,
+    replace_handlers: bool,
+    dump_last_n: int,
+    flush_interval: float,
+) -> LumberjackHandler:
+    """`init()`'s body, with `registry_lock()` already held."""
     if _registry.current_session() is not None:
         raise RuntimeError(
             "lumberjack.init() already called; call lumberjack.shutdown() first"
@@ -143,31 +169,48 @@ def shutdown() -> None:
     session = _registry.current_session()
     if session is None:
         return
+    # Before the lock, and it has to be: `stop()` joins the pump thread, and
+    # that thread spends its life calling `flush()`, which takes this lock.
+    # Joining it from inside the lock deadlocks on the first tick that
+    # overlaps. Once `stop()` returns the pump is dead and cannot re-enter.
     if session.pump is not None:
         session.pump.stop()
-    flush()
-    # A live display owns a timer thread and the terminal; leaving it running
-    # past shutdown() would leak both.
-    session.renderer.close()
-    teardown.uninstall()
-    root = logging.getLogger()
-    root.removeHandler(session.handler)
-    for h in session.prev_handlers:
-        root.addHandler(h)
-    root.setLevel(session.prev_level)
-    if session.owns_store:
-        session.store.close()
-    _registry.set_current_session(None)
+    with _registry.registry_lock():
+        session = _registry.current_session()
+        if session is None:
+            # Another thread shut down while this one was stopping the pump.
+            return
+        flush()
+        # A live display owns a timer thread and the terminal; leaving it
+        # running past shutdown() would leak both.
+        session.renderer.close()
+        teardown.uninstall()
+        root = logging.getLogger()
+        root.removeHandler(session.handler)
+        for h in session.prev_handlers:
+            root.addHandler(h)
+        root.setLevel(session.prev_level)
+        if session.owns_store:
+            session.store.close()
+        _registry.set_current_session(None)
 
 
 def flush() -> None:
-    """Drain the handler's buffer into the store on demand."""
-    session = _registry.current_session()
-    if session is None:
-        return
-    rows = session.handler.drain()
-    if rows:
-        session.store.append(rows)
+    """Drain the handler's buffer into the store on demand.
+
+    Holds `registry_lock()` across the read and the write. Without it a
+    concurrent `shutdown()` can close the store between them, and the append
+    raises `sqlite3.ProgrammingError` into whichever thread called this —
+    which for the pump is lumberjack's own, but for anyone calling `flush()`
+    by hand is theirs.
+    """
+    with _registry.registry_lock():
+        session = _registry.current_session()
+        if session is None:
+            return
+        rows = session.handler.drain()
+        if rows:
+            session.store.append(rows)
 
 
 def is_initialized() -> bool:

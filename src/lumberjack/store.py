@@ -82,6 +82,17 @@ class TaskDelta(NamedTuple):
     last_id: int
 
 
+#: How many records `recent()` returns when the caller does not say.
+#:
+#: Bounded by default because `recent()` is the documented way to query
+#: captured records, and the unbounded form materializes one dataclass per
+#: row: at the ~1M-record retention target that is roughly nine seconds and
+#: half a million live objects, from a call that looks free. A cap is the
+#: wrong answer for the rare caller who genuinely wants everything and the
+#: right one for everybody else, so `n=None` still means "all of it" — it
+#: just has to be asked for now.
+DEFAULT_RECENT_LIMIT = 1000
+
 _COLUMNS = (
     "logger_name",
     "level_name",
@@ -124,8 +135,22 @@ class RecordStore(abc.ABC):
 
     @abc.abstractmethod
     def recent(
-        self, n: int | None = None, since: float | None = None
-    ) -> Sequence[StoredRecord]: ...
+        self,
+        n: int | None = DEFAULT_RECENT_LIMIT,
+        since: float | None = None,
+    ) -> Sequence[StoredRecord]:
+        """The most recent records, oldest first.
+
+        `n` bounds how many are returned, counting back from the newest;
+        `None` means every match, which at the retention target is a
+        multi-second call and half a million objects. `since` filters to
+        records at or after a `time.time()` timestamp. Given both, the two
+        compose as "the last `n` of those at or after `since`".
+
+        Oldest-first even though the newest are the ones selected, because
+        every consumer — the exit dump, the examples, a human reading a tail
+        — wants them in the order they happened.
+        """
 
     @abc.abstractmethod
     def count_by_template(
@@ -257,9 +282,10 @@ class SQLiteRecordStore(RecordStore):
         return StoredRecord(id=row["id"], **kwargs)
 
     def recent(
-        self, n: int | None = None, since: float | None = None
+        self,
+        n: int | None = DEFAULT_RECENT_LIMIT,
+        since: float | None = None,
     ) -> Sequence[StoredRecord]:
-        # n=None materializes the whole store. lumberjack: see issue #7
         sql = "SELECT * FROM records"
         params: list[object] = []
         if since is not None:

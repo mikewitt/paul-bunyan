@@ -232,7 +232,7 @@ lumberjack.flush()                  # drain the buffer into the store right now
 store = lumberjack.current_store()
 assert store is not None            # None before init() and after shutdown()
 
-records = store.recent()            # everything, oldest first
+records = store.recent()            # the last 1000, oldest first
 print(len(records))                 # 1000
 print(records[-1].message)          # processed item 999
 print(records[-1].thread_name)      # MainThread
@@ -240,7 +240,11 @@ print(records[-1].func_name, records[-1].lineno)
 ```
 
 `recent()` takes `n` (the last n, still oldest first) or `since` (an epoch
-timestamp); with neither, it returns the lot. Each record carries stdlib
+timestamp), and the two compose as "the last `n` of those at or after
+`since`". `n` defaults to 1000 rather than to everything — at the million-record
+retention target the unbounded form is a multi-second call that builds half a
+million objects, which is a surprising bill for something that looks free.
+Pass `n=None` when you do want the lot. Each record carries stdlib
 `LogRecord`'s attributes — `message`, `level_name`, `level_no`, `logger_name`,
 `pathname`, `filename`, `func_name`, `lineno`, `created`, `exc_text` — plus
 the attribution lumberjack captures at write time: `thread_name`,

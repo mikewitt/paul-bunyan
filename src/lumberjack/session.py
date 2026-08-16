@@ -21,6 +21,7 @@ The registry lives here rather than in `__init__.py` so that modules
 from __future__ import annotations
 
 import dataclasses
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,13 +53,39 @@ class Session:
     pump: FlushPump | None = None
 
 
-# The one piece of module state, and it is unguarded by any lock.
-# lumberjack: see issue #11
 _current: Session | None = None
+
+#: Serializes installing and tearing down a session against the callers that
+#: read one and then use what they read.
+#:
+#: `flush()` is the case that forced it: it takes the session, then writes to
+#: that session's store. A concurrent `shutdown()` closing the store between
+#: those two steps raises `sqlite3.ProgrammingError` — not into lumberjack,
+#: but into whichever worker thread happened to call `flush()`.
+#:
+#: Reentrant because `shutdown()` calls `flush()` while holding it.
+#:
+#: Deliberately *not* taken by `current_session()`. That is read once per task
+#: event by `tracking.py`, and locking it would serialize every instrumented
+#: call in the process against a background flush. Publishing and reading a
+#: single reference is atomic under CPython either way; what needs guarding is
+#: the compound read-then-use, which is the caller's business and is where the
+#: lock is applied.
+_lock = threading.RLock()
+
+
+def registry_lock() -> threading.RLock:
+    """The lock guarding session install and teardown — see `_lock`."""
+    return _lock
 
 
 def current_session() -> Session | None:
-    """The session `init()` installed, or None if lumberjack is not running."""
+    """The session `init()` installed, or None if lumberjack is not running.
+
+    Unlocked, and therefore a snapshot: by the time a caller acts on it,
+    `shutdown()` may have run. Anything that reads the session and then
+    *uses* what it read must hold `registry_lock()` across both.
+    """
     return _current
 
 
