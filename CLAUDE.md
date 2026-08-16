@@ -212,6 +212,22 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 
 CodeQL and Codacy also run, both configured outside this workflow.
 
+### Releasing
+
+`.github/workflows/release.yml`, separate from CI because it runs on different events and needs a permission CI must never have.
+
+**Publishing is one-shot per version number.** PyPI refuses a re-upload of a version even after you delete it, so every mistake costs a number. Everything about the workflow's shape follows from that:
+
+- **`workflow_dispatch` defaults to TestPyPI.** It is the rehearsal, and the only way to see how the long description renders and whether the metadata is right *before* spending a version. Use it first, every time.
+- **Publishing a GitHub Release publishes to PyPI.** That is the real one.
+- **The tag must match `pyproject.toml`.** Tagging `v0.1.0` while the file still says `0.1.0.dev0` would publish a dev release under a number nobody meant to spend, so the build fails instead. Bump the version and the `CHANGELOG.md` heading in the same commit as the tag.
+- **`twine check --strict` runs before anything is uploaded.** A README that fails to render leaves a permanently ugly project page. This nearly happened once already: the coverage badge used to be a *relative* path, which renders on GitHub and nowhere else.
+- **The wheel is built once and verified, then that same artifact is published.** Rebuilding between the check and the upload would mean publishing something nothing tested.
+
+**Trusted Publishing, not an API token.** GitHub mints a short-lived OIDC token that the index exchanges for upload rights, so no long-lived credential exists to leak — the same reasoning that keeps CI on a read-only workflow token. It binds to the repository, the workflow *filename*, and the GitHub environment name, so all three are configured on the index side: renaming `release.yml` or the `pypi` / `testpypi` environments breaks publishing until the publisher is updated to match.
+
+The `pypi` environment is also where a required reviewer belongs, if publishing should ever need a second pair of eyes.
+
 The workflow is also `workflow_dispatch`-able, which is not a convenience. A commit message can suppress a run outright — GitHub scans the entire message for a skip directive, body included, so *quoting* one in prose is enough — and a suppressed run is never created, so there is nothing to re-run afterwards. Branch protection then refuses the empty commit that would force one. The result is a trunk commit with no verdict at all, which is indistinguishable from a green one at a glance. Manual dispatch is the way back.
 
 Coverage is uploaded to Codacy from the `coverage` job. It comes from that one ubuntu/3.12 run rather than all six `test` legs: the union across legs would be marginally higher — the bare-install `skipif`, Windows path branches — but collecting it means six `--partial` uploads plus a `final` call, which is a lot of workflow for a fraction of a percent. The upload step is skipped, not failed, when `CODACY_PROJECT_TOKEN` is absent, which is the case for fork pull requests and for anyone who cloned this without a Codacy project — and the skip emits a workflow notice saying so, because a silent skip is indistinguishable from a broken upload when the job goes green either way.
