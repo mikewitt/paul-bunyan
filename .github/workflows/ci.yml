@@ -4,6 +4,14 @@ on:
   push:
     branches: [daddy]
   pull_request:
+  # Manual trigger, because trunk CI is otherwise impossible to re-run. Three
+  # things have to be true at once for that to bite, and they were: a commit
+  # message can suppress a run entirely (GitHub scans the whole message for a
+  # skip directive, body included, and quoting one counts), a suppressed run
+  # is never created so there is nothing to re-run, and branch protection
+  # refuses the empty commit that would otherwise force one. Trunk then has no
+  # verdict at all, which reads exactly like a green one.
+  workflow_dispatch:
 
 # Least privilege throughout, and no job opts back up. Nothing here writes to
 # the repository: the coverage badge is served by Codacy from the report the
