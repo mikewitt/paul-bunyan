@@ -8,6 +8,7 @@ import threading
 import pytest
 
 import lumberjack
+from lumberjack import session as _registry
 from lumberjack import teardown
 from lumberjack.detect import OutputMode
 from lumberjack.handler import LumberjackHandler
@@ -353,3 +354,50 @@ def test_flush_during_shutdown_does_not_hit_a_closed_store():
     thread.join(5)
 
     assert not escaped, f"flush() raised into the caller: {escaped}"
+
+
+def test_a_second_shutdown_racing_the_first_is_a_no_op():
+    """`shutdown()` stops the pump *outside* the lock — it has to, since
+    joining the pump thread from inside deadlocks against `flush()`. That
+    leaves a window where another thread can complete the whole teardown, so
+    the session is re-read once the lock is held.
+
+    Forced rather than raced: the first caller is parked inside a stub
+    `pump.stop()` until the second has finished, which is exactly the
+    interleaving the re-read exists for.
+    """
+    lumberjack.init(output_mode="plain", flush_interval=0)
+    session = _registry.current_session()
+    assert session is not None
+
+    stopping = threading.Event()
+    proceed = threading.Event()
+
+    class _ParkedPump:
+        def stop(self) -> None:
+            stopping.set()
+            proceed.wait(5)
+
+    session.pump = _ParkedPump()
+
+    escaped: list[BaseException] = []
+
+    def first_caller() -> None:
+        try:
+            lumberjack.shutdown()
+        except BaseException as exc:  # noqa: BLE001 - recording it is the test
+            escaped.append(exc)
+
+    thread = threading.Thread(target=first_caller)
+    thread.start()
+    assert stopping.wait(5), "the first caller never reached pump.stop()"
+
+    # Let the second caller past the same gate, then let it finish first.
+    session.pump = None
+    lumberjack.shutdown()
+    assert not lumberjack.is_initialized()
+
+    proceed.set()
+    thread.join(5)
+    assert not escaped, f"the losing shutdown() raised: {escaped}"
+    assert not lumberjack.is_initialized()
