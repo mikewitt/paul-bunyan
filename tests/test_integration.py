@@ -126,7 +126,12 @@ def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     stderr = result.stderr
-    assert b"processing item" not in stderr, stderr
+    # Not "never appears": the session heartbeat echoes the newest line beside
+    # its arrival count (#54), which is a row rewritten in place rather than
+    # 200 lines scrolling past. So the premise is that exactly one of them is
+    # on screen, and it is the last.
+    assert stderr.count(b"processing item") == 1, stderr
+    assert b"processing item 199" in stderr, stderr
     assert b"loop_then_exit.py:" in stderr, stderr
     assert b"200 records" in stderr, stderr
     # Lossy display, lossless store.

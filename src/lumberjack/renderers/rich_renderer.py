@@ -48,13 +48,17 @@ from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     BarState,
+    HeartbeatState,
     RepeatingSourceModel,
+    SessionHeartbeat,
     TaskProgressModel,
     resolve_max_bars,
 )
 from lumberjack.schema import LogRecordRow, SourceKey
 
 if TYPE_CHECKING:
+    from rich.console import RenderableType
+
     from lumberjack.store import RecordStore
 
 _LEVEL_STYLES = {
@@ -85,6 +89,42 @@ def _format_rate(bar: BarState) -> str:
     if bar.rate >= 1:
         return f"{bar.rate:,.0f}/s"
     return f"{1 / bar.rate:,.1f}s each"
+
+
+#: How wide the heartbeat's count-and-rate field is padded to, so the message
+#: beside it holds one column instead of shuffling sideways every time the
+#: count gains a digit. A floor rather than a ceiling: a session busy enough
+#: to outgrow it pushes the message right rather than losing any of it.
+_HEARTBEAT_SUMMARY_WIDTH = 26
+
+
+def _format_heartbeat(state: HeartbeatState) -> Text:
+    """The session row: is anything arriving, how fast, and what was it.
+
+    Three facts and no fourth. There is deliberately no elapsed clock and no
+    "idle" label — both would keep changing, or keep asserting, while the
+    stream said nothing, and the row's whole value is that it goes still when
+    the records do.
+
+    The rate carries one decimal where a source bar's carries none. A loop at
+    121/s does not need the tenth, but a session ticking over at 2.4/s does:
+    rounding that to "2/s" throws away the difference between a program
+    creeping along and one that has nearly stopped.
+    """
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"{state.glyph}  ", style="progress.spinner")
+    plural = "" if state.events == 1 else "s"
+    summary = f"{state.events:,} event{plural}"
+    if state.rate is not None:
+        summary += (
+            f" · {state.rate:,.1f}/s"
+            if state.rate >= 1
+            else f" · {1 / state.rate:,.1f}s each"
+        )
+    text.append(f"{summary:<{_HEARTBEAT_SUMMARY_WIDTH}}", style="progress.description")
+    if state.message:
+        text.append(state.message, style="dim")
+    return text
 
 
 def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
@@ -174,6 +214,12 @@ class RichProgressRenderer:
       model works out what encloses them, determinate once it has, and
       retired when the loop goes quiet.
 
+    Above both sits the **session heartbeat**, which is neither: one row
+    saying whether anything is arriving at all, at what rate, and what the
+    last line said. It is the only element a program whose lines never repeat
+    can draw, and it is first in the group because the overflow ellipsis crops
+    from the bottom and liveness is the row worth keeping.
+
     Both read the store rather than this renderer's own callback, so a bar and
     a plain log file describe the same run without divergent logic.
 
@@ -206,7 +252,14 @@ class RichProgressRenderer:
     ) -> None:
         if Progress is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR
-        self._model = RepeatingSourceModel(store, min_repeats=min_repeats)
+        self._model = RepeatingSourceModel(
+            store,
+            min_repeats=min_repeats,
+            # The heartbeat rides on this model's poll, but what it echoes is
+            # this renderer's business: it must not repeat a line this
+            # renderer already printed above the bars in full.
+            heartbeat=SessionHeartbeat(store, passthrough_level=passthrough_level),
+        )
         self._task_model = TaskProgressModel(store)
         self.passthrough_level = passthrough_level
         # None here means "consult the environment", not "no ceiling" — see
@@ -238,8 +291,12 @@ class RichProgressRenderer:
             TextColumn("{task.fields[rate]}", style="progress.remaining"),
             TimeElapsedColumn(),
         )
-        # Exact bars first: the ellipsis crops from the bottom, so inferred
-        # bars are the ones that should lose their slots.
+        # The two `Progress` objects are the only *durable* members of the
+        # group; `_compose()` rebuilds it on every refresh to put the current
+        # heartbeat above them, because that row is a `Text` rather than
+        # something rich can re-render from itself. Order there is heartbeat,
+        # exact bars, inferred bars: the ellipsis crops from the bottom, so a
+        # row nearer the top is the one guaranteed a slot.
         self._live = Live(
             Group(self._task_progress, self._source_progress),
             console=self._console,
@@ -316,7 +373,25 @@ class RichProgressRenderer:
             bars = bars[: self._max_bars]
         for bar in bars:
             self._draw_source_bar(bar)
+        # `update()` and not `refresh()`: the frame is drawn once, below.
+        self._live.update(self._compose())
         self._live.refresh()
+
+    def _compose(self) -> Group:
+        """The frame: heartbeat, then named bars, then inferred ones.
+
+        The heartbeat appears only once something has arrived. A row reading
+        "0 events" is true and worth nothing — it earns its place by carrying
+        a number that moves, and before the first record there is none. A
+        session whose only records are task events therefore shows no
+        heartbeat either, which is right: those have exact bars of their own.
+        """
+        heartbeat = self._model.heartbeat
+        rows: list[RenderableType] = []
+        if heartbeat.events:
+            rows.append(_format_heartbeat(heartbeat))
+        rows += [self._task_progress, self._source_progress]
+        return Group(*rows)
 
     def _draw_source_bar(self, bar: BarState) -> None:
         """One inferred bar: pulsing, determinate, or retired.

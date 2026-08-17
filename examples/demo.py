@@ -429,7 +429,12 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         name="oneshot",
         stream="Six startup lines, each firing exactly once over ~2.5s.",
-        today="Nothing. No source repeats, so no source earns a bar.",
+        today=(
+            "One row, and no bars: no source repeats, so none earns one. The "
+            "session heartbeat counts every record, times the arrival rate "
+            "from the records' own timestamps, and carries the newest line "
+            "beside it — `6 events · 2.0/s   ready` (#54)."
+        ),
         should=(
             "A session heartbeat driven by arrival rate, with the most recent "
             "line beside it (#54); singletons may optionally render the same "
@@ -443,7 +448,14 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         name="silent",
         stream="One line, three seconds of real work, one more line.",
-        today="Nothing, correctly — there is no signal between the two lines.",
+        today=(
+            "A heartbeat that arrives with the first line and then stops. "
+            "Every redraw through the three silent seconds — a dozen or so at "
+            "200ms apiece — draws the identical row: same frame, same count, "
+            "same message, because the frame is an index a record moves and "
+            "not a clock. It advances once, when the second line lands, and "
+            "the rate then reads `3.0s each` (#54)."
+        ),
         should=(
             "The heartbeat **stops moving**, and says nothing else — no 'idle' "
             "label, no progress. The absence is the message. This is the "

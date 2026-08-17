@@ -704,8 +704,11 @@ def test_an_outermost_loop_never_claims_a_cycle(
 def test_nothing_is_claimed_before_the_inference_settles(
     as_terminal, store: RecordStore, make_row
 ):
+    # Scoped to the bar row: the session heartbeat separates its count from
+    # its rate with the same "·", and it is not what this is about. One poll
+    # in, only the inner line has repeated often enough to have a bar at all.
     frame = _nested_frame(store, make_row, polls=1)
-    assert "·" not in frame, "a total was drawn on first sight"
+    assert "·" not in _line(frame, "foo.py:6"), "a total was drawn on first sight"
 
 
 def test_a_loop_that_went_quiet_says_so(as_terminal, store: RecordStore, make_row):
@@ -847,6 +850,162 @@ def test_a_retired_source_bar_that_resumes_stops_claiming_completion(
         assert "%" not in line, "a resumed bar kept the total that retiring gave it"
     finally:
         renderer.close()
+
+
+# --- the session heartbeat --------------------------------------------------
+#
+# The row for a program whose log lines never repeat, which before this drew
+# nothing at all. The two shapes it exists for are `examples/demo.py oneshot`
+# (six startup lines, one each) and `silent` (a line, three seconds of real
+# work, a line).
+
+
+def _heartbeat_line(rig: _Rig) -> str:
+    """The heartbeat row as the last frame drew it.
+
+    Found by the event count rather than by the glyph, which is the thing
+    under test in half of these — a helper keyed on a particular frame would
+    quietly stop finding the row the moment the beat moved.
+    """
+    return _line(_strip_ansi(rig.output()), " event")
+
+
+def _every_heartbeat(rig: _Rig) -> list[str]:
+    """The heartbeat row as *every* frame so far drew it, oldest first."""
+    lines = re.split(r"[\r\n]", _strip_ansi(rig.output()))
+    return [line.rstrip() for line in lines if " event" in line]
+
+
+@pytest.fixture
+def live(as_terminal: None, store: RecordStore) -> Iterator[_Rig]:
+    """A renderer drawing to a terminal, driven a refresh at a time."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    handler = LumberjackHandler(on_record=renderer.render, level=logging.DEBUG)
+    logger = logging.getLogger("heartbeat-rig")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        yield _Rig(logger, handler, store, renderer, stream)
+    finally:
+        logger.removeHandler(handler)
+        renderer.close()
+
+
+def test_a_program_whose_lines_never_repeat_still_draws_something(live: _Rig, make_row):
+    """`oneshot`. Six sources, one record each: no source repeats, so no
+    source earns a bar, and the display was empty — indistinguishable from
+    hung, which is the first question it exists to answer."""
+    for i, message in enumerate(
+        (
+            "reading configuration from /etc/pipeline.toml",
+            "connecting to warehouse at db.internal:5432",
+            "negotiated protocol version 3",
+            "warming schema cache",
+            "registered 14 table mappings",
+            "ready",
+        )
+    ):
+        live.store.append([make_row(lineno=200 + i, message=message)])
+        live.renderer.refresh()
+
+    assert live.renderer.bars() == [], "a one-off line must not earn a bar"
+    line = _heartbeat_line(live)
+    assert "6 events" in line
+    assert "ready" in line
+
+
+def test_the_heartbeat_stops_when_the_records_stop(live: _Rig, make_row):
+    """`silent`. Three seconds of real work between two lines, and nothing in
+    the stream to see. A stopped heartbeat is the truthful frame — a frame
+    turning on wall-clock time would be claiming liveness nobody observed."""
+    live.store.append([make_row(message="rendering 2.4M points at dpi=200")])
+    for _ in range(15):  # the silence, one redraw at a time
+        live.renderer.refresh()
+
+    drawn = set(_every_heartbeat(live))
+    assert len(drawn) == 1, f"the heartbeat moved while nothing arrived: {drawn}"
+
+    live.store.append([make_row(message="wrote figure.png")])
+    live.renderer.refresh()
+    assert "wrote figure.png" in _heartbeat_line(live)
+
+
+def test_the_heartbeat_keeps_no_clock(live: _Rig, make_row):
+    """An elapsed counter would tick through the silence above, which is the
+    same lie in a different column."""
+    live.store.append([make_row() for _ in range(4)])
+    live.renderer.refresh()
+    assert not re.search(r"\d+:\d\d:\d\d", _heartbeat_line(live))
+
+
+def test_nothing_captured_draws_no_heartbeat_row(live: _Rig):
+    live.renderer.refresh()
+    assert live.output() == "" or "event" not in _strip_ansi(live.output())
+
+
+def test_the_heartbeat_is_drawn_above_every_bar(live: _Rig, make_row):
+    """The overflow ellipsis crops from the bottom, and liveness is the row
+    worth keeping."""
+    live.store.append([make_row(message=f"fetched row {i}") for i in range(5)])
+    live.renderer.refresh()
+    live.stream.seek(0)
+    live.stream.truncate(0)
+    live.renderer.refresh()
+
+    frame = _strip_ansi(live.output())
+    assert "records" in frame, "no source bar was drawn to sit under"
+    assert frame.index("events") < frame.index("records")
+
+
+def test_the_newest_line_is_echoed_once_rather_than_scrolled(live: _Rig):
+    """The premise, restated for the row that carries a message: fifty log
+    lines still produce one row, and it holds the newest of them rather than
+    all fifty."""
+    for i in range(50):
+        live.logger.info("processing item %d", i)
+    live.tick()
+
+    echoed = [
+        line
+        for line in re.split(r"[\r\n]", _strip_ansi(live.output()))
+        if "processing item" in line
+    ]
+    assert echoed, "the newest line is not shown anywhere"
+    assert all(" event" in line for line in echoed), "the loop's lines scrolled"
+    assert all("processing item 49" in line for line in echoed)
+
+
+def test_a_warning_is_not_echoed_by_the_row_that_summarises_it(live: _Rig):
+    """It already printed above the bars, in full. Twice is once too many,
+    and a one-off warning parked in the live row reads as the current state
+    of the program."""
+    for i in range(5):
+        live.logger.info("processing item %d", i)
+    live.logger.warning("disk is filling up")
+    live.tick()
+
+    assert _strip_ansi(live.output()).count("disk is filling up") == 1
+    line = _heartbeat_line(live)
+    assert "disk is filling up" not in line
+    assert "processing item 4" in line, "the last collapsed line stands instead"
+    assert "6 events" in line, "a warning is still a record that arrived"
+
+
+def test_a_session_that_only_warns_shows_a_count_and_no_message(live: _Rig):
+    """Every line printed above the bars in full, so there is nothing left
+    for the row to echo. It keeps the count — records did arrive — and says
+    nothing else rather than repeating one of them."""
+    for i in range(3):
+        live.logger.warning("disk is filling up (%d)", i)
+    live.tick()
+
+    line = _heartbeat_line(live)
+    assert "3 events" in line
+    assert "disk is filling up" not in line
 
 
 # `TimeElapsedColumn` reads `Task.finished_time` and `Task.stop_time`, and at
