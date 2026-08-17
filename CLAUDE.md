@@ -112,9 +112,23 @@ Everything above describes what can be *inferred*. This describes what the displ
 
 **Display unit ≠ identity unit, and conflating them is the root mistake.** Source location is the right *identity* key — exact, cheap, no inference — and nothing here moves off it. But it became the *display* unit by default, because grouping already produced it. A person does not want a bar per call site; they want the shape of their program. So sibling call sites in one loop body merge into **one row per inferred loop**, labelled by the enclosing function, with source locations as the identity underneath. This is the 1:1 merging that was designed and left unbuilt, promoted from nice-to-have to the missing layer — and it is rendering-side grouping over what `RepeatingSourceModel` already computes, not new inference.
 
+**A loop is up to three rows, and the criterion decides how many.** This is where the criterion stops being a slogan. One merged loop can render as:
+
+1. **the loop** — a pulse, or determinate if a total is genuinely known; counts **iterations**, not records
+2. **position within the current iteration** — determinate, ticked by the body's call sites in order (#53)
+3. **the most recent message**, optionally, as text
+
+Row 2 appears *only when row 1 is too slow to be legible*. That is the whole rule, and it resolves what look like two contradictory answers. `siblings` — four call sites in a loop running at 121/s — is **one** row reading `400`, because a sub-iteration bar at that rate is a blur nobody can read. `sequence` — five call sites in a loop taking 1.5s per iteration — is **three** rows, because the outer bar alone ticks too rarely to distinguish running from hung, and the position within the iteration is the only legible signal available. Same structure, same merge, different number of rows, decided by measured period rather than by taste.
+
+The count on row 1 is **iterations of the merged loop**, not records captured. Those diverge the moment sibling call sites merge — `siblings` counts 400, not the 1600 records behind it — and iterations is what a person means by "how many". It does mean the count column stops matching the store's row count, which it currently matches; the store remains the place to go for records.
+
+**Inference gets the shape; instrumentation gets the numbers — and the gap is a feature.** Two of the hardest questions here have the same answer, and it is not cleverer inference. An outer loop's total is "ideally but unlikely" to be inferable, so it stays a pulse until someone wraps the range in `track()`. Distinguishing "A encloses B" from "A precedes B" — the false parent in `phases` — is probably not solvable from logs at all, and `track()` settles it directly. So the display should show what it knows, claim nothing more, and let the shortfall be visible: a stopped heartbeat or a permanent pulse is **a prompt to log more or to instrument**, which is the value ladder working as intended rather than a failure to paper over. This is also what the instrumentation linter (#40) reports statically.
+
 **The screen budget is real whether or not it is acknowledged.** Rich crops at terminal height regardless, so "unbounded" does not mean everything is shown — it means the cropping rule is *whoever qualified first*, which is the one rule with no argument behind it. Acknowledge the budget and fill it deliberately: active loops, then recently active, then idle.
 
 **Four element types, because forcing everything into a bar makes things lie.** A determinate bar (a total is known), a pulse (active, claiming nothing), a **counter** (this happened N times — no rate, no progress, the honest form for a source that fires once), and a session **heartbeat** (overall liveness from total arrival rate across all sources; needs no new signal, the store already has it). The pulse-vs-determinate distinction currently rides entirely on colour and animation, which is one fragile channel carrying the whole uncertainty vocabulary.
+
+**The heartbeat stops when the records stop, and says nothing else.** No "idle" label, no elapsed counter, no spinner turning on wall-clock — those all claim liveness nobody observed. When matplotlib spends 2.76 silent seconds rendering, a stopped heartbeat is the truthful frame. It reads as "we cannot see anything", which is exactly right, and the fix belongs to the developer rather than the display.
 
 **What this does not license.** None of it is a reason to move off source-location identity, to infer from message text, or to let the display invent structure it has not measured. A row that claims less is always available and always allowed.
 

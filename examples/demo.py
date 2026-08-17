@@ -362,9 +362,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
         should=(
             "Mostly right, and the reason this is still the demo to show "
-            "someone. One known defect: the nested child is indented under "
-            "whichever row precedes it, which is an unrelated loop on another "
-            "thread (#43)."
+            "someone. One defect: the nested child indents under whichever row "
+            "precedes it — an unrelated loop on another thread. Fixed by "
+            "re-laying-out on structural change, which for rich means "
+            "rebuilding `Progress._tasks` in the new order under its lock; "
+            "that reorders rendering while preserving the `Task` objects, so "
+            "elapsed time survives and nothing flickers (#43)."
         ),
         run=run_pipeline,
     ),
@@ -377,10 +380,14 @@ SCENARIOS: tuple[Scenario, ...] = (
             "total."
         ),
         should=(
-            "TBD — the ordinal-position question (#53). Reaching 'committing' "
-            "means the iteration is nearly done, and that is progress the "
-            "model currently throws away because it counts and times but "
-            "never orders."
+            "Three rows. A **pulsing** bar for the outer loop — its total is "
+            "'ideally but unlikely' to be inferable, so it stays a pulse and "
+            "becomes determinate only if someone wraps the range in `track()`. "
+            "Beneath it a **determinate** bar for position within the current "
+            "iteration, ticked by the body's call sites in order (#53). "
+            "Optionally a third line showing the most recent message. The "
+            "stage *name* appears only where a hint or a parseable message "
+            "supplies it — never guessed from message text."
         ),
         run=run_sequence,
     ),
@@ -389,9 +396,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         stream="One fast loop with four call sites in its body.",
         today="Four separate bars, all at the same rate, for one loop.",
         should=(
-            "TBD — one row, labelled by the enclosing function, with the four "
-            "source locations as identity underneath (#8). This is the "
-            "smallest case where display unit and identity unit come apart."
+            "One row, labelled by the enclosing function, with the four source "
+            "locations as identity underneath (#8). It counts **400** — "
+            "iterations of the merged loop, not the 1600 records behind them. "
+            "No intra-iteration row here: at 121/s it would be unreadable, "
+            "which is the legibility criterion deciding correctly that the "
+            "extra row is not earned."
         ),
         run=run_siblings,
     ),
@@ -400,10 +410,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         stream="Six startup lines, each firing exactly once over ~2.5s.",
         today="Nothing. No source repeats, so no source earns a bar.",
         should=(
-            "TBD — a session heartbeat, so working-but-quiet is "
-            "distinguishable from hung, and possibly a counter row per source "
-            "(#54). Whatever it is, it must not imply progress toward an end "
-            "it cannot see."
+            "A session heartbeat driven by arrival rate, with the most recent "
+            "line beside it (#54); singletons may optionally render the same "
+            "way. It must not imply progress toward an end it cannot see. This "
+            "is also the clearest case for the instrumentation linter (#40): "
+            "there is little here to work with, and saying so is more useful "
+            "than inventing a display."
         ),
         run=run_oneshot,
     ),
@@ -412,9 +424,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         stream="One line, three seconds of real work, one more line.",
         today="Nothing, correctly — there is no signal between the two lines.",
         should=(
-            "TBD — the honesty test for whatever #54 becomes. This is the "
-            "matplotlib case: 2.76s of rendering emits zero records. A "
-            "heartbeat driven by arrival rate goes quiet here, which is right."
+            "The heartbeat **stops moving**, and says nothing else — no 'idle' "
+            "label, no progress. The absence is the message. This is the "
+            "honesty test for #54: a spinner that keeps turning on wall-clock "
+            "would be claiming liveness nobody observed. A developer seeing a "
+            "stopped heartbeat is being told to log more, which is the right "
+            "prompt rather than a display failure to paper over."
         ),
         run=run_silent,
     ),
@@ -426,8 +441,10 @@ SCENARIOS: tuple[Scenario, ...] = (
             "next burst, with a rate that swings by an order of magnitude."
         ),
         should=(
-            "TBD — Principle 10 says being wrong here is acceptable. This "
-            "exists so 'acceptable' can be looked at rather than asserted."
+            "Annotate the rate as erratic when variance is high — `~3/s "
+            "(erratic)` — since an average of 20ms and 1.2s iterations "
+            "describes no real iteration. Cheap from what the model already "
+            "keeps, and explicitly low priority: minutiae next to the rest."
         ),
         run=run_bursty,
     ),
@@ -442,12 +459,15 @@ SCENARIOS: tuple[Scenario, ...] = (
             "total from that ratio — 49 for a stage that runs 40 times."
         ),
         should=(
-            "TBD — two questions, and the second was found by running this. "
-            "The screen budget (#8): idle rows keep the final frame from being "
-            "empty, but whether they hold full-width rows while something else "
-            "is live is open. And a sequential announcement is not a parent — "
-            "period ordering alone cannot tell 'A encloses B' from 'A precedes "
-            "B', which is the same blind spot #53's ordering data would close."
+            "A **pulsing** bar for the stage sequence, keyed on the 'stage N' "
+            "line, showing iterations and elapsed — with 'Stage' as the label "
+            "where it is parseable. Progress *within* the running stage is a "
+            "**spinner**, not a determinate bar: the 49 is fabricated and a "
+            "spinner claims nothing. Previous stages collapse when the "
+            "announcement line fires again, which is the signal that one "
+            "ended. Telling 'A encloses B' from 'A precedes B' is unlikely to "
+            "be solvable from logs alone — `track()` is the answer, not "
+            "cleverer inference."
         ),
         run=run_phases,
     ),
@@ -459,9 +479,10 @@ SCENARIOS: tuple[Scenario, ...] = (
             "line, and its period is the interleaving of three loops."
         ),
         should=(
-            "Detect the collapse and say so at exit, pointing at "
-            "`stacklevel=2` (#37). Deliberately not fixed by inference — the "
-            "one-keyword fix belongs in the user's wrapper."
+            "Nothing, for now. It is bad practice, it is documented as such, "
+            "and it is explicitly not a priority — #37 stays open and "
+            "unscheduled. The one-keyword fix (`stacklevel=2`) belongs in the "
+            "user's wrapper, and inference should not chase it."
         ),
         run=run_wrapped,
     ),
@@ -553,8 +574,11 @@ def _list() -> None:
     for scenario in SCENARIOS:
         mark = " " if scenario.settled else "*"
         print(f" {mark} {scenario.name:<10} {scenario.stream}")
-    print("\n  * = the display's answer here is still an open question.")
-    print("    See 'What the display is for' in CLAUDE.md.")
+    if any(not scenario.settled for scenario in SCENARIOS):
+        print("\n  * = the display's answer here is still an open question.")
+    print("\n  Every scenario states the stream, what lumberjack does with it")
+    print("  today, and what it should do instead. Run one to read all three.")
+    print("  See 'What the display is for' in CLAUDE.md for the criterion.")
 
 
 def main(argv: list[str] | None = None) -> int:
