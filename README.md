@@ -14,6 +14,12 @@ program already has, it already records which line emitted each record and on
 which thread, and unlike a progress bar it does not get harder when you add
 concurrency.
 
+![Four worker threads logging inside their own loops, rendered as live progress bars](docs/demo-pipeline.gif)
+
+Four threads, ~2,000 `logger.debug` calls, and **no lumberjack API anywhere in
+the worker functions** — that is `examples/demo.py`, unmodified, under
+`lumberjack.init()`. Recreate it with `uv run python examples/demo.py`.
+
 **Status: early, pre-1.0, and not published yet.** Working today: capture,
 SQLite storage, output-mode detection, plain/JSON/rich rendering, the explicit
 `track()` / `task()` API with outbound OpenTelemetry spans and the named bars
@@ -451,6 +457,21 @@ uv run black --check .
 uv run mypy --strict src
 uv run mypy tests examples benchmarks
 ```
+
+### Recording the demo
+
+`scripts/record_demo.py` turns any demo scenario into an animated GIF — the
+README's hero image is `pipeline`, recorded this way:
+
+```bash
+uv run --with pillow --with pyte --with fonttools \
+    python scripts/record_demo.py pipeline
+```
+
+It replays the pty output through a real terminal emulator rather than
+stripping ANSI, because a live display is a sequence of *edits to a screen*
+and stripping the escapes yields every intermediate line ever printed — which
+is not what anyone saw.
 
 ### What it costs to leave the logging in
 
