@@ -477,8 +477,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="bursty",
         stream="One loop, 80% fast iterations and 20% multi-second stalls.",
         today=(
-            "A row that collapses to a mark during a stall and comes back on "
-            "the next burst, with a rate that swings by an order of magnitude."
+            "One row, and — measured, against the text that used to be here — "
+            "it does *not* collapse during a stall. The 0.8s pauses sit just "
+            "under the one-second floor on the idle threshold, so the floor put "
+            "there to stop a millisecond loop flickering is what holds this "
+            "row steady too. What does swing is the rate: 49/s at the first "
+            "burst down to 8/s, describing no iteration this loop ever ran."
         ),
         should=(
             "Annotate the rate as erratic when variance is high — `~3/s "
