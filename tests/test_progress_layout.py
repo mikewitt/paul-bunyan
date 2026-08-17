@@ -13,7 +13,7 @@ from lumberjack.schema import SourceKey
 
 
 def _src(lineno: int) -> SourceKey:
-    return SourceKey("/tmp/foo.py", lineno, "bar")
+    return SourceKey("/nonexistent/foo.py", lineno, "bar")
 
 
 def test_a_child_follows_its_parent_however_late_the_parent_arrived():

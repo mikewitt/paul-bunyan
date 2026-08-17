@@ -1,90 +1,80 @@
 ---
 # Codacy runs outside .github/workflows/ci.yml, alongside CodeQL.
 #
-# Bandit is not run over `tests/`. Every finding it produced there was a
-# false positive for a test suite, and there were 437 of them drowning any
-# real signal:
+# There is no `bandit` block any more, and its absence is the point. Bandit's
+# ruleset now lives in ruff, as `S` in `[tool.ruff.lint]`, because ruff can say
+# the thing this file could not.
 #
-#   B101  assert_used            — 437, all in tests. The rule is about
-#                                  asserts being stripped under `python -O`
-#                                  in *production* code; in a pytest suite
-#                                  the assert IS the test.
-#   B603  subprocess_without_    — test_integration.py and test_toolchain.py
-#         shell_equals_true        launch `sys.executable` deliberately, to
-#                                  exercise atexit and excepthook paths that
-#                                  cannot run in-process.
-#   B404  import_subprocess      — same two files, same reason.
-#   B108  hardcoded_tmp_dir      — "/tmp/foo.py" in row fixtures is a fake
-#                                  `pathname` value on a record; nothing is
-#                                  opened, created or written.
+# What this file used to say was "exclude `tests/**` from bandit", and the
+# reason was one rule: B101 `assert_used` fired 437 times — in a pytest suite
+# the assert IS the test — and drowned everything else. The exclusion was never
+# what anyone meant. What anyone meant was "an assert is fine in tests/ and
+# nowhere else", and the constraint that made that unsayable is still true:
 #
-# Scoped to the bandit engine rather than a global `exclude_paths`, so
-# complexity and duplication still cover the test suite.
+#   Individual patterns can only be disabled in the Codacy web UI, so path
+#   scoping is the whole of what this file can express.
 #
-# `src/` is deliberately NOT excluded. Its two findings are real code that
-# was looked at and kept:
-#   B110  try_except_pass        — teardown.py and pump.py, every instance
-#                                  commented: a bug in lumberjack's own
-#                                  cleanup must never hide a user's
-#                                  traceback, so the swallow is the point.
-#   B608  hardcoded_sql          — `_INSERT_SQL` is built from `_COLUMNS`, a
-#                                  module-level tuple of literal column
-#                                  names. Values go through `?` placeholders,
-#                                  and the parity tests pin `_COLUMNS`
-#                                  against the real table.
+# So the whole directory went, and with it every *other* finding bandit would
+# have reported there. That was the real cost, and it was paid silently.
 #
-# `examples/` is not excluded either, and its two B101s are now **fixed**
-# rather than kept. Both were `assert store is not None`, narrowing a type
-# for mypy before `.recent()`; `python -O` strips an assert, so the narrowing
-# vanished and a None reached the call. Nobody runs the examples under -O,
-# which is why this sat here as a documented acceptance — but the warning was
-# never wrong, the fix is two lines, and `if store is None: raise` narrows
-# for mypy exactly as well. Keeping the path in scope is what surfaced it.
+# `ruff --select S` was checked against what bandit reports, rule for rule and
+# site for site, and reproduces it exactly: S110/S608 in src/, S606 in scripts/,
+# S101/S108/S603/S102 in tests/. Ruff also has `per-file-ignores`, so
+# `pyproject.toml` now says "S101 is exempt in tests/, every other S rule is
+# not" — one line, in the repo, enforced by pre-commit and the required `lint`
+# job. That is strictly stronger than what was here: an `assert` reaching `src/`
+# used to pass `lint` and be caught by Codacy only after merge.
 #
-# That is the intended use of leaving `src/` and `examples/` scanned:
-# excluding more than the noise would defeat the point of the tool, and the
-# findings that remain are meant to be re-read rather than inherited.
+# Two consequences worth stating rather than discovering:
 #
-# Individual patterns can only be disabled in the Codacy web UI, so path
-# scoping is the whole of what this file can express. After this, bandit
-# reports 10 findings instead of 447, and each of the 10 has been read.
+#   - The remaining findings are suppressed inline, at the code, with the reason
+#     beside them — `# noqa: S110, BLE001 - swallowing is the point` reads better
+#     than the same sentence in a config file three directories away. Where a
+#     line needs to satisfy both tools it carries both markers, because bandit
+#     reads `# nosec` and has never read `# noqa`.
+#   - B108 has no suppression anywhere, because it was fixed instead. The fake
+#     `pathname` in the row fixtures was "/tmp/foo.py"; it is now
+#     "/nonexistent/foo.py". The tests require a path with no source on disk —
+#     that is the whole reason the fixture exists — and `/tmp` is a real
+#     directory where `foo.py` could plausibly turn up. The rule was right.
 #
-# `uv.lock` is excluded from every engine, not just bandit. It is generated by
+# `src/` and `examples/` were never excluded and still are not. `src/`'s B110
+# and B608 remain visible in Codacy on purpose, the same as before: they are
+# meant to be re-read rather than inherited. `examples/`' two B101s were fixed
+# rather than kept, back when this file still had a bandit block — both were
+# `assert store is not None` narrowing a type for mypy, which `python -O`
+# strips, so the narrowing vanished and a None reached the call. Keeping the
+# path in scope is what surfaced it. That is the argument for excluding as
+# little as possible, and it is why the answer here was to move the rule rather
+# than to widen the exclusion.
+#
+# `uv.lock` is excluded globally, from every engine. It is generated by
 # `uv lock` and regenerated wholesale — nobody edits it, so a finding in it is
 # not something anyone can act on, and `uv lock --check` in the `package` job
 # is what actually guards it. It also trips duplication detection heavily, by
 # design: a lockfile is thousands of near-identical dependency stanzas, and
 # counting those as duplicated code makes the repo-wide duplication figure
 # meaningless.
-# `benchmarks/` and `scripts/` are excluded on the same grounds as `tests/`:
-# development tooling, not shipped in the wheel, and never run by a user of
-# the package. What each was flagged for:
+# `benchmarks/` and `scripts/` are excluded from the engines below on the same
+# grounds `tests/` was: development tooling, not shipped in the wheel, and never
+# run by a user of the package. They are no longer excluded from bandit, because
+# nothing is — `scripts/record_demo.py` carries `# noqa: S606  # nosec B606` at
+# the one line that needs it (launching the demo under a pty is not incidental
+# to that script, it is the entire job; the argv is a fixed list built from
+# `sys.executable` and a path derived from `__file__`, no shell, nothing
+# user-supplied). `benchmarks/` has no findings at all now: `_git_commit()`
+# reads `.git` directly rather than shelling out to `git rev-parse`.
 #
-#   B404  import_subprocess    — `benchmarks/capture.py` shelled out once, to
-#   B603  subprocess_without_    `git rev-parse --short HEAD`, so a recorded
-#         shell_equals_true      baseline says which revision produced it.
-#   B607  start_process_with_    Fixed argv list, no user input anywhere near
-#         partial_path           it, wrapped in try/except and best-effort by
-#                                design — a missing `git` returned None.
-#   B101  assert_used          — `assert __doc__ is not None` narrows a type
-#                                for mypy before `__doc__.split()`.
-#   B606  start_process_       — `scripts/record_demo.py` launches the demo
-#         without_a_shell        under a pty so it can record the live display
-#                                as a GIF. Starting a process is not incidental
-#                                to it — it is the entire job — and the argv is
-#                                a fixed list built from `sys.executable` and a
-#                                path derived from `__file__`, with no shell and
-#                                nothing user-supplied anywhere near it.
-#
-# The same "excluding more than the noise defeats the tool" test applies: this
-# is two files of dev tooling, and `src/` and `examples/` both stay in scope.
+# The same "excluding more than the noise defeats the tool" test applies, and
+# it is what removing the bandit block was in service of.
 exclude_paths:
   - "uv.lock"
 
 # Engine scoping is per engine, which is easy to forget and was: `tests/**`
 # was excluded from bandit and then a *different* engine flagged
 # `subprocess.run([sys.executable, ...])` in tests/test_benchmark.py as a
-# non-static argv. The bandit block does not cover it.
+# non-static argv. A bandit block never covered it, which is why these two
+# outlived it.
 #
 # Engine keys are a closed list, so guessing one is a silent no-op rather than
 # an error. `opengrep` is the real name — `semgrep` is not on Codacy's list at
@@ -119,7 +109,8 @@ exclude_paths:
 #                                 `Call.lineno`, and executing the source is
 #                                 what pins that against CPython instead of
 #                                 against a remembered rule. Same category as
-#                                 B101 above: the `exec` is the test.
+#                                 the assert rule this file used to exclude
+#                                 `tests/**` for: the `exec` is the test.
 #
 # The name is load-bearing in a way the docs undersell. They say the deprecated
 # aliases "remain accepted", and for `pylint` that is not true of an
@@ -129,11 +120,6 @@ exclude_paths:
 # *does* honour a new engine block, which is what makes that a same-round test
 # rather than something you find out at merge.
 engines:
-  bandit:
-    exclude_paths:
-      - "tests/**"
-      - "benchmarks/**"
-      - "scripts/**"
   opengrep:
     exclude_paths:
       - "tests/**"

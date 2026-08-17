@@ -35,7 +35,7 @@ def test_a_repeating_source_gets_a_bar(store, loop_rows):
     model = RepeatingSourceModel(store, min_repeats=3)
     (bar,) = model.poll()
     assert bar.count == 5
-    assert bar.source == SourceKey("/tmp/foo.py", 10, "bar")
+    assert bar.source == SourceKey("/nonexistent/foo.py", 10, "bar")
 
 
 def test_the_bar_advances_as_the_loop_runs(store, loop_rows):

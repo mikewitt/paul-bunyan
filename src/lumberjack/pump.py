@@ -53,7 +53,7 @@ class FlushPump:
         while not self._stop.wait(self.interval):
             try:
                 self._flush()
-            except Exception:
+            except Exception:  # noqa: S110, BLE001
                 # A store write failing must not kill the pump; the next tick
                 # (and the atexit drain) get another shot at the same buffer.
                 pass

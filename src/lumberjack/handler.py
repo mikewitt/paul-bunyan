@@ -58,7 +58,7 @@ class LumberjackHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             row = LogRecordRow.from_log_record(record)
-        except Exception:
+        except Exception:  # noqa: BLE001 - stdlib's own contract for a bad record
             self.handleError(record)
             return
 
@@ -72,7 +72,7 @@ class LumberjackHandler(logging.Handler):
         if self.on_record is not None:
             try:
                 self.on_record(row)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 # A renderer that raises must not take down the `log.info()`
                 # that reached it. `Logger.callHandlers` has no catch of its
                 # own — stdlib handlers guard their own `emit()` bodies — so

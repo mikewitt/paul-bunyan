@@ -351,8 +351,10 @@ def test_the_source_delta_reports_which_workers_ran_each_line(store, make_row):
         ]
     )
     workers = store.count_by_source_since(0).workers
-    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 1, "bar")]} == {7, 9}
-    assert {w.thread for w in workers[SourceKey("/tmp/foo.py", 2, "bar")]} == {7}
+    line_1 = SourceKey("/nonexistent/foo.py", 1, "bar")
+    line_2 = SourceKey("/nonexistent/foo.py", 2, "bar")
+    assert {w.thread for w in workers[line_1]} == {7, 9}
+    assert {w.thread for w in workers[line_2]} == {7}
 
 
 def test_a_worker_is_process_thread_and_asyncio_task(store, make_row):
@@ -366,7 +368,7 @@ def test_a_worker_is_process_thread_and_asyncio_task(store, make_row):
         ]
     )
     workers = store.count_by_source_since(0).workers[
-        SourceKey("/tmp/foo.py", 10, "bar")
+        SourceKey("/nonexistent/foo.py", 10, "bar")
     ]
     assert workers == frozenset(
         {WorkerKey(1, 1, None), WorkerKey(2, 1, None), WorkerKey(1, 1, 5)}
@@ -384,7 +386,7 @@ def test_the_source_delta_still_folds_per_worker_rows_back_together(store, make_
         ]
     )
     delta = store.count_by_source_since(0)
-    key = SourceKey("/tmp/foo.py", 10, "bar")
+    key = SourceKey("/nonexistent/foo.py", 10, "bar")
     assert delta.counts[key] == 3
     assert (delta.first_at[key], delta.last_at[key]) == (100.0, 102.0)
 

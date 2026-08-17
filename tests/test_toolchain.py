@@ -38,14 +38,15 @@ def _pinned_revs() -> dict[str, str]:
 
 def _installed_version(tool: str) -> str:
     """The version `uv sync` actually resolved, from the tool's own output."""
-    out = subprocess.run(
+    out = subprocess.run(  # noqa: S603  # nosec B603
         [sys.executable, "-m", tool, "--version"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     match = re.search(r"(\d+\.\d+\.\d+)", out)
-    assert match, f"no version in {tool} --version output: {out!r}"
+    if match is None:
+        raise AssertionError(f"no version in {tool} --version output: {out!r}")
     return match.group(1)
 
 

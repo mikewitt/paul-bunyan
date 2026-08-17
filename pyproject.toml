@@ -50,7 +50,40 @@ src = ["src", "tests"]
 # the *template* and `record.args` the data. lumberjack reads both as separate
 # columns; an f-string destroys the template at the call site and it cannot be
 # recovered. The package that depends on that discipline should be held to it.
-select = ["E", "F", "I", "B", "UP", "G"]
+#
+# `S` is flake8-bandit, and selecting it here is bandit's ruleset moving to the
+# one place that can scope it. `.codacy.yaml` wants to say "an assert is fine in
+# tests/ and nowhere else" and has no vocabulary for it — its own comment says
+# so: "Individual patterns can only be disabled in the Codacy web UI, so path
+# scoping is the whole of what this file can express." It therefore had to
+# exclude `tests/**` wholesale, which cost the suite every *other* finding those
+# engines produce. `per-file-ignores` below says the intended thing exactly.
+#
+# Verified rule-for-rule and site-for-site against what `.codacy.yaml` documents
+# bandit reporting: S110/S608 in src/, S606 in scripts/, S101/S108/S603/S102 in
+# tests/. Nothing is given up by moving it here, and something is gained — an
+# `assert` reaching src/ now fails pre-commit and the required `lint` job rather
+# than being caught by Codacy after merge.
+# `RUF100` is what stops any of the above rotting. Three `# noqa`s in this repo
+# were inert because their rules were never selected, and an unenforced
+# suppression is indistinguishable from a working one — the same failure mode
+# `.codacy.yaml` records for silently-ignored engine keys. `SLF001` and `BLE001`
+# are selected for exactly that reason: they were already being suppressed by
+# hand, so either they are real rules or the comments were decoration.
+select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: in a pytest suite the assert IS the test, and S101's actual concern —
+# asserts stripped under `python -O` — does not apply to code nothing runs under
+# -O. Every other `S` rule still applies to tests/; only this one is exempt,
+# which is precisely the distinction a path exclusion could not draw.
+#
+# SLF001: tests reaching into renderer and model internals is a real finding,
+# not a false positive — it is issue #45, which wants those tests asserting on a
+# rendered frame instead. Suppressing all 31 inline would bury that; exempting
+# the directory keeps the rule enforced where it is actionable today (src/) and
+# leaves #45 to fix the tests rather than annotate them.
+"tests/**" = ["S101", "SLF001"]
 
 [tool.black]
 target-version = ["py312"]

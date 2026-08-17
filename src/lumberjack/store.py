@@ -123,7 +123,13 @@ _COLUMNS = (
 )
 _GET_COLUMNS = attrgetter(*_COLUMNS)
 _PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS)
-_INSERT_SQL = f"INSERT INTO records ({', '.join(_COLUMNS)}) VALUES ({_PLACEHOLDERS})"
+# Not an injection vector: `_COLUMNS` is the module-level tuple of literal
+# column names just above, values go through `?` placeholders, and the parity
+# tests pin `_COLUMNS` against the real table.
+_INSERT_SQL = (
+    f"INSERT INTO records ({', '.join(_COLUMNS)}) "  # noqa: S608
+    f"VALUES ({_PLACEHOLDERS})"
+)
 
 
 class RecordStore(abc.ABC):

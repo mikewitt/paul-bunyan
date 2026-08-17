@@ -666,7 +666,7 @@ class RichProgressRenderer:
             self._pump.stop()
         try:
             self.refresh()
-        except Exception:
+        except Exception:  # noqa: S110, BLE001
             # A store closed ahead of us must not cost the user their terminal
             # (or mangle a traceback) — stopping the display matters more.
             pass

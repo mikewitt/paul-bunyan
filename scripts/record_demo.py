@@ -132,7 +132,10 @@ def capture(
         # across the bar, so colour depth is the difference between what this
         # records and what the terminal actually shows.
         os.environ["COLORTERM"] = "truecolor"
-        os.execvp(argv[0], argv)
+        # Launching the demo under a pty is the entire job here, and the argv
+        # is a fixed list built from `sys.executable` and a path derived from
+        # `__file__` — no shell, nothing user-supplied anywhere near it.
+        os.execvp(argv[0], argv)  # noqa: S606  # nosec B606
 
     start = last = time.monotonic()
     try:

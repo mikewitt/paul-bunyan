@@ -106,7 +106,7 @@ def _stop_live_display() -> None:
         return
     try:
         _session.renderer.close()
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - swallowing is the point; see docstring
         pass
 
 
@@ -127,7 +127,7 @@ def _report_dropped() -> None:
                 "lower flush_interval in init().",
                 file=sys.stderr,
             )
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - swallowing is the point; see docstring
         pass
 
 
@@ -155,7 +155,7 @@ def _report_suppressed_bars() -> None:
                 "fixes.",
                 file=sys.stderr,
             )
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - swallowing is the point; see docstring
         pass
 
 
@@ -173,7 +173,7 @@ def _dump_diagnostics() -> None:
         dumper = PlainTextRenderer(stream=sys.stderr)
         for row in rows:
             dumper.render(row)
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - swallowing is the point; see docstring
         pass
 
 
@@ -192,5 +192,5 @@ def _flush_buffer() -> None:
         rows = _session.handler.drain()
         if rows:
             _session.store.append(rows)
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - swallowing is the point; see docstring
         pass

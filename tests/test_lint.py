@@ -40,7 +40,8 @@ def rules(write_module: Callable[..., Path]) -> Callable[..., list[str]]:
     def _rules(source: str, *, all_loops: bool = False) -> list[str]:
         path = write_module(source)
         report = lint.check([str(path)], all_loops=all_loops)
-        assert report.files == 1, "the fixture source should parse"
+        if report.files != 1:
+            raise AssertionError("the fixture source should parse")
         return [finding.rule for finding in report.findings]
 
     return _rules
@@ -53,9 +54,11 @@ def one(write_module: Callable[..., Path]) -> Callable[..., lint.Finding]:
     def _one(source: str, *, all_loops: bool = False) -> lint.Finding:
         path = write_module(source)
         report = lint.check([str(path)], all_loops=all_loops)
-        assert report.files == 1, "the fixture source should parse"
+        if report.files != 1:
+            raise AssertionError("the fixture source should parse")
         findings = report.findings
-        assert len(findings) == 1, f"expected one finding, got {findings}"
+        if len(findings) != 1:
+            raise AssertionError(f"expected one finding, got {findings}")
         return findings[0]
 
     return _one
@@ -559,7 +562,8 @@ def fstring(i):
 def _rules_at(report: lint.Report, func_name: str) -> set[str]:
     """Rules reported inside `func_name`, resolved through the demo's AST."""
     structure = static.analyze_file(str(DEMO))
-    assert structure is not None
+    if structure is None:
+        raise AssertionError(f"{DEMO} should be readable and parseable")
     lines = {
         loop.lineno for loop in structure.loops.values() if loop.func_name == func_name
     } | {
@@ -623,7 +627,8 @@ def test_the_demos_bare_loops_are_held_back_but_reachable() -> None:
 
 def _lines_for(report: lint.Report, func_name: str) -> list[lint.Finding]:
     structure = static.analyze_file(str(DEMO))
-    assert structure is not None
+    if structure is None:
+        raise AssertionError(f"{DEMO} should be readable and parseable")
     lines = {
         loop.lineno for loop in structure.loops.values() if loop.func_name == func_name
     }
@@ -649,9 +654,11 @@ def _demo_rule_leads() -> list[str]:
     """The bold lead of each bullet in the demo's "How to log" section."""
     tree = ast.parse(DEMO.read_text(encoding="utf-8"))
     docstring = ast.get_docstring(tree)
-    assert docstring is not None, "examples/demo.py should have a module docstring"
+    if docstring is None:
+        raise AssertionError("examples/demo.py should have a module docstring")
     header = "## How to log so this works"
-    assert header in docstring, f"{header!r} is where the canonical wording lives"
+    if header not in docstring:
+        raise AssertionError(f"{header!r} is where the canonical wording lives")
     section = docstring.split(header, 1)[1]
     bullets = re.findall(r"^- \*\*(.+?)\*\*", section, re.MULTILINE | re.DOTALL)
     return [" ".join(bullet.split()) for bullet in bullets]
@@ -876,7 +883,7 @@ def test_the_module_runs_as_a_command() -> None:
     env["PYTHONPATH"] = os.pathsep.join([str(REPO / "src"), env.get("PYTHONPATH", "")])
     env["COVERAGE_PROCESS_START"] = str(REPO / "pyproject.toml")
 
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # noqa: S603  # nosec B603
         [sys.executable, "-m", "lumberjack.lint", str(DEMO)],
         capture_output=True,
         text=True,

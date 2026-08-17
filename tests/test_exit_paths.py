@@ -41,7 +41,7 @@ def _run_script(
     subprocess_env: Callable[..., dict[str, str]],
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603  # nosec B603
         [sys.executable, str(scripts_dir / name)],
         capture_output=True,
         env=subprocess_env(env),
@@ -69,7 +69,7 @@ def raise_after_init_plain() -> subprocess.CompletedProcess[bytes]:
     full_env["COVERAGE_PROCESS_START"] = str(
         Path(__file__).parent.parent / "pyproject.toml"
     )
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603  # nosec B603
         [sys.executable, str(scripts_dir / "raise_after_init.py")],
         capture_output=True,
         env=full_env,

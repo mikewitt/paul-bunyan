@@ -6,7 +6,7 @@ install like the rest of the models.
 Two grouping paths, and both are exercised against real files rather than
 mocks. The static path needs source on disk with templates that match the
 records, so these write a small module to `tmp_path` and build rows keyed on
-it; the runtime path is what `/tmp/foo.py` (`make_row`'s default, and a file
+it; the runtime path is what `/nonexistent/foo.py` (`make_row`'s default, and a file
 that does not exist) already gives.
 """
 
@@ -25,7 +25,7 @@ from lumberjack.renderers.progress import LoopRowModel
 
 # --- the runtime path -------------------------------------------------------
 #
-# `/tmp/foo.py` has no source on disk, so everything here falls back to what
+# `/nonexistent/foo.py` has no source on disk, so everything here falls back to what
 # shipped before: equal periods plus a shared worker means one loop body.
 
 
