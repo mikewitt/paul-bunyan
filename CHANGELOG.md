@@ -22,16 +22,37 @@ tag matches the version in `pyproject.toml`, so bump both together.
   `shutdown()` puts the root logger back as it was found, handlers and level
   both.
 - **A live progress display on an interactive terminal** (needs `rich`).
-  Log lines that repeat from one source location stop scrolling and become a
-  bar that advances. Each bar shows its rate, and goes `idle` when its source
-  falls quiet.
+  Repeating log lines stop scrolling and become **one row per loop** — not per
+  call site: several lines in one loop body collapse into a single row, since
+  what a person wants is the shape of their program. Rows count *iterations*
+  rather than records, are labelled by the message template that lazy
+  `%`-formatting keeps intact, and collapse to a marker reading `idle` when a
+  loop falls quiet rather than vanishing.
+- **A session heartbeat.** Arrival rate across every source, plus the newest
+  line — the row that answers "is anything happening at all" before any loop
+  is identified, and the only row a program with no repeating log lines draws.
+  It **stops when the records stop**, never animating on a timer, so a frozen
+  heartbeat means the program genuinely went quiet.
 - **Inferred loop structure.** Sources are timed, sorted by period into loop
   levels, and the ratio between an enclosing level and an enclosed one is
   taken as the inner loop's iteration count — so a loop nested inside another
   draws indented, with a real percentage nobody declared. Scoped per worker,
   so two unrelated loops on two threads are not mistaken for one nested pair.
   A bar pulses until it has something to claim, and goes back to pulsing if
-  the count outruns the estimate.
+  the count outruns the estimate. Where the source file is readable, its own
+  loop structure corroborates all of this — and vetoes a total that period
+  ordering fabricated across a function boundary.
+- **A second row for a loop too slow to read.** A loop taking a second or more
+  per iteration also draws its position *within* the current iteration, taken
+  from the body's order in the source. A fast loop does not: a sub-iteration
+  bar at 100 iterations a second is a blur, and a row has to update at a rate
+  a human can read to earn its place.
+- **An instrumentation linter** — `python -m lumberjack.lint`. Reports which
+  log line to add and where: a loop with nothing inside it, a slow body with
+  one line, a wrapper missing `stacklevel=`, an f-string that destroyed its
+  template. It recommends ordinary logging before it recommends `track()`,
+  and `--agent-rules` prints a block for `CLAUDE.md`/`AGENTS.md` so coding
+  agents stop deleting the debug lines the display is built from.
 - **`lumberjack.task()` and `lumberjack.track()`** — explicit progress, for
   where inference is not enough. `track()` mirrors `tqdm`; `task()` mirrors an
   OpenTelemetry span and nests via `.subtask()`. Both are **inert without
@@ -76,6 +97,6 @@ surprise someone:
 - **A logging wrapper collapses inference.** Identity is the source location,
   so a shim that calls `logger.debug()` on behalf of the whole program makes
   every call site look like one. `stacklevel=` in the wrapper fixes it.
-- **A nested bar is drawn where it first qualified**, which for an inner loop
-  is above the parent it is indented under.
+- **A loop body with a conditional log line gets no position row.** Its order
+  is not reliable, and a wrong percentage is worse than none.
 - **`tqdm` and lumberjack fight over the terminal** if both are live.

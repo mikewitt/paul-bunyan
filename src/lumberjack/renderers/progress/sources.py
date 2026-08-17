@@ -1,25 +1,15 @@
-"""The bar models: what is inferred from log lines, and what was declared.
+"""Inferred bars: how fast a source repeats, what it runs inside, when it stopped.
 
-Two models, both reading the store and neither importing `rich`, so the whole
-display layer is swappable and testable on a bare install:
+The inferred half, and all of Phase 4b. Identity is the *source location*: a
+`logger.debug(...)` inside a loop hits the same line every iteration, so
+`(pathname, lineno, func_name)` groups a loop's ticks with no template
+extraction, no masking and no clustering. On top of that grouping this module
+measures each source's period, sorts sources by period to recover which loop
+encloses which, takes the ratio between an enclosing loop and an enclosed one
+as the inner loop's iteration count, and retires a bar whose source has gone
+quiet.
 
-* `RepeatingSourceModel` — the inferred half. Identity is the *source
-  location*: a `logger.debug(...)` inside a loop hits the same line every
-  iteration, so `(pathname, lineno, func_name)` groups a loop's ticks with no
-  template extraction, no masking and no clustering. On top of that grouping
-  it measures each source's period, sorts sources by period to recover which
-  loop encloses which, takes the ratio between an enclosing loop and an
-  enclosed one as the inner loop's iteration count, and retires a bar whose
-  source has gone quiet.
-* `TaskProgressModel` — the exact half. Every number came from a `task()` or
-  `track()` call that stated it outright, so nothing here guesses.
-
-Counts come from the store, never from tallying the handler's live callback,
-so every renderer reading that store sees the same numbers. The store is read
-forward from a watermark rather than re-tallied, so a redraw costs what
-arrived since the last one instead of what the store holds — and every
-inference below runs per *poll*, over sources rather than rows, so log volume
-never drives its cost either.
+The bar ceiling lives here too, because sources are what it counts.
 """
 
 from __future__ import annotations
@@ -30,12 +20,15 @@ import time
 import warnings
 from typing import TYPE_CHECKING
 
+from lumberjack.renderers.progress.heartbeat import HeartbeatState, SessionHeartbeat
+from lumberjack.renderers.progress.smoothing import _smoothed
 from lumberjack.schema import SourceKey
+from lumberjack.store import WorkerKey
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from lumberjack.store import RecordStore, SourceDelta, WorkerKey
+    from lumberjack.store import RecordStore, SourceDelta
 
 #: How many times a source location must have logged before it earns a bar.
 #: Low on purpose: two hits is a coincidence, three is a loop.
@@ -46,19 +39,17 @@ DEFAULT_MIN_REPEATS = 3
 #: must still cost five redraws a second.
 DEFAULT_REFRESH_INTERVAL = 0.2
 
-#: Opt-in ceiling on how many bars the display draws. Unset means no ceiling.
+#: Opt-in ceiling on how many rows the display draws. Unset means no ceiling.
 #:
 #: Deliberately an environment variable rather than an `init()` option, and
 #: deliberately absent from the README: it is a debug and terminal-compat aid,
-#: not something to reach for in production. A bar count high enough to want
-#: it is a *symptom* — either lumberjack is grouping too finely, or the code
-#: is logging in a way that cannot be grouped — and capping hides that symptom
-#: rather than treating it. The specific diagnosis is that containment
-#: analysis has not merged sibling call sites into one loop's bar, which it
-#: never does: 1:1 merging is designed and deliberately unbuilt, because it
-#: needs a drawn bar to disappear. So the count measures how much structure is
-#: still uninferred, and the real remedy arrives with that.
-#: lumberjack: see issue #8
+#: not something to reach for in production. Capping was always the wrong
+#: answer to a high row count, because a high row count was a *symptom* — the
+#: display had inherited its unit from the grouping key and was drawing one row
+#: per call site. `loops.LoopRowModel` treats that instead, by merging sibling
+#: call sites into the loop they narrate; what remains is allocated by
+#: relevance rather than truncated. This stays for the terminal that cannot
+#: cope regardless.
 MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
 
 
@@ -91,11 +82,6 @@ def resolve_max_bars(override: int | None = None) -> int | None:
         return None
     return value
 
-
-#: Weight given to the newest period sample. Low, because the estimate feeds
-#: a number a human reads off a moving display: a rate that jitters every
-#: redraw is harder to read than one that lags slightly.
-PERIOD_SMOOTHING = 0.3
 
 #: How close two sources' periods must be to count as the same loop body.
 #: `logger.debug` on line 6 and line 12 of one loop fire once each per
@@ -157,6 +143,12 @@ class BarState:
     #: Seconds between records from this source, smoothed. None until two
     #: records have been seen — one record establishes no interval.
     period: float | None = None
+    #: `created` of the newest record from this source, or None before the
+    #: first. Reported because it is what says *which* of a loop body's call
+    #: sites fired last, and therefore where the iteration has got to — see
+    #: `position.CyclePositionModel`. It comes out of the same aggregate the
+    #: period does, so nothing new is queried to expose it.
+    last_at: float | None = None
     #: The source this one was inferred to run inside, if any.
     parent: SourceKey | None = None
     #: Iterations per enclosing cycle, inferred. None while unknown.
@@ -167,6 +159,11 @@ class BarState:
     depth: int = 0
     #: Nothing has arrived for `IDLE_PERIODS` of this source's own period.
     idle: bool = False
+    #: Every concurrent worker this line has been seen on, accumulated over
+    #: the run. Reported rather than kept private because it is the same fact
+    #: containment scoping needs and the same fact display-side grouping needs
+    #: — two sources cannot be one loop body if no worker ever ran both.
+    workers: frozenset[WorkerKey] = frozenset()
 
     @property
     def rate(self) -> float | None:
@@ -208,19 +205,32 @@ class RepeatingSourceModel:
         *,
         min_repeats: int = DEFAULT_MIN_REPEATS,
         clock: Callable[[], float] = time.time,
+        heartbeat: SessionHeartbeat | None = None,
     ) -> None:
         self._store = store
         self.min_repeats = min_repeats
+        # Fed from this model's poll rather than polling for itself: the
+        # heartbeat is a sum over the same delta already being fetched, and
+        # fetching it twice would double the one query a redraw is supposed to
+        # cost. Injectable because *what* it echoes is the display's business
+        # — the renderer builds one that knows its own passthrough level —
+        # while *when* it is fed is this model's.
+        self._heartbeat = (
+            heartbeat if heartbeat is not None else SessionHeartbeat(store)
+        )
         # Injectable so idle retirement can be driven deterministically. Every
         # other timestamp here comes from `LogRecord.created`, which is
         # `time.time()`, so the default is the same clock the records used.
         self._clock = clock
         # Every source seen, including those still short of min_repeats —
-        # their running total is what lets them qualify later.
-        # Unbounded: 300 repeating log sites means 300 bars.
-        # lumberjack: see issue #8
+        # their running total is what lets them qualify later. Unbounded, and
+        # that is the identity layer working as intended: 300 repeating log
+        # sites are 300 things that were captured. How many *rows* they become
+        # is `loops.LoopRowModel`'s question, and its answer is a handful.
         self._totals: dict[SourceKey, int] = {}
-        # Display order, append-only, so bars never jump around on screen.
+        # Arrival order, append-only. Where a row is drawn is decided from
+        # structure downstream (`layout.depth_first_order`); this is only the
+        # order sources qualified in, which breaks the ties that leaves.
         # The set mirrors it purely for membership: this is checked once per
         # source per poll, and a list scan there would be quadratic.
         self._shown: list[SourceKey] = []
@@ -256,6 +266,7 @@ class RepeatingSourceModel:
         """
         delta = self._store.count_by_source_since(self._watermark)
         self._watermark = delta.last_id
+        self._heartbeat.observe(delta)
         for source, count in delta.counts.items():
             self._totals[source] = self._totals.get(source, 0) + count
             self._update_period(source, count, delta)
@@ -280,6 +291,16 @@ class RepeatingSourceModel:
         self._infer_containment(delta)
         self._advance_cycles(delta)
         return self.bars()
+
+    @property
+    def heartbeat(self) -> HeartbeatState:
+        """Session-level liveness as of the last poll. See `SessionHeartbeat`.
+
+        Read through this model because that is where the delta is. A caller
+        wanting the heartbeat wants the bars in the same breath, and both come
+        out of one `poll()`.
+        """
+        return self._heartbeat.state
 
     def _update_period(self, source: SourceKey, count: int, delta: SourceDelta) -> None:
         """Fold this delta's timing into the source's interval estimate.
@@ -312,13 +333,7 @@ class RepeatingSourceModel:
             # a coarse clock. No interval to learn from, and dividing by the
             # span would report an infinite rate.
             return
-        sample = span / intervals
-        known = self._period.get(source)
-        self._period[source] = (
-            sample
-            if known is None
-            else PERIOD_SMOOTHING * sample + (1 - PERIOD_SMOOTHING) * known
-        )
+        self._period[source] = _smoothed(self._period.get(source), span / intervals)
 
     def _levels(self) -> list[list[SourceKey]]:
         """Drawn sources grouped into loop levels, outermost first.
@@ -482,14 +497,15 @@ class RepeatingSourceModel:
             self._cycle_base[source] = self._totals[source] - carried
 
     def bars(self) -> list[BarState]:
-        """The most recent poll's bars, in display order. Empty before `poll()`.
+        """The most recent poll's bars, in arrival order. Empty before `poll()`.
 
-        Display order stays first-qualified even once containment is known, so
-        an inner loop is drawn wherever it first earned a bar rather than
-        under the parent it is indented beneath. An inner loop always
-        qualifies first — it logs N times per outer iteration — so this is the
-        common case, not an edge one, and the indent can read as a rendering
-        bug. lumberjack: see issue #43
+        Arrival order — first-qualified — and not display order. The two used
+        to be the same thing, which is what made a nested row indent under
+        whichever unrelated loop happened to precede it. Laying rows out by
+        containment is `layout.depth_first_order()`'s job, and grouping call
+        sites into the loops a person actually wants to see is
+        `loops.LoopRowModel`'s; this list is one entry per *source location*,
+        which is the identity layer and stays exactly that.
         """
         now = self._clock()
         return [
@@ -497,6 +513,7 @@ class RepeatingSourceModel:
                 source=source,
                 count=self._totals[source],
                 period=self._period.get(source),
+                last_at=self._last_at.get(source),
                 parent=self._parent.get(source),
                 total=self._total.get(source),
                 cycle_current=max(
@@ -504,6 +521,7 @@ class RepeatingSourceModel:
                 ),
                 depth=self._depth(source),
                 idle=self._is_idle(source, now),
+                workers=frozenset(self._workers.get(source, ())),
             )
             for source in self._shown
         ]
@@ -546,101 +564,3 @@ class RepeatingSourceModel:
         if period is None or last_at is None:
             return False
         return now - last_at > max(IDLE_PERIODS * period, MIN_IDLE_SECONDS)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class TaskBarState:
-    """One named bar, built from what the tracking API actually reported.
-
-    Unlike `BarState` this has a `total` — sometimes. `task()` without one is
-    an indeterminate task, and the display says so by pulsing rather than by
-    inventing a denominator.
-    """
-
-    task_id: int
-    label: str
-    current: int
-    total: int | None
-    done: bool
-    depth: int
-
-    @property
-    def is_determinate(self) -> bool:
-        return self.total is not None
-
-
-class TaskProgressModel:
-    """Folds `store.task_events_since()` into one bar per task.
-
-    A task bar is the *latest state* of a task rather than a tally, which is
-    what makes it exact: `progress_current` is absolute, so the newest row for
-    a task is the whole truth about it and no accumulation is needed. That
-    also means a bar cannot drift — there is nothing to drift from.
-
-    No inference of any kind lives here. Every number came from a `task()` or
-    `track()` call that said so outright. Phase 4b's model is the one that
-    guesses; this one only reads.
-    """
-
-    def __init__(self, store: RecordStore) -> None:
-        self._store = store
-        # Unbounded, exactly as `RepeatingSourceModel._totals` is: a task that
-        # ended keeps its bar, because one that vanished mid-run would read as
-        # "this work stopped existing". A long-running process opening many
-        # short tasks therefore accumulates state. That is the exact-data
-        # analogue of the source-bar problem and belongs with it — retirement
-        # is 4b's, and what a ceiling should count once bars nest is the open
-        # question there. lumberjack: see issue #8
-        self._states: dict[int, TaskBarState] = {}
-        # Append-only display order, as for source bars: a bar that moves is
-        # unreadable. Children land after parents for free, because a parent
-        # must exist before `subtask()` can be called on it.
-        self._order: list[int] = []
-        self._parents: dict[int, int | None] = {}
-        self._watermark = 0
-
-    def poll(self) -> list[TaskBarState]:
-        """Fold in whatever arrived since the last call and return the bars."""
-        delta = self._store.task_events_since(self._watermark)
-        self._watermark = delta.last_id
-        for event in delta.events:
-            if event.task_id not in self._states:
-                self._order.append(event.task_id)
-                self._parents[event.task_id] = event.parent_task_id
-            self._states[event.task_id] = TaskBarState(
-                task_id=event.task_id,
-                label=event.label,
-                # A `start` row carries current=0; an `end` row carries the
-                # final count unsampled. Either way the newest row wins.
-                current=event.current or 0,
-                total=event.total,
-                done=event.event == "end",
-                depth=self._depth(event.task_id),
-            )
-        return self.bars()
-
-    def _depth(self, task_id: int) -> int:
-        """How deep this task sits in the parent chain.
-
-        Walked rather than stored because a child can be created before its
-        parent's first row is folded in — `subtask()` emits `start` for the
-        child, and the parent's own rows may already be behind the watermark.
-        The chain is shallow and the walk is a dict lookup per level.
-        """
-        depth = 0
-        seen = {task_id}
-        parent = self._parents.get(task_id)
-        # Only ancestors we can actually draw count. `evict()` can trim a
-        # parent's rows while a child's survive, and indenting that child
-        # under nothing reads as a rendering bug rather than as hierarchy.
-        # The `seen` guard is for a cycle, which the tracking API cannot
-        # produce but a hand-written store row could.
-        while parent is not None and parent in self._states and parent not in seen:
-            seen.add(parent)
-            depth += 1
-            parent = self._parents.get(parent)
-        return depth
-
-    def bars(self) -> list[TaskBarState]:
-        """The most recent poll's bars, in display order."""
-        return [self._states[task_id] for task_id in self._order]

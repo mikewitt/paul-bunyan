@@ -67,8 +67,6 @@ import json
 import logging
 import os
 import platform
-import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -228,7 +226,7 @@ def _stdlib_stream() -> Iterator[logging.Logger]:
     logger = logging.getLogger("bench.stream")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
-    sink = open(os.devnull, "w")
+    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
     handler = logging.StreamHandler(sink)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
@@ -245,7 +243,12 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
 
     stderr goes to devnull for the duration: the plain renderer is
     write-through, so leaving it pointed at a terminal would benchmark the
-    terminal.
+    terminal. The sink is opened as UTF-8 with `errors="replace"` rather than
+    in the platform default, because it exists to *discard* output and so must
+    never fail on it — on Windows the locale encoding is `cp1252`, which
+    cannot carry the display's bar and heartbeat characters, and the resulting
+    `UnicodeEncodeError` was invisible: it fired while stderr still pointed
+    here, so the traceback went to devnull too.
 
     One caveat on the rich arm, since it is the flattering row. Its *analysis*
     timer runs regardless of where output goes — the store queries and bar
@@ -265,7 +268,7 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
     """
     _reset_logging()
     real_stderr = sys.stderr
-    sink = open(os.devnull, "w")
+    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
     sys.stderr = sink
     try:
         lumberjack.init(
@@ -273,9 +276,14 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
         )
         yield logging.getLogger("bench.lumberjack")
     finally:
-        lumberjack.shutdown()
+        # stderr first: `shutdown()` raising while it still points at devnull
+        # swallows its own traceback, which is how a Windows-only failure here
+        # showed up as an empty stdout and an empty stderr.
         sys.stderr = real_stderr
-        sink.close()
+        try:
+            lumberjack.shutdown()
+        finally:
+            sink.close()
 
 
 def _measure(arm: Arm, records: int) -> Sample:
@@ -400,7 +408,9 @@ def measure_drain(records: int) -> float:
     survive.
     """
     _reset_logging()
-    real_stderr, sink = sys.stderr, open(os.devnull, "w")
+    real_stderr, sink = sys.stderr, open(
+        os.devnull, "w", encoding="utf-8", errors="replace"
+    )
     sys.stderr = sink
     try:
         lumberjack.init(
@@ -416,9 +426,14 @@ def measure_drain(records: int) -> float:
         lumberjack.flush()
         elapsed = time.perf_counter_ns() - start
     finally:
-        lumberjack.shutdown()
+        # stderr first: `shutdown()` raising while it still points at devnull
+        # swallows its own traceback, which is how a Windows-only failure here
+        # showed up as an empty stdout and an empty stderr.
         sys.stderr = real_stderr
-        sink.close()
+        try:
+            lumberjack.shutdown()
+        finally:
+            sink.close()
     return records / (elapsed / 1e9)
 
 
@@ -448,27 +463,84 @@ def _machine() -> dict[str, Any]:
     }
 
 
+def _git_dir(start: Path) -> Path | None:
+    """The `.git` directory for `start`, following a worktree's pointer file."""
+    for parent in [start, *start.parents]:
+        candidate = parent / ".git"
+        if candidate.is_dir():
+            return candidate
+        if candidate.is_file():
+            # A linked worktree: `.git` is a file reading `gitdir: <path>`.
+            # This repo runs agents in worktrees, so the case is not exotic.
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+            _, _, path = text.partition("gitdir:")
+            resolved = Path(path.strip())
+            return resolved if resolved.is_dir() else None
+    return None
+
+
 def _git_commit() -> str | None:
     """Which revision produced these numbers. Best-effort, never fatal.
 
-    Resolved through `shutil.which` rather than relying on `PATH` lookup
-    inside `subprocess`, so the absolute binary is what runs and a machine
-    without git returns None instead of raising.
+    Read straight out of `.git` rather than shelling out to `git rev-parse`.
+    Three reasons, in order of how much they matter: it works on a machine
+    with no git installed, it costs a file read instead of a process spawn,
+    and it keeps a benchmark from launching subprocesses at all — which is
+    one less thing for a reader (or a static analyser) to have to think about.
+
+    Every failure path returns None. A baseline without a revision is mildly
+    less useful; a benchmark that raises while collecting provenance is
+    useless, so nothing here is allowed to escape.
+
+    That promise needs both halves below to hold. `errors="replace"` keeps a
+    stray byte in a ref file from raising, and the guard catches `ValueError`
+    as well as `OSError` because `UnicodeDecodeError` is a `ValueError` — an
+    earlier version caught only `OSError` and a non-UTF-8 `.git/HEAD` took the
+    whole benchmark down while it was reading provenance it did not need.
     """
-    git = shutil.which("git")
-    if git is None:
-        return None
     try:
-        out = subprocess.run(
-            [git, "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).resolve().parent,
-            timeout=5,
+        git_dir = _git_dir(Path(__file__).resolve().parent)
+        if git_dir is None:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if not head.startswith("ref:"):
+            # Detached HEAD holds the sha directly.
+            return head[:7] or None
+
+        ref = head.removeprefix("ref:").strip()
+        # A worktree's refs live in the main checkout's git dir, which
+        # `commondir` points at; for an ordinary checkout there is no such
+        # file and the git dir is its own common dir.
+        commondir = git_dir / "commondir"
+        common = (
+            (
+                git_dir
+                / commondir.read_text(encoding="utf-8", errors="replace").strip()
+            ).resolve()
+            if commondir.is_file()
+            else git_dir
         )
-    except (OSError, subprocess.SubprocessError):
+        loose = common / ref
+        if loose.is_file():
+            return (
+                loose.read_text(encoding="utf-8", errors="replace").strip()[:7] or None
+            )
+
+        # Packed refs: one "<sha> <ref>" per line, comments and peeled tags
+        # (^<sha>) interleaved.
+        packed = common / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                if line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name.strip() == ref:
+                    return sha[:7] or None
+    except (OSError, ValueError):
         return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    return None
 
 
 def _report(

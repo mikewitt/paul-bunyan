@@ -4,30 +4,58 @@
 [![Coverage](https://app.codacy.com/project/badge/Coverage/cb0069a163c44c1ea01a4e86c7a16fb9)](https://app.codacy.com/gh/mikewitt/paul-bunyan/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_coverage)
 [![Code quality](https://app.codacy.com/project/badge/Grade/cb0069a163c44c1ea01a4e86c7a16fb9)](https://app.codacy.com/gh/mikewitt/paul-bunyan/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 
-A drop-in UX layer for Python's stdlib `logging`. Capture every log record at
-full fidelity into a queryable store, while rendering something concise —
-instead of a thousand scrolling `DEBUG` lines, render progress.
+A drop-in UX layer for Python's stdlib `logging`. **The question it exists to
+answer is "is my program still working?"** — so it captures every log record
+at full fidelity into a queryable store, and renders something a person can
+actually read: instead of a thousand scrolling `DEBUG` lines, progress.
 
-**Status: early, and pre-1.0.** Capture, storage (SQLite), output-mode
-detection, plain/rich rendering, the explicit `track()` / `task()` API with
-outbound OpenTelemetry spans, and named determinate bars driven by that API
-are in place. So is the inference on top of uninstrumented logging: log lines
-are grouped by *source location*, timed, and read for structure, so a loop
-inside a loop draws as a nested bar with a real percentage that nobody
-declared. Still to come: a hints config, the inbound OpenTelemetry bridge,
-and multiprocessing-aware capture. See `CLAUDE.md` for the plan.
+Logging is the transport, not the product. It is the one pipe every Python
+program already has, it already records which line emitted each record and on
+which thread, and unlike a progress bar it does not get harder when you add
+concurrency.
+
+![Four worker threads logging inside their own loops, rendered as live progress bars](docs/demo-pipeline.gif)
+
+Four threads, ~2,000 `logger.debug` calls, and **no lumberjack API anywhere in
+the worker functions** — that is `examples/demo.py`, unmodified, under
+`lumberjack.init()`. Recreate it with `uv run python examples/demo.py`.
+
+**Status: early, pre-1.0, and not published yet.** Working today: capture,
+SQLite storage, output-mode detection, plain/JSON/rich rendering, the explicit
+`track()` / `task()` API with outbound OpenTelemetry spans and the named bars
+it drives, structural inference over uninstrumented logging, one row per
+inferred loop with template labels, a second row showing position within the
+current iteration when a loop is too slow to read otherwise, a session
+heartbeat, static analysis of a source file's loop structure, and an
+instrumentation linter that says which log line to add and where
+(`python -m lumberjack.lint`).
+
+Still to come: a hints config, the inbound OpenTelemetry bridge, and
+multiprocessing-aware capture.
+`CLAUDE.md` has the design and the reasoning; `examples/demo.py` has it in
+runnable form, one scenario per shape of log stream.
 
 ## Install
 
+**Not on PyPI yet** — the name is not settled, so install from source:
+
 ```bash
-pip install lumberjack               # zero required dependencies (library use)
-pip install lumberjack[recommended]  # + rich, for interactive terminal output (application use)
+git clone https://github.com/mikewitt/paul-bunyan
+cd paul-bunyan
+uv sync --all-extras        # or: pip install -e ".[recommended]"
 ```
+
+Once published there will be two shapes, and the split is deliberate: the base
+install pulls in **nothing**, so a library can instrument without imposing a
+dependency on anyone downstream, while `[recommended]` adds `rich`, which *is*
+the interactive display. Every optional dependency degrades rather than errors
+— no `rich` means the plain renderer, not a crash.
 
 ## What use looks like
 
-Four rungs, and you stop at the one you need. The first is the normal case;
-the rest are opt-in.
+Five things you can do, in rough order of how much you have to say. The first
+two are the normal case; the rest are opt-in, and plenty of programs never
+need them.
 
 ### 1. Drop it in
 
@@ -65,39 +93,57 @@ the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-demo.py:90 extract()      ━━━━━━━━━━━━━━━━━━━━ 700 records         238/s 0:00:02
-  demo.py:124 reconcile() ━━━━━━━━━━━━━━━━━━━╺ 19/20 · 480 records 191/s 0:00:02
-demo.py:96 transform()    ━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
-demo.py:107 load()        ━━━━━━━━━━━━━━━━━━━━ 300 records         98/s  0:00:02
-demo.py:122 reconcile()   ━━━━━━━━━━━━━━━━━━━━ 24 records          9/s   0:00:02
+⠴  1,863 events · 565.2/s     fetched row 671 from source table
+fetched row … from source table ━━━━━━━━━━━━━ 672 iterations         233/s 0:00:02
+normalized record …             ━━━━━━━━━━━━━ 405 iterations         140/s 0:00:02
+wrote batch … to warehouse      ━━━━━━━━━━━━━ 281 iterations         97/s  0:00:02
+reconciling batch …             ━━━━━━━━━━━━━ 24 iterations          9/s   0:00:02
+  compared row … against ledger ━━━━━━━━━━━━━ 19/20 · 480 iterations 188/s 0:00:02
 ```
 
-One bar per source location, no concurrency-specific setup. Three of those
-loops are flat, so their bars only count and pace: nothing in the stream says
-how long they are, and claiming otherwise would be a guess. `reconcile` runs a
-loop inside a loop, and *that* is in the stream — line 124 fires twenty times
-between consecutive firings of line 122 — so it draws indented with a real
-`19/20`, from a total nobody declared. When a loop goes quiet for long enough
-its bar fills and reads `idle`.
+The top row is the **heartbeat**: how many records have arrived, how fast, and
+the newest line. It answers "is anything happening at all" before any loop has
+been identified, and it is the only row a program with no repeating log lines
+will draw. It moves when records arrive and **stops when they stop** — never on
+a timer, so a frozen heartbeat means the program has genuinely gone quiet
+rather than that the animation ran out. That is a prompt to log more, and it is
+honest: when a library spends three silent seconds inside a C extension, there
+is nothing to see and saying otherwise would be a lie.
 
-Two things this deliberately does not do. It does not group by worker: two
-threads running the same loop share a bar, though thread and process are
+Below it, **one row per loop** — not per log line. Several call sites in one
+loop body collapse into a single row, because a person wants the shape of
+their program rather than a bar per call site. Source location stays the
+identity underneath; it is simply not the display unit.
+
+Two consequences worth naming. Rows are labelled by the **message template**,
+which stdlib keeps separate from the rendered text whenever the call uses lazy
+`%` formatting — so `log.debug("fetched row %d from source table", i)` names
+its own row, with nothing parsed out of the output. And the count is
+**iterations**, not records: the fourth row says `24`, and the `reconcile`
+pair below it did 480 comparisons across those 24 batches.
+
+Three of those loops are flat, so their bars only count and pace: nothing in
+the stream says how long they are, and claiming otherwise would be a guess.
+`reconcile` runs a loop inside a loop, and *that* is in the stream — the inner
+line fires twenty times between consecutive firings of the outer one — so it
+draws indented under its real parent with a `20/20` nobody declared. When a
+loop goes quiet its row collapses to a marker and reads `idle`, rather than
+vanishing: a finished run should still show what it did.
+
+One thing this deliberately does not do: it does not group by worker. Two
+threads running the same loop share a row, though thread and process are
 recorded on every record and *are* what stop two unrelated loops being read as
-nested. And it does not move a bar once drawn — which is why the indented
-child above is sitting under `extract`, an unrelated loop on another thread,
-rather than under the `reconcile` line it actually belongs to. That one is a
-real defect, not a trade-off; see
-[#43](https://github.com/mikewitt/paul-bunyan/issues/43).
+nested.
 
 Inference is an 80% solution on purpose, and it will be wrong sometimes. When
 it is, the cost is a cosmetic one: a bar that pulses when it could have had a
 percentage, or one that overshoots and goes back to pulsing. The store is
-never wrong. [Telling it outright](#2-tell-it-what-the-work-is) is what
+never wrong. [Telling it outright](#3-tell-it-what-the-work-is) is what
 `track()` and `task()` are for.
 
 Nothing is lost to the collapse:
 
-- every record is in the store, queryable — that is [rung 3](#3-read-back-what-was-captured);
+- every record is in the store, queryable — see [reading back what was captured](#4-read-back-what-was-captured);
 - `WARNING` and above still prints above the bars, because the one line you
   actually needed to see must not be hidden by the thing that hides noise;
 - when the display is the lossy kind, the last 50 records are replayed at exit,
@@ -162,11 +208,42 @@ on the way out. The background flush thread is a daemon, so it never delays
 interpreter shutdown either.
 
 `shutdown()` is for the cases where process exit is *not* the end of the story
-— [rung 4](#4-manage-the-lifecycle-if-you-need-to).
+— see [managing the lifecycle](#5-manage-the-lifecycle-if-you-need-to).
 
-### 2. Tell it what the work is
+### 2. Log the way you would anyway
 
-Rung 1 infers what it can from how often a log line repeats, which is a great
+This is the step that matters most and asks for the least: **no lumberjack API
+at all**, just log lines placed where they were always most useful. The display
+gets dramatically better for them, and the log file is better to read even with
+lumberjack uninstalled — which is what makes it a reasonable thing to ask.
+
+- **Leave the `logger.debug` lines in, and add more.** Density is input
+  quality. A loop that logs once per iteration is a bar; a loop that logs
+  nothing is invisible, and no amount of inference recovers it.
+- **Log inside the body, not around it.** A line before and after a loop says
+  it started and finished. A line *in* it says how fast it is going.
+- **Narrate a slow body.** Five lines inside a three-second iteration can say
+  where you are within it; one line can only say that it happened.
+- **Announce each stage of a multi-stage routine**, one `log.info` apiece.
+- **Use lazy `%` formatting, never f-strings**, in log calls. `log.debug("row
+  %d", i)` keeps the template and the data in separate fields, so the template
+  can label a row; `log.debug(f"row {i}")` destroys it at the call site.
+  `ruff`'s `G001`–`G004` enforce exactly this, and are worth enabling
+  regardless of lumberjack.
+- **Never write a logging wrapper without `stacklevel=2`.** Identity is the
+  source location, so a shim makes every call site in your program look like
+  one line.
+
+`examples/demo.py` carries a scenario per shape of log stream, including the
+ones lumberjack currently handles badly, and states for each what it does today
+versus what it should. An instrumentation linter that reports which of these a
+codebase is missing is planned
+([#40](https://github.com/mikewitt/paul-bunyan/issues/40)) — the point being
+that a tool can name the specific line to add, which prose cannot.
+
+### 3. Tell it what the work is
+
+Inference gets what it can from how often a log line repeats, which is a great
 deal for a nested loop and nothing at all for an outermost one — no amount of
 watching a top-level loop reveals how many iterations are left. `task()` and
 `track()` are how code says so outright, and a stated total always beats an
@@ -207,7 +284,7 @@ entirely by the application that runs your code:
 
 | The application has | Your `task()` produces |
 | --- | --- |
-| just `pip install lumberjack` | nothing at all — no output, no log line |
+| lumberjack installed, nothing configured | nothing at all — no output, no log line |
 | OpenTelemetry configured the normal way | OTel spans |
 | called `lumberjack.init()` | records in the store, and the display |
 | both | both |
@@ -226,11 +303,11 @@ Two things worth knowing:
 - **These draw as real bars.** A task with a total shows a percentage; one
   without pulses rather than inventing a denominator; subtasks are indented
   under their parent, and a bar finishes when its task ends. Uninstrumented
-  log lines still get the rung-1 count bars, drawn below these.
+  log lines still get their inferred count bars, drawn below these.
 
 `examples/tracking.py` is the whole thing end to end.
 
-### 3. Read back what was captured
+### 4. Read back what was captured
 
 The display is lossy on purpose. The store is not, and `current_store()` is
 the supported way in.
@@ -275,7 +352,7 @@ a real run the store is already near-current; `flush()` just removes the race.
 `examples/demo.py` uses a couple of them. Treat the rest as unstable for now:
 it is the interface the renderers are still being built against.
 
-### 4. Manage the lifecycle, if you need to
+### 5. Manage the lifecycle, if you need to
 
 `shutdown()` reverses `init()`: it stops the pump, flushes the buffer, tears
 down the live display, puts back the root logger's handlers *and* its level,
@@ -389,6 +466,21 @@ uv run black --check .
 uv run mypy --strict src
 uv run mypy tests examples benchmarks
 ```
+
+### Recording the demo
+
+`scripts/record_demo.py` turns any demo scenario into an animated GIF — the
+README's hero image is `pipeline`, recorded this way:
+
+```bash
+uv run --with pillow --with pyte --with fonttools \
+    python scripts/record_demo.py pipeline
+```
+
+It replays the pty output through a real terminal emulator rather than
+stripping ANSI, because a live display is a sequence of *edits to a screen*
+and stripping the escapes yields every intermediate line ever printed — which
+is not what anyone saw.
 
 ### What it costs to leave the logging in
 
