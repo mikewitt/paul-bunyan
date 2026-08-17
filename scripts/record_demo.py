@@ -256,9 +256,27 @@ def render(
     return img
 
 
+def _scenario_names(root: Path) -> list[str]:
+    """The demo's own scenario list, imported rather than restated here.
+
+    Without it a typo is recorded rather than reported: the child starts, prints
+    argparse's usage message and exits, and the pty faithfully turns that into a
+    GIF. Importing keeps the two lists from drifting, which a copy would not.
+    """
+    sys.path.insert(0, str(root / "examples"))
+    try:
+        import demo
+    finally:
+        sys.path.pop(0)
+    return [scenario.name for scenario in demo.SCENARIOS]
+
+
 def main(argv: list[str] | None = None) -> int:
+    root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    parser.add_argument("scenario", default="pipeline", nargs="?")
+    parser.add_argument(
+        "scenario", default="pipeline", nargs="?", choices=_scenario_names(root)
+    )
     parser.add_argument("--out", default=None, help="output .gif path")
     parser.add_argument("--cols", type=int, default=88)
     parser.add_argument("--rows", type=int, default=14)
@@ -282,7 +300,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    root = Path(__file__).resolve().parent.parent
     out = Path(args.out) if args.out else root / "docs" / f"demo-{args.scenario}.gif"
     out.parent.mkdir(parents=True, exist_ok=True)
 

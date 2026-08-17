@@ -431,6 +431,17 @@ def _stage_announcements(
         )
 
 
+def _before_message(method: str) -> str:
+    """What a suggested call must pass before the message, for `method`.
+
+    Every `fix:` below is meant to be pasted, so the suggested call has to be
+    one that runs. `logger.log()` takes the level first and the other six do
+    not, which `static.message_arg_index()` already knows — asking it beats
+    matching on the name here and in the next rule.
+    """
+    return "level, " if static.message_arg_index(method) else ""
+
+
 def _wrappers(structure: static.FileStructure) -> Iterator[Finding]:
     """A logging wrapper with no `stacklevel=` — #37's one-keyword fix."""
     for site in structure.call_sites.values():
@@ -448,9 +459,9 @@ def _wrappers(structure: static.FileStructure) -> Iterator[Finding]:
                 f"reports *this* line and they all collapse onto one bar."
             ),
             fix=(
-                f"pass the caller's frame through: "
-                f"`log.{site.method}(message, *args, stacklevel=2)`. One keyword, "
-                f"and every call site gets its own identity back."
+                f"pass the caller's frame through: `log.{site.method}("
+                f"{_before_message(site.method)}message, *args, stacklevel=2)`. "
+                f"One keyword, and every call site gets its own identity back."
             ),
         )
 
@@ -471,7 +482,8 @@ def _fstrings(structure: static.FileStructure) -> Iterator[Finding]:
                 "and a count but no name."
             ),
             fix=(
-                f'use lazy %-formatting: `log.{site.method}("row %d parsed", i)` '
+                f"use lazy %-formatting: `log.{site.method}("
+                f'{_before_message(site.method)}"row %d parsed", i)` '
                 f"rather than an f-string. The template and the data then land "
                 f"in separate fields, which is also what makes the log file "
                 f"greppable."

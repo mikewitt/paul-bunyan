@@ -1532,3 +1532,42 @@ def test_a_legacy_windows_console_gets_glyphs_it_can_draw(store: RecordStore):
         finally:
             legacy.close()
             modern.close()
+
+
+def test_a_console_that_cannot_encode_the_mark_gets_the_ascii_one(store: RecordStore):
+    """The second signal, and it fires where the first does not. A modern
+    terminal redirected to a stream declaring `ascii` — or a Windows console on
+    `cp1252` — is not `legacy_windows`, so rich draws its own box characters
+    happily and only lumberjack's glyphs are unencodable. A write rich cannot
+    encode raises rather than degrading, which would take down the
+    `logger.debug()` that reached it, so both glyphs fall back together.
+    """
+
+    class _AsciiStream(io.StringIO):
+        encoding = "ascii"
+
+    real_console = rich_renderer_module.Console
+    monkeypatch = pytest.MonkeyPatch()
+    # legacy_windows pinned off so this exercises the encoding signal alone:
+    # rich detects it per *platform*, not per stream, so a Windows runner would
+    # otherwise take the branch above and never reach this one.
+    monkeypatch.setattr(
+        rich_renderer_module,
+        "Console",
+        lambda **kwargs: real_console(
+            force_terminal=True, legacy_windows=False, **kwargs
+        ),
+    )
+    renderer = RichProgressRenderer(store, stream=_AsciiStream(), refresh_interval=0)
+    try:
+        assert not renderer._console.legacy_windows
+        assert renderer._frames.isascii()
+        mark = next(
+            column
+            for column in renderer._source_progress.columns
+            if hasattr(column, "_collapsed_mark")
+        )
+        assert mark._collapsed_mark.isascii()
+    finally:
+        renderer.close()
+        monkeypatch.undo()

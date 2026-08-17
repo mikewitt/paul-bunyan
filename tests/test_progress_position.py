@@ -64,6 +64,21 @@ def run():
         log.debug("batch %d: committing", batch)
 """
 
+# A body whose last line is an f-string. The template is destroyed at the call
+# site, so `record.msg` arrives as rendered text and that source is unplaceable.
+FSTRING = """\
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def run():
+    for batch in range(6):
+        log.debug("batch %d: opening connection", batch)
+        log.debug("batch %d: fetching manifest", batch)
+        log.debug(f"batch {batch}: far wider than any real template in this body")
+"""
+
 # `phases`' announcement line: one call site, so position is 1 of 1 forever.
 LONE = """\
 import logging
@@ -217,6 +232,33 @@ def test_the_stage_column_is_sized_for_every_stage_at_once(store, make_row, tmp_
 
     _iterate(store, make_row, path, at=at, pace=3.0, upto=1)
     assert model.poll()[0].position.width == widest
+
+
+def test_an_fstring_stage_is_neither_named_nor_counted_in_the_width(
+    store, make_row, tmp_path
+):
+    """An f-string leaves `record.msg` holding rendered text, which fails the
+    drift guard, so that call site is unplaceable and can never be the stage on
+    show. The row stays on the last line it can name — and the width is sized
+    for the stages it can, not for the one it will never print."""
+    path = _module(tmp_path, "fstring.py", FSTRING)
+    stages = (
+        "batch %d: opening connection",
+        "batch %d: fetching manifest",
+        "batch 3: far wider than any real template in this body",
+    )
+    model = LoopRowModel(store, min_repeats=3)
+    _run(store, make_row, path, pace=3.0, stages=stages)
+
+    position = model.poll()[0].position
+    assert position is not None
+    # The f-string fired most recently and is skipped, so the newest stage the
+    # row can name is the second — of three, because the AST counts all three.
+    assert (position.current, position.total) == (2, 3)
+    assert position.label == "batch …: fetching manifest"
+    # The widest of the two stages that can be named, not of the three lines.
+    assert position.width == len("batch …: opening connection")
+    assert position.width < len(stages[2])
 
 
 # --- and where it refuses ---------------------------------------------------

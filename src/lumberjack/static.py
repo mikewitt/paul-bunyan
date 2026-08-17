@@ -286,6 +286,18 @@ _MODULE_CTX: Final = _Ctx(
 )
 
 
+def message_arg_index(method: str) -> int | None:
+    """Which positional argument carries the message, or None if not a log call.
+
+    Public for the linter, which suggests replacement call sites. `logger.log()`
+    takes the level first, so a suggestion built by interpolating a method name
+    into `log.{method}("…")` is code a reader would paste and break. Reading the
+    index rather than special-casing the name keeps that right for whatever
+    `_MESSAGE_ARG` grows.
+    """
+    return _MESSAGE_ARG.get(method)
+
+
 def _log_call(call: ast.Call) -> _LogCall | None:
     """Recognise a logging call, or None. See `_MESSAGE_ARG` for the rule."""
     func = call.func

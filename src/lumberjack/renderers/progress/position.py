@@ -262,6 +262,14 @@ def _body_width(loop: SourceKey) -> int | None:
     not fired yet and one that never will. Sizing it to what has been seen
     would widen the column the first time a long stage came round, dragging the
     bars sideways at exactly the moment a reader is watching them move.
+
+    A site with no template — an f-string, or a message passed by variable —
+    contributes nothing, and cannot make the column too narrow by being
+    skipped: `record.msg` for such a line is rendered text, which fails
+    `template_matches()`, so `LoopRowModel` files it as unplaceable, `_stages`
+    skips it and it is never a label. The stage it *does* land on is measured
+    here. `default` covers a body of nothing but those, which is admitted by
+    nothing downstream and would otherwise be an empty `max()`.
     """
     structure = static.analyze_file(loop.pathname)
     if structure is None:  # pragma: no cover - the group came from this file
@@ -272,6 +280,10 @@ def _body_width(loop: SourceKey) -> int | None:
     if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
         return None
     return max(
-        len(describe_template(site.template)) if site.template else 0
-        for site in found.call_sites
+        (
+            len(describe_template(site.template))
+            for site in found.call_sites
+            if site.template is not None
+        ),
+        default=0,
     )
