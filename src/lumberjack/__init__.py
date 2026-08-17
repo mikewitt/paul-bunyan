@@ -203,6 +203,10 @@ def flush() -> None:
     raises `sqlite3.ProgrammingError` into whichever thread called this —
     which for the pump is lumberjack's own, but for anyone calling `flush()`
     by hand is theirs.
+
+    `teardown._flush_buffer` is a deliberate lock-free copy of the
+    drain-then-append below (see the comment there for why); a change to the
+    protocol here has to land in both places.
     """
     with _registry.registry_lock():
         session = _registry.current_session()

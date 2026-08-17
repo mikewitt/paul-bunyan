@@ -32,7 +32,7 @@ def _smoothed(known: float | None, sample: float) -> float:
 
 def fold_interval(
     previous: float | None, newest: float, oldest: float, count: int
-) -> tuple[float, float] | None:
+) -> tuple[float, int] | None:
     """The `(span, intervals)` one delta of records contributes, or None.
 
     Two cases, both exact rather than approximate:
