@@ -248,6 +248,17 @@ def test_the_ratio_between_the_rates_is_the_inner_loops_total(store, make_row):
     assert bars[4].total is None, "nothing bounds an outermost loop"
 
 
+def test_a_fractional_ratio_rounds_to_the_nearest_total(store, make_row):
+    """The one mutant the suite used to miss (issue #45): every other
+    containment test measures an exact integer ratio, so `round(ratio)` and
+    `int(ratio)` were indistinguishable. An outer period of 7.6 with the
+    smoothing lag leaves the measured ratio between 7.5 and 8 at confirmation
+    time — eight iterations, and truncation would claim seven."""
+    model = RepeatingSourceModel(store, min_repeats=3)
+    bars, _ = _drive_nested(store, model, make_row, outer_period=7.6)
+    assert bars[6].total == 8
+
+
 def test_the_inner_bar_is_indented_under_its_parent(store, make_row):
     model = RepeatingSourceModel(store, min_repeats=3)
     bars, _ = _drive_nested(store, model, make_row)
