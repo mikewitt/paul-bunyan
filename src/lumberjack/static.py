@@ -84,6 +84,30 @@ _LOOP_KINDS: Final[Mapping[type[ast.AST], LoopKind]] = MappingProxyType(
     }
 )
 
+#: What the message argument *is*, which decides what survives to runtime.
+#:
+#: - `literal` — a string constant, so `record.msg` is the template.
+#: - `fstring` — an f-string, so the template is rendered away at the call
+#:   site and cannot be recovered. `%`, `+` and `.format()` do the same thing
+#:   and are deliberately *not* classified here: they need expression analysis
+#:   this module does not do, and ruff's G001-G003 already own them.
+#: - `parameter` — a bare name that is a parameter of the enclosing function,
+#:   which is the signature of a logging wrapper (see `has_stacklevel`).
+#: - `other` — anything else. A local variable, a subscript, a call.
+MessageKind = Literal["literal", "fstring", "parameter", "other"]
+
+#: Statements that own a body of their own, so a statement count for one body
+#: stops at them: a nested loop is a separate body with its own call sites,
+#: and a nested `def` does not run when the enclosing body does.
+_OWN_BODY: Final = (
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+)
+
 #: What `LogRecord.funcName` reads at module level, so this module agrees.
 MODULE_SCOPE: Final = "<module>"
 
@@ -99,6 +123,12 @@ class CallSite:
 
     lineno: int
     func_name: str
+    #: The `def`/`class`/`lambda` line of the enclosing scope, or None at
+    #: module scope. `func_name` alone does not identify a scope — one file
+    #: can hold two methods of the same name on different classes, and
+    #: `src/lumberjack/renderers/progress.py` holds two `_depth`s today — so
+    #: anything grouping by scope needs this rather than the name.
+    func_lineno: int | None
     #: The method called: `debug`, `info`, `log`, … . Not the level a record
     #: ends up with — `.log()` takes that as an argument.
     method: str
@@ -108,6 +138,15 @@ class CallSite:
     #: template does not survive to runtime either and there is nothing to
     #: compare against.
     template: str | None
+    #: What the message argument is. `template` is non-None exactly when this
+    #: is `"literal"`; the other values say *why* there is no template, which
+    #: is the difference between advice worth giving and advice that is wrong.
+    message_kind: MessageKind
+    #: The call passes `stacklevel=`. True also when it forwards `**kwargs`,
+    #: which may carry one: unknown is reported as present, so a consumer
+    #: warning about a missing `stacklevel=` never warns about a call that
+    #: might already have it.
+    has_stacklevel: bool
     #: Enclosing loops, outermost first, as their `lineno`s. Empty when the
     #: call is not inside a loop. Resets at every function, lambda and class
     #: boundary: a closure defined in a loop body does not run per iteration.
@@ -145,12 +184,25 @@ class Loop:
     """
 
     lineno: int
+    #: The last line the statement spans, so a report can say "lines 145-146"
+    #: rather than pointing at a `for` whose body is the interesting part.
+    end_lineno: int
     kind: LoopKind
     func_name: str
+    #: The enclosing scope's `def`/`class`/`lambda` line — see
+    #: `CallSite.func_lineno` for why the name is not enough.
+    func_lineno: int | None
     #: 1-based nesting depth within the enclosing scope.
     depth: int
     #: The enclosing loop's `lineno`, or None at depth 1.
     parent: int | None
+    #: Statements in this body, counting into `if`/`try`/`with`/`match` blocks
+    #: but stopping at a nested loop or `def` — those are bodies of their own.
+    #: The one number that says how much work a body does before it repeats,
+    #: which is what separates "one log line is plenty" from "one log line for
+    #: all of this". It counts statements, not cost: a body of six cheap
+    #: assignments and a body of six network calls look identical here.
+    body_statements: int
     #: Call sites *directly* in this body — a nested loop's own sites belong
     #: to that loop, not to this one — in textual order.
     call_sites: tuple[CallSite, ...] = ()
@@ -176,6 +228,21 @@ class FileStructure:
     call_sites: Mapping[int, CallSite]
     #: Every loop in the file by `lineno`, in source order.
     loops: Mapping[int, Loop]
+    #: The file imports `logging` somewhere — `import logging`, `import
+    #: logging.handlers`, `from logging import …`, at any depth.
+    #:
+    #: The one cheap corroboration available for the receiver-blind match in
+    #: `_MESSAGE_ARG` (issue #61). Measured over this venv's installed
+    #: packages: 566 recognised call sites, of which 110 are not loggers at
+    #: all (`parser.error`, `builder.error`, `errors.warning`). Restricting to
+    #: files that import `logging` keeps 429 of the 456 real ones and drops
+    #: all but 2 of the 110 — 94% of the signal for 2% of the noise.
+    #:
+    #: Reported rather than applied. The display wants every call site it can
+    #: get, because a *missed* one corrupts sibling ordinals; the linter wants
+    #: the opposite trade, because a false one costs its credibility. Same
+    #: fact, two consumers, opposite thresholds.
+    imports_logging: bool
 
 
 # --------------------------------------------------------------------------
@@ -189,12 +256,17 @@ class _LogCall(NamedTuple):
     lineno: int
     method: str
     message: ast.expr
+    has_stacklevel: bool
 
 
 class _Ctx(NamedTuple):
     """Lexical context threaded down the walk."""
 
     func_name: str
+    func_lineno: int | None
+    #: Parameter names of the enclosing function, for `MessageKind`: a bare
+    #: name that is a parameter is a message the caller supplied.
+    params: frozenset[str]
     loops: tuple[int, ...]
     conditional: bool
 
@@ -204,7 +276,13 @@ class _Found(NamedTuple):
     ctx: _Ctx
 
 
-_MODULE_CTX: Final = _Ctx(func_name=MODULE_SCOPE, loops=(), conditional=False)
+_MODULE_CTX: Final = _Ctx(
+    func_name=MODULE_SCOPE,
+    func_lineno=None,
+    params=frozenset(),
+    loops=(),
+    conditional=False,
+)
 
 
 def _log_call(call: ast.Call) -> _LogCall | None:
@@ -225,6 +303,11 @@ def _log_call(call: ast.Call) -> _LogCall | None:
         lineno=func.end_lineno or func.lineno,
         method=func.attr,
         message=call.args[index],
+        # `kw.arg is None` is `**kwargs`, which may carry a `stacklevel` this
+        # walk cannot see. Reporting it as present is the quiet direction.
+        has_stacklevel=any(
+            kw.arg == "stacklevel" or kw.arg is None for kw in call.keywords
+        ),
     )
 
 
@@ -233,6 +316,61 @@ def _template(message: ast.expr) -> str | None:
     if isinstance(message, ast.Constant) and isinstance(message.value, str):
         return message.value
     return None
+
+
+def _message_kind(message: ast.expr, params: frozenset[str]) -> MessageKind:
+    """Classify the message argument. See `MessageKind` for what is left out."""
+    if isinstance(message, ast.Constant) and isinstance(message.value, str):
+        return "literal"
+    if isinstance(message, ast.JoinedStr):
+        return "fstring"
+    if isinstance(message, ast.Name) and message.id in params:
+        return "parameter"
+    return "other"
+
+
+def _params(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+) -> frozenset[str]:
+    args = node.args
+    names = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    return frozenset(names)
+
+
+def _imports_logging(node: ast.Import | ast.ImportFrom) -> bool:
+    """`import logging`, `import logging.handlers`, `from logging import …`."""
+    if isinstance(node, ast.ImportFrom):
+        # `from . import logging` has module None and is somebody else's
+        # `logging`, so a relative import never counts however it is spelled.
+        return node.level == 0 and (node.module or "").split(".")[0] == "logging"
+    return any(alias.name.split(".")[0] == "logging" for alias in node.names)
+
+
+def _body_statements(body: list[ast.stmt]) -> int:
+    """Statements in one body, stopping at anything with a body of its own."""
+    total = 0
+    for stmt in body:
+        total += 1
+        if not isinstance(stmt, _OWN_BODY):
+            total += _nested_statements(stmt)
+    return total
+
+
+def _nested_statements(node: ast.AST) -> int:
+    # Descends through non-statement nodes too — `ExceptHandler` and
+    # `match_case` are neither statements nor expressions, and their bodies
+    # belong to the block that contains them.
+    total = 0
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.stmt):
+            total += 1
+            if isinstance(child, _OWN_BODY):
+                continue
+        total += _nested_statements(child)
+    return total
 
 
 class _Walker:
@@ -246,8 +384,11 @@ class _Walker:
     def __init__(self) -> None:
         self.found: list[_Found] = []
         self.loops: dict[int, Loop] = {}
+        self.imports_logging = False
 
     def visit(self, node: ast.AST, ctx: _Ctx) -> None:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            self.imports_logging = self.imports_logging or _imports_logging(node)
         if isinstance(node, ast.Call):
             log_call = _log_call(node)
             if log_call is not None:
@@ -260,9 +401,23 @@ class _Walker:
             # A scope boundary resets the loop chain: a closure defined inside
             # a loop body is not called once per iteration, and `funcName` on
             # its records reads the inner name, not the enclosing one.
-            ctx = _Ctx(func_name=node.name, loops=(), conditional=False)
+            ctx = _Ctx(
+                func_name=node.name,
+                func_lineno=node.lineno,
+                # A class body has no parameters, and a call in one is not a
+                # wrapper forwarding anything.
+                params=frozenset() if isinstance(node, ast.ClassDef) else _params(node),
+                loops=(),
+                conditional=False,
+            )
         elif isinstance(node, ast.Lambda):
-            ctx = _Ctx(func_name="<lambda>", loops=(), conditional=False)
+            ctx = _Ctx(
+                func_name="<lambda>",
+                func_lineno=node.lineno,
+                params=_params(node),
+                loops=(),
+                conditional=False,
+            )
         elif isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
             ctx = ctx._replace(conditional=True)
 
@@ -273,10 +428,14 @@ class _Walker:
         inner = (*ctx.loops, node.lineno)
         self.loops[node.lineno] = Loop(
             lineno=node.lineno,
+            # Optional only for hand-built nodes; parsed source always sets it.
+            end_lineno=node.end_lineno or node.lineno,
             kind=_LOOP_KINDS[type(node)],
             func_name=ctx.func_name,
+            func_lineno=ctx.func_lineno,
             depth=len(inner),
             parent=ctx.loops[-1] if ctx.loops else None,
+            body_statements=_body_statements(node.body),
         )
         # What repeats gets the inner context. The body always does. A
         # `while` **test** does too — it is re-evaluated before every
@@ -296,7 +455,7 @@ class _Walker:
         if isinstance(node, ast.While):
             repeats.add(id(node.test))
         body = repeats
-        body_ctx = _Ctx(func_name=ctx.func_name, loops=inner, conditional=False)
+        body_ctx = ctx._replace(loops=inner, conditional=False)
         for child in ast.iter_child_nodes(node):
             self.visit(child, body_ctx if id(child) in body else ctx)
 
@@ -326,8 +485,11 @@ def _finalize(pathname: str, walker: _Walker) -> FileStructure:
             site = CallSite(
                 lineno=item.log_call.lineno,
                 func_name=item.ctx.func_name,
+                func_lineno=item.ctx.func_lineno,
                 method=item.log_call.method,
                 template=_template(item.log_call.message),
+                message_kind=_message_kind(item.log_call.message, item.ctx.params),
+                has_stacklevel=item.log_call.has_stacklevel,
                 loop_chain=item.ctx.loops,
                 conditional=item.ctx.conditional,
                 position=position if innermost is not None else None,
@@ -347,6 +509,7 @@ def _finalize(pathname: str, walker: _Walker) -> FileStructure:
         # are proxied because the result is cached and shared between callers.
         call_sites=MappingProxyType(dict(sorted(sites.items()))),
         loops=MappingProxyType(loops),
+        imports_logging=walker.imports_logging,
     )
 
 
@@ -465,6 +628,7 @@ __all__ = [
     "FileStructure",
     "Loop",
     "LoopKind",
+    "MessageKind",
     "analyze_file",
     "clear_cache",
     "template_matches",

@@ -573,6 +573,50 @@ def test_calls_the_walk_does_not_recognise(
     assert structure.call_sites == {}
 
 
+def test_whether_the_file_imports_logging_is_reported(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """The corroboration for the receiver-blind match (#61), not applied here.
+
+    `_MESSAGE_ARG` accepts `parser.error(...)` as readily as `log.error(...)`,
+    and this is the cheap signal that separates them at the file level. It is
+    reported rather than acted on because the two consumers want opposite
+    thresholds — the display wants every call site it can get, the linter
+    wants only the ones it can stand behind.
+    """
+    for source in (
+        "import logging",
+        "import logging.handlers",
+        "import logging as stdlib_logging",
+        "from logging import getLogger",
+        "from logging.handlers import RotatingFileHandler",
+    ):
+        structure = analyze(f"{source}\n\n\ndef f():\n    log.info('x')\n")
+        assert structure.imports_logging, source
+
+    for source in (
+        "import argparse",
+        "from mypackage import logging_setup",
+        "from . import logging",
+        "from .logging import log",
+    ):
+        structure = analyze(f"{source}\n\n\ndef f():\n    log.info('x')\n")
+        assert not structure.imports_logging, source
+
+
+def test_an_import_inside_a_function_still_counts(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    structure = analyze("""
+        def f():
+            import logging
+
+            logging.getLogger(__name__).info("x")
+        """)
+
+    assert structure.imports_logging
+
+
 def test_a_receiver_blind_match_accepts_any_attribute_call(
     analyze: Callable[..., static.FileStructure],
 ) -> None:
