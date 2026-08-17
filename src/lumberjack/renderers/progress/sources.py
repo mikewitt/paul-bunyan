@@ -39,19 +39,17 @@ DEFAULT_MIN_REPEATS = 3
 #: must still cost five redraws a second.
 DEFAULT_REFRESH_INTERVAL = 0.2
 
-#: Opt-in ceiling on how many bars the display draws. Unset means no ceiling.
+#: Opt-in ceiling on how many rows the display draws. Unset means no ceiling.
 #:
 #: Deliberately an environment variable rather than an `init()` option, and
 #: deliberately absent from the README: it is a debug and terminal-compat aid,
-#: not something to reach for in production. A bar count high enough to want
-#: it is a *symptom* — either lumberjack is grouping too finely, or the code
-#: is logging in a way that cannot be grouped — and capping hides that symptom
-#: rather than treating it. The specific diagnosis is that containment
-#: analysis has not merged sibling call sites into one loop's bar, which it
-#: never does: 1:1 merging is designed and deliberately unbuilt, because it
-#: needs a drawn bar to disappear. So the count measures how much structure is
-#: still uninferred, and the real remedy arrives with that.
-#: lumberjack: see issue #8
+#: not something to reach for in production. Capping was always the wrong
+#: answer to a high row count, because a high row count was a *symptom* — the
+#: display had inherited its unit from the grouping key and was drawing one row
+#: per call site. `loops.LoopRowModel` treats that instead, by merging sibling
+#: call sites into the loop they narrate; what remains is allocated by
+#: relevance rather than truncated. This stays for the terminal that cannot
+#: cope regardless.
 MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
 
 
@@ -219,11 +217,14 @@ class RepeatingSourceModel:
         # `time.time()`, so the default is the same clock the records used.
         self._clock = clock
         # Every source seen, including those still short of min_repeats —
-        # their running total is what lets them qualify later.
-        # Unbounded: 300 repeating log sites means 300 bars.
-        # lumberjack: see issue #8
+        # their running total is what lets them qualify later. Unbounded, and
+        # that is the identity layer working as intended: 300 repeating log
+        # sites are 300 things that were captured. How many *rows* they become
+        # is `loops.LoopRowModel`'s question, and its answer is a handful.
         self._totals: dict[SourceKey, int] = {}
-        # Display order, append-only, so bars never jump around on screen.
+        # Arrival order, append-only. Where a row is drawn is decided from
+        # structure downstream (`layout.depth_first_order`); this is only the
+        # order sources qualified in, which breaks the ties that leaves.
         # The set mirrors it purely for membership: this is checked once per
         # source per poll, and a list scan there would be quadratic.
         self._shown: list[SourceKey] = []

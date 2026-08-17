@@ -129,8 +129,9 @@ def test_label_names_the_source_location():
 
 # --- the opt-in bar ceiling ------------------------------------------------
 #
-# An environment variable rather than an init() option, and a debug aid rather
-# than a feature: see the note on MAX_BARS_ENV_VAR and issue #8.
+# An environment variable rather than an init() option, and a terminal-compat
+# aid rather than a feature: capping was never the answer to a high row count.
+# See the note on MAX_BARS_ENV_VAR.
 
 
 def test_no_ceiling_by_default(monkeypatch):

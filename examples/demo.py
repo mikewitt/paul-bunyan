@@ -154,14 +154,14 @@ def run_pipeline() -> None:
 def run_sequence() -> None:
     """A slow loop whose body narrates its own stages.
 
-    The shape that motivates #53. Every one of these lines fires exactly once
-    per outer iteration, so all five have the *same* period — which the level
-    analysis reads, correctly, as five log lines in one loop body. There is no
-    ratio to take, so no total, so no bar that fills.
+    The shape that motivates #53. All five lines are one loop body — the source
+    says so outright, and the display now draws them as one row counting
+    iterations. There is still no ratio to take, so no total, so no bar that
+    fills.
 
     But the information is plainly there: reaching "committing" means this
-    iteration is nearly done. That is ordinal position within a cycle, and the
-    model discards it because it only ever counts and times, never orders.
+    iteration is nearly done. That is ordinal position within a cycle, which
+    the AST already reports (`static.CallSite.position`) and nothing yet draws.
     """
     for batch in range(6):
         log.debug("batch %d: opening connection", batch)
@@ -179,14 +179,15 @@ def run_sequence() -> None:
 def run_siblings() -> None:
     """One fast loop, several call sites in its body.
 
-    The shape that motivates #8. These lines are one loop by any reasonable
+    The shape that motivated #8, and the smallest case that shows why display
+    unit is not identity unit. These lines are one loop by any reasonable
     reading, and a person wants one row for it. Source location is the right
-    *identity* — it is exact and needs no inference — but it is the wrong
-    *display unit*, and this is the smallest case that shows the difference.
+    *identity* — exact, no inference — and was the wrong *display unit*.
 
-    Scale it up and it is the 800-bar problem: nothing here is granular
-    because the code is badly written, it is granular because the display
-    inherited its unit from the grouping key.
+    Scale it up and it was the 800-bar problem: nothing here is granular
+    because the code is badly written, it was granular because the display
+    inherited its unit from the grouping key. Keep the four lines; they are
+    what makes the merge worth testing.
     """
     for row in range(400):
         log.debug("row %d: parsed", row)
@@ -259,14 +260,13 @@ def run_bursty() -> None:
 def run_phases() -> None:
     """Four loops in sequence, each finishing before the next starts.
 
-    The shape of most scripts, and the one where "what is my program doing"
-    has an obvious answer the display does not currently give. Each loop
-    retires as the next begins, so by the end there are four idle rows and no
-    indication of which one is *now*.
+    The shape of most scripts. Each loop retires as the next begins, so by the
+    end there are four finished rows and one live one — and which is *now* is
+    legible: the live rows sort above the quiet ones, and a quiet row collapses
+    to a mark rather than holding a full-width bar.
 
     A retired bar is marked idle in place rather than deleted, deliberately —
-    deleting it would empty the final frame. Whether four idle rows plus one
-    live one is the right thing to *show* is the open part.
+    deleting it would empty the final frame.
 
     Written as four functions rather than a loop over a table of stages, and
     that is not style. Identity is the source location, so a data-driven
