@@ -542,7 +542,8 @@ def _report(scenario: Scenario) -> None:
     """
     lumberjack.flush()
     store = lumberjack.current_store()
-    assert store is not None, "init() ran, so there is a store"
+    if store is None:
+        raise RuntimeError("init() ran, but no store was found")
     records = store.recent(n=None)
     by_source = sorted(store.count_by_source().items(), key=lambda kv: -kv[1])
 
