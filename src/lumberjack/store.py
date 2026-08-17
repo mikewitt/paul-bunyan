@@ -127,7 +127,7 @@ _PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS)
 # column names just above, values go through `?` placeholders, and the parity
 # tests pin `_COLUMNS` against the real table.
 _INSERT_SQL = (
-    f"INSERT INTO records ({', '.join(_COLUMNS)}) "  # noqa: S608
+    f"INSERT INTO records ({', '.join(_COLUMNS)}) "  # noqa: S608  # nosec B608
     f"VALUES ({_PLACEHOLDERS})"
 )
 

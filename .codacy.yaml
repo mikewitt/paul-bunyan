@@ -32,6 +32,24 @@
 #     than the same sentence in a config file three directories away. Where a
 #     line needs to satisfy both tools it carries both markers, because bandit
 #     reads `# nosec` and has never read `# noqa`.
+#
+#     That last sentence was a prediction and is now measured, on PR #76, which
+#     dropped the bandit block with only inline markers in place to find out.
+#     Two results worth keeping:
+#
+#       `# nosec` is honoured. B603 (x4), B102 and B606 all went to zero, and
+#       `bandit -r src tests scripts benchmarks examples` confirms it locally.
+#       So a finding here can be answered at the code rather than by a path.
+#
+#       `# noqa` is not, and Codacy said so itself: its review left a suggestion
+#       on `store.py` reading "Codacy's Bandit engine continues to flag it
+#       because it does not recognize the Ruff-specific `# noqa: S608`". Hence
+#       the dual tag on that line. Do not economise it down to one marker.
+#
+#     The 852 B101s bandit still reports in `tests/` did *not* appear as PR
+#     findings, because Codacy counts issues on changed lines and the asserts
+#     were not changed. That is worth knowing before reading a green PR summary
+#     as "bandit is happy with tests/" — it is not the same claim.
 #   - B108 has no suppression anywhere, because it was fixed instead. The fake
 #     `pathname` in the row fixtures was "/tmp/foo.py"; it is now
 #     "/nonexistent/foo.py". The tests require a path with no source on disk —
@@ -39,8 +57,11 @@
 #     directory where `foo.py` could plausibly turn up. The rule was right.
 #
 # `src/` and `examples/` were never excluded and still are not. `src/`'s B110
-# and B608 remain visible in Codacy on purpose, the same as before: they are
-# meant to be re-read rather than inherited. `examples/`' two B101s were fixed
+# stays visible in Codacy on purpose, the same as before: it is meant to be
+# re-read rather than inherited. B608 is the one exception, and only because it
+# is a *medium* that fails the PR gate rather than a low that sits in a report —
+# it carries `# nosec B608` beside a `# noqa: S608`, with the argument for both
+# written at the line. `examples/`' two B101s were fixed
 # rather than kept, back when this file still had a bandit block — both were
 # `assert store is not None` narrowing a type for mypy, which `python -O`
 # strips, so the narrowing vanished and a None reached the call. Keeping the
