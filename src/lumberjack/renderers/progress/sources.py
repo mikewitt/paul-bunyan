@@ -8,16 +8,12 @@ measures each source's period, sorts sources by period to recover which loop
 encloses which, takes the ratio between an enclosing loop and an enclosed one
 as the inner loop's iteration count, and retires a bar whose source has gone
 quiet.
-
-The bar ceiling lives here too, because sources are what it counts.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import os
 import time
-import warnings
 from typing import TYPE_CHECKING
 
 from lumberjack.renderers.progress.heartbeat import HeartbeatState, SessionHeartbeat
@@ -42,50 +38,6 @@ DEFAULT_MIN_REPEATS = 3
 #: and deliberately independent of log volume — a million records a second
 #: must still cost five redraws a second.
 DEFAULT_REFRESH_INTERVAL = 0.2
-
-#: Opt-in ceiling on how many rows the display draws. Unset means no ceiling.
-#:
-#: Deliberately an environment variable rather than an `init()` option, and
-#: deliberately absent from the README: it is a debug and terminal-compat aid,
-#: not something to reach for in production. Capping was always the wrong
-#: answer to a high row count, because a high row count was a *symptom* — the
-#: display had inherited its unit from the grouping key and was drawing one row
-#: per call site. `loops.LoopRowModel` treats that instead, by merging sibling
-#: call sites into the loop they narrate; what remains is allocated by
-#: relevance rather than truncated. This stays for the terminal that cannot
-#: cope regardless.
-MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
-
-
-def resolve_max_bars(override: int | None = None) -> int | None:
-    """The bar ceiling: `override`, else the environment, else None.
-
-    Follows the same split as `OutputModeDetector`: an out-of-range argument
-    is a caller's bug and raises, while a bad environment variable is a typo
-    by whoever launched the process, so it warns and carries on uncapped.
-    """
-    if override is not None:
-        if override <= 0:
-            raise ValueError(f"max_bars must be positive, got {override!r}")
-        return override
-
-    raw = os.environ.get(MAX_BARS_ENV_VAR)
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        value = 0  # falls into the warning below
-    if value <= 0:
-        warnings.warn(
-            f"{MAX_BARS_ENV_VAR}={raw!r} is not a positive integer; "
-            f"drawing every bar.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
-    return value
-
 
 #: How close two sources' periods must be to count as the same loop body.
 #: `logger.debug` on line 6 and line 12 of one loop fire once each per

@@ -24,8 +24,8 @@ import sys
 from types import TracebackType
 from typing import TYPE_CHECKING
 
+from lumberjack.detect import MAX_BARS_ENV_VAR
 from lumberjack.renderers.plain import PlainTextRenderer
-from lumberjack.renderers.progress import MAX_BARS_ENV_VAR
 
 if TYPE_CHECKING:
     from lumberjack.session import Session

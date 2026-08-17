@@ -77,14 +77,12 @@ from lumberjack.renderers.progress.sources import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     IDLE_PERIODS,
-    MAX_BARS_ENV_VAR,
     MIN_IDLE_SECONDS,
     MIN_NESTING_RATIO,
     RATIO_TOLERANCE,
     SAME_LOOP_TOLERANCE,
     BarState,
     RepeatingSourceModel,
-    resolve_max_bars,
 )
 from lumberjack.renderers.progress.tasks import TaskBarState, TaskProgressModel
 from lumberjack.renderers.progress.templates import (
@@ -104,7 +102,6 @@ __all__ = [
     "heartbeat_frames",
     "IDLE_PERIODS",
     "LOOKBACKS",
-    "MAX_BARS_ENV_VAR",
     "MAX_LABEL",
     "MESSAGE_LOOKBACK",
     "MIN_BODY_SITES",
@@ -128,5 +125,4 @@ __all__ = [
     "TemplateIndex",
     "depth_first_order",
     "describe_template",
-    "resolve_max_bars",
 ]

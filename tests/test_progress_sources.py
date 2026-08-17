@@ -13,10 +13,8 @@ from fixture_sources import SETTLED_CYCLES
 from lumberjack.renderers.progress import (
     CONTAINMENT_CONFIRMATIONS,
     DEFAULT_MIN_REPEATS,
-    MAX_BARS_ENV_VAR,
     PERIOD_SMOOTHING,
     RepeatingSourceModel,
-    resolve_max_bars,
 )
 from lumberjack.schema import SourceKey
 
@@ -105,52 +103,6 @@ def test_a_source_qualifies_on_its_total_not_one_poll(store, loop_rows):
         assert model.poll() == []
     store.append(loop_rows(1))
     assert [b.count for b in model.poll()] == [3]
-
-
-# --- the opt-in bar ceiling ------------------------------------------------
-#
-# An environment variable rather than an init() option, and a terminal-compat
-# aid rather than a feature: capping was never the answer to a high row count.
-# See the note on MAX_BARS_ENV_VAR.
-
-
-@pytest.mark.parametrize(
-    ("env_value", "explicit", "expected"),
-    [
-        (None, None, None),  # no ceiling by default
-        ("12", None, 12),  # the environment sets it
-        ("12", 3, 3),  # an explicit override beats the environment
-    ],
-)
-def test_ceiling_resolution_prefers_the_explicit_argument_then_the_environment(
-    monkeypatch, env_value, explicit, expected
-):
-    if env_value is None:
-        monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
-    else:
-        monkeypatch.setenv(MAX_BARS_ENV_VAR, env_value)
-    assert resolve_max_bars(explicit) == expected
-
-
-@pytest.mark.parametrize("value", ["banana", "", "0", "-4", "3.5"])
-def test_an_unusable_environment_value_warns_and_draws_everything(monkeypatch, value):
-    """An operator typo must not cap at something surprising, or take the run
-    down. Same split as LUMBERJACK_OUTPUT_MODE: env typos warn and degrade."""
-    monkeypatch.setenv(MAX_BARS_ENV_VAR, value)
-    if value == "":
-        # Unset and empty are the same request: no ceiling, nothing to warn about.
-        assert resolve_max_bars() is None
-        return
-    with pytest.warns(RuntimeWarning, match=MAX_BARS_ENV_VAR):
-        assert resolve_max_bars() is None
-
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_an_unusable_explicit_ceiling_raises(monkeypatch, value):
-    """A bad argument is the caller's bug, so it raises rather than warns."""
-    monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
-    with pytest.raises(ValueError, match="must be positive"):
-        resolve_max_bars(value)
 
 
 # --- how fast is this loop going? -------------------------------------------

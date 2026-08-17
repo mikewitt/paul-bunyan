@@ -95,7 +95,7 @@ def test_reordering_rich_tasks_preserves_their_state():
     elapsed clock and the completion, and recreating it throws both away."""
     pytest.importorskip("rich")
     import lumberjack.renderers.rich_renderer as rich_renderer_module
-    from lumberjack.renderers.rich_renderer import _relayout
+    from lumberjack.renderers.rich_compat import _relayout
 
     progress = rich_renderer_module.Progress()
     first = progress.add_task("first", total=10)
@@ -118,7 +118,7 @@ def test_relayout_keeps_rows_the_caller_did_not_mention():
     the screen for a reason that has nothing to do with structure."""
     pytest.importorskip("rich")
     import lumberjack.renderers.rich_renderer as rich_renderer_module
-    from lumberjack.renderers.rich_renderer import _relayout
+    from lumberjack.renderers.rich_compat import _relayout
 
     progress = rich_renderer_module.Progress()
     first = progress.add_task("first")
