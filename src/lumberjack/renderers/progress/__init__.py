@@ -25,6 +25,10 @@ renderer could draw:
   static structure first and period-and-worker second, counting iterations
   rather than records. It groups what `RepeatingSourceModel` computed and
   reaches into none of it.
+* `CyclePositionModel` (`position.py`) — the second row a loop may earn:
+  where the current iteration has got to within the body, read off the AST's
+  ordering of the call sites and drawn only when the loop row above it ticks
+  too slowly to answer "is this still running?".
 * `SessionHeartbeat` (`heartbeat.py`) — one row for the whole session, and the
   only element that says something about a program whose lines never repeat.
   It rides on `RepeatingSourceModel`'s poll rather than fetching a delta of
@@ -57,6 +61,12 @@ from lumberjack.renderers.progress.heartbeat import (
 )
 from lumberjack.renderers.progress.layout import depth_first_order
 from lumberjack.renderers.progress.loops import LoopRow, LoopRowModel
+from lumberjack.renderers.progress.position import (
+    MIN_BODY_SITES,
+    MIN_LEGIBLE_PERIOD,
+    CyclePosition,
+    CyclePositionModel,
+)
 from lumberjack.renderers.progress.smoothing import PERIOD_SMOOTHING
 from lumberjack.renderers.progress.sources import (
     CONTAINMENT_CONFIRMATIONS,
@@ -90,12 +100,16 @@ __all__ = [
     "MAX_BARS_ENV_VAR",
     "MAX_LABEL",
     "MESSAGE_LOOKBACK",
+    "MIN_BODY_SITES",
     "MIN_IDLE_SECONDS",
+    "MIN_LEGIBLE_PERIOD",
     "MIN_NESTING_RATIO",
     "PERIOD_SMOOTHING",
     "RATIO_TOLERANCE",
     "SAME_LOOP_TOLERANCE",
     "BarState",
+    "CyclePosition",
+    "CyclePositionModel",
     "HeartbeatState",
     "LoopRow",
     "LoopRowModel",

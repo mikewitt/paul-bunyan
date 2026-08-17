@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from lumberjack import static
 from lumberjack.renderers.progress.layout import depth_first_order
+from lumberjack.renderers.progress.position import CyclePosition, CyclePositionModel
 from lumberjack.renderers.progress.sources import (
     DEFAULT_MIN_REPEATS,
     SAME_LOOP_TOLERANCE,
@@ -115,6 +116,11 @@ class LoopRow:
     cycle_current: int = 0
     depth: int = 0
     idle: bool = False
+    #: Where this iteration has got to within the loop's body, when the loop
+    #: ticks too slowly for the row above to answer "is it still running?".
+    #: None whenever it does not — which is most loops. A second, determinate
+    #: row drawn under this one; see `position.CyclePositionModel`.
+    position: CyclePosition | None = None
 
     @property
     def rate(self) -> float | None:
@@ -179,6 +185,7 @@ class LoopRowModel:
             store, min_repeats=min_repeats, clock=clock, heartbeat=heartbeat
         )
         self._templates = TemplateIndex(store)
+        self._positions = CyclePositionModel()
         # The AST's view of a call site, resolved once and frozen with the
         # grouping it decided. None means "static says nothing usable here".
         self._sites: dict[SourceKey, static.CallSite | None] = {}
@@ -405,7 +412,41 @@ class LoopRowModel:
             # A row is alive while any of its call sites is: a body whose last
             # line is conditional must not retire the loop between the two.
             idle=all(state.idle for state in states),
+            position=self._position_of(key, clock, states),
         )
+
+    def _position_of(
+        self, key: SourceKey, clock: BarState, states: Sequence[BarState]
+    ) -> CyclePosition | None:
+        """Where this iteration has got to, when the loop is slow enough to ask.
+
+        The clock member's period is what the criterion is measured against,
+        for the same reason it drives the rate column: it is the member that
+        fires every iteration, so its interval is the loop's.
+        """
+        group = self._group_of.get(key)
+        loop = group.at if group is not None and group.kind == "loop" else None
+        return self._positions.of(
+            key,
+            loop=loop,
+            period=clock.period,
+            sites=self._sites,
+            states=states,
+            label_of=self._stage_label,
+        )
+
+    def _stage_label(self, source: SourceKey) -> str:
+        """One call site's template, as the name of a stage within the body.
+
+        Recomputed rather than frozen, unlike a row's own label: the stage
+        *is* what changes as the iteration advances, so caching it would be
+        caching the answer. There is nothing to flicker either — a source
+        without a stable template cannot be in a statically grouped row, so
+        every stage here has one.
+        """
+        template = self._templates.template(source)
+        described = describe_template(template) if template else ""
+        return described or f"{os.path.basename(source.pathname)}:{source.lineno}"
 
     def _parent_row(self, key: SourceKey, clock: BarState) -> SourceKey | None:
         """Which row this one runs inside: the AST first, then the timing.

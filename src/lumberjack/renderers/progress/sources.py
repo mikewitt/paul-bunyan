@@ -143,6 +143,12 @@ class BarState:
     #: Seconds between records from this source, smoothed. None until two
     #: records have been seen — one record establishes no interval.
     period: float | None = None
+    #: `created` of the newest record from this source, or None before the
+    #: first. Reported because it is what says *which* of a loop body's call
+    #: sites fired last, and therefore where the iteration has got to — see
+    #: `position.CyclePositionModel`. It comes out of the same aggregate the
+    #: period does, so nothing new is queried to expose it.
+    last_at: float | None = None
     #: The source this one was inferred to run inside, if any.
     parent: SourceKey | None = None
     #: Iterations per enclosing cycle, inferred. None while unknown.
@@ -507,6 +513,7 @@ class RepeatingSourceModel:
                 source=source,
                 count=self._totals[source],
                 period=self._period.get(source),
+                last_at=self._last_at.get(source),
                 parent=self._parent.get(source),
                 total=self._total.get(source),
                 cycle_current=max(
