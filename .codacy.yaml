@@ -33,11 +33,17 @@
 #                                  and the parity tests pin `_COLUMNS`
 #                                  against the real table.
 #
-# `examples/` is not excluded either. Its two B101s are real: `assert store
-# is not None` narrows a type for mypy, and `python -O` would strip it and
-# let a None reach `.recent()`. Nobody runs the examples under -O, but the
-# warning is not wrong, so it stays visible rather than being configured
-# away. Excluding more than the noise would defeat the point of the tool.
+# `examples/` is not excluded either, and its two B101s are now **fixed**
+# rather than kept. Both were `assert store is not None`, narrowing a type
+# for mypy before `.recent()`; `python -O` strips an assert, so the narrowing
+# vanished and a None reached the call. Nobody runs the examples under -O,
+# which is why this sat here as a documented acceptance — but the warning was
+# never wrong, the fix is two lines, and `if store is None: raise` narrows
+# for mypy exactly as well. Keeping the path in scope is what surfaced it.
+#
+# That is the intended use of leaving `src/` and `examples/` scanned:
+# excluding more than the noise would defeat the point of the tool, and the
+# findings that remain are meant to be re-read rather than inherited.
 #
 # Individual patterns can only be disabled in the Codacy web UI, so path
 # scoping is the whole of what this file can express. After this, bandit
@@ -50,6 +56,22 @@
 # design: a lockfile is thousands of near-identical dependency stanzas, and
 # counting those as duplicated code makes the repo-wide duplication figure
 # meaningless.
+# `benchmarks/` is excluded from bandit on the same grounds as `tests/`: it is
+# development tooling, not shipped in the wheel, and never run by a user of
+# the package. Its four findings are all artefacts of what a benchmark has to
+# do:
+#
+#   B404  import_subprocess    — `capture.py` shells out once, to
+#   B603  subprocess_without_    `git rev-parse --short HEAD`, so a recorded
+#         shell_equals_true      baseline says which revision produced it.
+#   B607  start_process_with_    Fixed argv list, no user input anywhere near
+#         partial_path           it, wrapped in try/except and best-effort by
+#                                design — a missing `git` returns None.
+#   B101  assert_used          — `assert __doc__ is not None` narrows a type
+#                                for mypy before `__doc__.split()`.
+#
+# The same "excluding more than the noise defeats the tool" test applies: this
+# is one file of dev tooling, and `src/` and `examples/` both stay in scope.
 exclude_paths:
   - "uv.lock"
 
@@ -57,3 +79,4 @@ engines:
   bandit:
     exclude_paths:
       - "tests/**"
+      - "benchmarks/**"

@@ -97,7 +97,8 @@ def main() -> None:
     lumberjack.flush()
 
     store = lumberjack.current_store()
-    assert store is not None  # init() ran above
+    if store is None:  # init() ran above
+        raise RuntimeError("init() ran, but no store was found")
     # Explicitly unbounded — see the note in demo.py.
     records = store.recent(n=None)
     events = [r for r in records if r.task_event]

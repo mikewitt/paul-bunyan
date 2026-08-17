@@ -68,7 +68,7 @@ jobs:
       - run: uv run mypy --strict src
       # Ordinary checking for the rest. `-> None` on 150 test functions is
       # bookkeeping; a real type error in a fixture is not.
-      - run: uv run mypy tests examples
+      - run: uv run mypy tests examples benchmarks
 
   test:
     runs-on: ${{ matrix.os }}

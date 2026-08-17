@@ -1,0 +1,118 @@
+name: Release
+
+# Two ways in, and the distinction matters.
+#
+# Publishing a GitHub Release is the real one: it publishes to PyPI, where a
+# version number is permanent. PyPI will not accept a re-upload of a version
+# even after you delete it, so there is exactly one attempt per number.
+#
+# `workflow_dispatch` exists for the rehearsal. It defaults to TestPyPI, which
+# is the only way to see how the long description actually renders and whether
+# the metadata is right *before* spending a version number on finding out.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Index to publish to
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Builds once and hands the same files to the publish job. Building twice
+    # would mean publishing an artifact that nothing verified.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      - name: Check the tag matches the version in pyproject.toml
+        # The classic way to publish the wrong thing: tag v0.1.0 while
+        # pyproject still says 0.1.0.dev0, and PyPI accepts the dev release
+        # under a number nobody meant to spend. Only on a release trigger —
+        # a dispatch to TestPyPI has no tag to compare against.
+        if: github.event_name == 'release'
+        run: |
+          version=$(uv run python -c \
+            'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag, but pyproject.toml says $version"
+            exit 1
+          fi
+          echo "Publishing version $version"
+
+      - run: uv build
+
+      - name: Check the metadata renders
+        # `twine check` validates the long description the index will render.
+        # Worth its own step because this is the class of mistake that cannot
+        # be corrected afterwards: a README that fails to render leaves a
+        # permanently ugly project page under a version number that cannot be
+        # reused. It has already nearly happened once — the coverage badge
+        # used to be a *relative* path, which renders fine on GitHub and is
+        # broken everywhere else.
+        run: uv run --with twine twine check --strict dist/*
+
+      - name: Install the built wheel and use it
+        # The same check the `package` job in ci.yml runs, against the exact
+        # files about to be uploaded rather than against a rebuild. A wheel
+        # that cannot be installed and imported must never reach an index,
+        # because the version number is not reusable afterwards.
+        run: |
+          uv venv /tmp/releasetest
+          VIRTUAL_ENV=/tmp/releasetest uv pip install dist/*.whl
+          cd /tmp
+          /tmp/releasetest/bin/python - <<'EOF'
+          import importlib.resources, logging, lumberjack
+          lumberjack.init(output_mode="plain", flush_interval=0)
+          logging.getLogger("smoke").warning("released wheel works")
+          lumberjack.flush()
+          store = lumberjack.current_store()
+          assert store is not None
+          assert len(store.recent()) == 1
+          lumberjack.shutdown()
+          assert (
+              importlib.resources.files("lumberjack") / "py.typed"
+          ).is_file(), "py.typed missing from the wheel"
+          print(f"wheel smoke test passed for {lumberjack.__version__}")
+          EOF
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # A GitHub environment per index, so PyPI can require a manual approval
+    # that TestPyPI does not. It is also what Trusted Publishing binds to:
+    # the publisher is configured on the index against this repository, this
+    # workflow file, and this environment name.
+    environment:
+      name: ${{ (github.event_name == 'release' || inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
+    permissions:
+      # The whole point of Trusted Publishing: GitHub mints a short-lived
+      # OIDC token that the index exchanges for an upload token. No long-lived
+      # API token exists to leak, which is the same reasoning that keeps
+      # ci.yml on a read-only workflow token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          repository-url: ${{ (github.event_name == 'release' || inputs.target == 'pypi') && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}

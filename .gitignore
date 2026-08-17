@@ -17,3 +17,8 @@ build/
 # Agent worktrees are real git worktrees living inside the repo; staging them
 # would embed one repository in another. Tool scratch, never committed.
 .claude/worktrees/
+
+# Benchmark baselines are absolute nanoseconds, which belong to one machine —
+# `--compare` refuses a baseline whose CPU fingerprint differs, so a committed
+# one would be useless to everyone but its author. Record your own.
+benchmarks/*.local.json

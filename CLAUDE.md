@@ -18,14 +18,76 @@ Everything is pre-1.0 with no released version and no back-compat obligation, so
 
 ## Vision
 
+**The point, before anything else: see that your program is still working.** Everything below — inference, the display model, the linter, OTel, an eventual MCP surface — is in service of that one question, and when a scope argument cannot be settled any other way, this is what settles it. A feature that does not help someone watch their own long-running job is not obviously worth building. `logging` is the **transport layer**, not the product; it happens to be the one pipe that already exists in every Python program, already carries caller and thread attribution, and already survives concurrency.
+
 `lumberjack` is a drop-in UX layer for Python's stdlib `logging`. The premise: developers scatter `logger.debug(...)` calls through code while building it, then delete or bury them once things work — but a log line that recurs inside a loop is progress signal, not noise. Instead of deleting them, `lumberjack` intercepts them: it captures every record into a queryable store (full fidelity, never lost), while rendering a live progress bar in place of a thousand scrolling lines. Concurrency (threads, processes, asyncio tasks) falls out of the same mechanism — each source's ticks are attributed at write time, so multiple workers become multiple progress bars for free.
 
 **Log density is input quality, and that inverts the usual advice.** The signal lumberjack reads is the *shape of the event stream* — which source locations fire, in what order, how often — so more diagnostic ticks mean better cycle resolution, not more noise. The instinct to delete debug lines once the code works is removing exactly what the display is built from. The pitch is not "we tolerate your log spam"; it is "keep it, and add more."
 
 The intended experience is a value ladder:
 - **Drop it in** (`import lumberjack; lumberjack.init()`) — existing log lines become progress display, attributed per worker, no other code changes.
+- **Log idiomatically** — a line announcing each stage, a line per item processed, ticks inside the loop rather than around it. **No lumberjack API at all**, and no lumberjack-specific idiom: this is ordinary good logging, the kind that makes a log file useful to read. The display gets dramatically better for it, and this is the rung most codebases have the most to gain from.
 - **Instrument a little more** (`lumberjack.track()` / `lumberjack.task()`, or a hints config) — exact progress, named tasks, task hierarchy, where you bother to say so.
 - Nothing in between is required. Uninstrumented code still works; instrumented code just looks better.
+
+**The middle rung is the pitch, and it costs nothing but good practice.** "Add logging to your app in an idiomatic way and we turn it into a better UX" asks for no dependency, no API, and no lumberjack-shaped thinking — and the logs it asks for are more useful than a cluttered log even with lumberjack uninstalled. That is what makes the ask reasonable. It also means **the instrumentation linter (#40) is not a nice-to-have diagnostic — it is the mechanism that moves people up the ladder**, because it can say *which* line to add and where, statically, without anyone reading this document. Where the display cannot infer something, the first question is whether idiomatic logging would have supplied it; only when the answer is no does `track()` become the argument.
+
+**Third-party libraries narrate their setup, not their work — do not assume otherwise.** The appealing version of rung 1 is that calling a slow uninstrumented library shows you it is alive, because it logs as it goes. Measured against matplotlib, that is false in the case that matters:
+
+| call | wall time | records | sources |
+|---|---|---|---|
+| 1st `savefig` (cold font cache) | 0.05s | 93 | 4 (one with 90 hits) |
+| 2nd `savefig` (warm) | 0.03s | 0 | 0 |
+| 12×200k points, dpi 200 | **2.76s** | **0** | **0** |
+
+The 90-hit source is a real loop and lumberjack bars it correctly — but it is font-cache *initialization*, a one-time startup cost. The 2.76 seconds of actual rendering is silent, and every call after the first is silent. So the honest claim is that libraries log at **setup boundaries** and at **per-item I/O**, not in proportion to work done. Some libraries will be much better (anything doing per-request or per-file work logs per item). The mechanism must not be assumed, and how far rung 1 actually carries on code you did not write is an empirical question nobody has answered — worth a survey of real libraries before any more design leans on it.
+
+### Where the idea came from
+
+Four observations, in the order they arrived. They are recorded because each one still constrains a decision, and because two of them are load-bearing in ways that are easy to undo by accident.
+
+**1. Debug logging is written to be deleted.** You add a line to confirm you hit a branch, or that a slow thing is still moving, and you take it out once it works. Leaving it in is nearly free — but only in the state where it is *filtered out*. Measured (`benchmarks/capture.py`): a `logger.debug` the level discards costs ~100ns against a ~11ns empty loop, which is noise. Once the record is actually built it is ~4.7µs, **roughly fifty times** the filtered call, and lumberjack's whole proposition is that you turn those lines on. So the honest claim is not "logging is free"; it is that leaving the lines in costs nothing until you ask for them, and asking for them costs single-digit microseconds per record — of which stdlib's own record construction is the larger half. The benchmark exists to keep that sentence true.
+
+**2. The cost of keeping them is a big file — and now, a big context.** A verbose log is merely large on disk. What changed is that a wall of log text is actively expensive to feed to an agent, which is the modern version of "nobody reads it". A queryable store answers that in a way a file cannot: ask for the last error, or the rate of one source, instead of pasting ten thousand lines. This is the argument for the MCP surface (#55's neighbour, deliberately unscheduled) and it is also why the store is lossless while the display is lossy — they serve different readers.
+
+**3. `logging` already captures the caller.** The starting idea was to find the calling line number with `sys._getframe` and key loop detection off it. `LogRecord` already carries `pathname`, `lineno` and `funcName`, captured by stdlib and then usually thrown away by every formatter. So identity costs nothing to obtain and is exact — no inference, no message parsing, no fingerprinting. **Everything else in the design rests on this**, and it is why Principle 3 forbids inferring attribution from message text: the accurate answer was already in the record.
+
+**4. Progress bars get hard under concurrency; logging does not.** A single-threaded progress bar is easy. Add threads, processes or asyncio and you are managing `position=`, locks, and which bar belongs to whom — `tqdm` makes the author declare depth at authoring time, which breaks on recursion and on a function that is sometimes nested. Logging does not get harder: it is already thread-safe, and `LogRecord` already carries `thread`, `threadName`, `process` and `processName`. So multi-worker progress falls out of the same mechanism rather than being a feature. This is the strongest form of the pitch and should not be traded away.
+
+**And the linter already exists.** `ruff`'s `G` rules enforce exactly the discipline this design wants, without knowing lumberjack exists. G001–G004 forbid building a log message with `%`, `.format()`, `+` or an f-string — i.e. they require `log.debug("row %d: parsed", i)` over `log.debug(f"row {i}: parsed")`. The consequence matters more than the style:
+
+| call | `record.msg` | `record.args` |
+|---|---|---|
+| `log.debug("batch %d: validating", i)` | `'batch %d: validating'` | `(5,)` |
+| `log.debug(f"batch {i}: validating")` | `'batch 5: validating'` | `()` |
+
+Lazy formatting keeps the **template** and the **data** in separate fields, and the store already writes both (`msg` and `message` are distinct columns). An f-string destroys the template at the call site, unrecoverably. So a G-compliant codebase hands lumberjack a stable human-readable name per source location for free — no parsing of rendered text, ever, which is the thing Principle 3 exists to prevent. `G` is in this repo's own `select` for that reason.
+
+### Static structure is the ground truth inference approximates
+
+The linter (#40) has to parse the code to advise on it. That AST pass produces, as a by-product, most of what the runtime analysis is trying to reconstruct from timing — and produces it exactly. Prototyped against `examples/demo.py`:
+
+```
+run_sequence():
+  loop@164, nesting depth 1 — 5 call site(s):
+     1/5  line 165  'batch %d: opening connection'
+     ...
+     5/5  line 173  'batch %d: committing'
+reconcile():
+  loop@132, nesting depth 1 — 1 call site   'reconciling batch %d'
+  loop@134, nesting depth 2 — 1 call site   'compared row %d against ledger'
+```
+
+That is: sibling grouping (#8), lexical containment (#38's ratio work), **ordinal position within the body** (#53), and the template (#56) — all four, statically, keyed on `file:lineno`, which is already the identity axis. Nothing has to line up; it is the same key.
+
+Two consequences worth spelling out:
+
+- **#53 gets much cheaper.** Interleaving analysis was dropped because it needed a per-record sequence read where everything else needed only an aggregate. If the body's order is known statically, there is no sequence to track at runtime: a record arrives from line 169, and position is a dict lookup — `3 of 5`. The expensive half of the feature evaporates.
+- **The `phases` false parent disappears by construction.** The AST does not claim the stage-announcement line encloses the stage functions, because lexically it does not. Period ordering says it does. Static analysis fails *silently* here (it cannot see cross-function containment without a call graph) rather than fabricating a relationship, which is the right failure mode.
+
+**What it does not give**, and why runtime analysis is not replaced: iteration counts, rate, which worker, and whether anything is still running are all runtime facts. Cross-function containment needs a call graph and dynamic dispatch defeats it. Code without source on disk — `exec`, generated modules — has no AST to read. So static structure **seeds** the model; it does not become the model, and everything must still work when it is absent.
+
+This also unifies three things that were separate: the linter advises, the hints config declares, and static analysis measures — but a linter that can already see the structure can **emit** the hints file, so Phase 5's config stops being something a human writes by hand and becomes something generated and then edited. Worth deciding before Phase 5 designs a config format for hand-authoring.
 
 ## Design principles
 
@@ -94,20 +156,56 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 - `RepeatingSourceModel` — accumulates `count_by_source_since()` forward from a watermark, and is where the repetition analysis above lives. Cumulative counts are **monotonic by construction**: `evict()` can drop the rows a bar counted without the bar counting backwards, which is what a progress bar has to mean. The *cycle* position a nested bar fills to is the one number that resets, and deliberately — it describes one iteration of the enclosing loop, not the run, so the two are separate fields and the count column keeps showing the cumulative one beside the inferred one. Bar count is unbounded on purpose — see below.
 - `OTelBridge` — optional `SpanProcessor`/`MetricReader` feeding the same store (inbound direction; outbound is `task()` emitting spans directly).
 
+### What the display is for
+
+Everything above describes what can be *inferred*. This describes what the display is *for*, which is a separate question and was never written down — so display choices got made bottom-up, by whatever the inference happened to produce, rather than by what a person needs to see. Several of them were defaults nobody chose. **Not yet built; this is the target, and #8, #43, #53, #54 and #55 are the work.**
+
+**The criterion: a row earns its place by updating at a rate a human can read.** A loop that ticks once every three minutes is a *correct* bar and a *useless* one — it cannot distinguish a running program from a hung one, which is the first question the display exists to answer. When the best available row is too coarse to be legible, the display should find a finer signal inside it or say nothing. This is the principle underneath the bar-count, bar-placement and sequence questions, which have been circling each other as three separate display problems and are one.
+
+**Display unit ≠ identity unit, and conflating them is the root mistake.** Source location is the right *identity* key — exact, cheap, no inference — and nothing here moves off it. But it became the *display* unit by default, because grouping already produced it. A person does not want a bar per call site; they want the shape of their program. So sibling call sites in one loop body merge into **one row per inferred loop**, labelled by the enclosing function, with source locations as the identity underneath. This is the 1:1 merging that was designed and left unbuilt, promoted from nice-to-have to the missing layer — and it is rendering-side grouping over what `RepeatingSourceModel` already computes, not new inference.
+
+**A loop is up to three rows, and the criterion decides how many.** This is where the criterion stops being a slogan. One merged loop can render as:
+
+1. **the loop** — a pulse, or determinate if a total is genuinely known; counts **iterations**, not records
+2. **position within the current iteration** — determinate, ticked by the body's call sites in order (#53)
+3. **the most recent message**, optionally, as text
+
+Row 2 appears *only when row 1 is too slow to be legible*. That is the whole rule, and it resolves what look like two contradictory answers. `siblings` — four call sites in a loop running at 121/s — is **one** row reading `400`, because a sub-iteration bar at that rate is a blur nobody can read. `sequence` — five call sites in a loop taking 1.5s per iteration — is **three** rows, because the outer bar alone ticks too rarely to distinguish running from hung, and the position within the iteration is the only legible signal available. Same structure, same merge, different number of rows, decided by measured period rather than by taste.
+
+The count on row 1 is **iterations of the merged loop**, not records captured. `siblings` reads `400`, not the 1600 records behind it — and this is not a cost to be accepted, which is how it was first written down here. It is the correction.
+
+The call sites say `row %d: parsed`, `row %d: validated`, and so on. The domain object is the **row**, there are 400 of them, and that is what the code is making progress through. That four log lines happen to fire per row is an artifact of how the author chose to narrate it; nobody asked how many `log.debug` calls occurred. So 1600 was the accidental number all along, and per-source counting only looked authoritative because it matched the store. Record count is an **identity-layer** number — the right answer to "what did we capture" and the wrong answer to "how far along is this". The store and the exit summary remain where the former is asked.
+
+One implementation question this leaves: when merged call sites fire *unequal* numbers of times — a conditional error line inside the body, say — "iterations" is ambiguous. Default to the highest count among the merged sources, since a line that fires every iteration is a better clock than one that fires sometimes; a source firing far less often than its siblings is probably conditional and should not define the loop's length.
+
+**Inference gets the shape; instrumentation gets the numbers — and the gap is a feature.** Two of the hardest questions here have the same answer, and it is not cleverer inference. An outer loop's total is "ideally but unlikely" to be inferable, so it stays a pulse until someone wraps the range in `track()`. Distinguishing "A encloses B" from "A precedes B" — the false parent in `phases` — is probably not solvable from logs at all, and `track()` settles it directly. So the display should show what it knows, claim nothing more, and let the shortfall be visible: a stopped heartbeat or a permanent pulse is **a prompt to log more or to instrument**, which is the value ladder working as intended rather than a failure to paper over. Ask them in that order — the middle rung above is cheaper for the user than the top one and closes most gaps, so "you have no line inside this loop" is a better first answer than "wrap it in `track()`". The instrumentation linter (#40) is what says which, statically.
+
+**The screen budget is real whether or not it is acknowledged.** Rich crops at terminal height regardless, so "unbounded" does not mean everything is shown — it means the cropping rule is *whoever qualified first*, which is the one rule with no argument behind it. Acknowledge the budget and fill it deliberately: active loops, then recently active, then idle.
+
+**Four element types, because forcing everything into a bar makes things lie.** A determinate bar (a total is known), a pulse (active, claiming nothing), a **counter** (this happened N times — no rate, no progress, the honest form for a source that fires once), and a session **heartbeat** (overall liveness from total arrival rate across all sources; needs no new signal, the store already has it). The pulse-vs-determinate distinction currently rides entirely on colour and animation, which is one fragile channel carrying the whole uncertainty vocabulary.
+
+**The heartbeat stops when the records stop, and says nothing else.** No "idle" label, no elapsed counter, no spinner turning on wall-clock — those all claim liveness nobody observed. When matplotlib spends 2.76 silent seconds rendering, a stopped heartbeat is the truthful frame. It reads as "we cannot see anything", which is exactly right, and the fix belongs to the developer rather than the display.
+
+**What this does not license.** None of it is a reason to move off source-location identity, to infer from message text, or to let the display invent structure it has not measured. A row that claims less is always available and always allowed.
+
 ### Decisions worth not relitigating
 
-- **A high bar count is a symptom, not a display bug.** It means grouping is too granular or the code logs ungroupably. Capping by default, or collapsing the excess into a neutral "… 298 more" row, destroys that signal. The diagnosis is now: 800 bars means containment analysis has not merged sibling call sites into shared loops — which it never does, because 1:1 merging is designed and deliberately unbuilt — so the count is a measure of how much structure has *not* been inferred yet, which is precisely the signal a cap would hide. Retirement no longer contributes: a quiet loop's bar goes idle, though it keeps its row, so retirement bounds what *claims* to be live without bounding what is drawn. `LUMBERJACK_MAX_BARS` exists only as a debug/terminal-compat escape hatch — opt-in, absent from the README, reported once at exit. Issue #8 is the home for the real fix.
+- **A high bar count is a symptom of unmerged identities, and the fix is merging, not capping.** 800 bars means containment analysis has not merged sibling call sites into shared loops. Capping *that* — collapsing the excess into a neutral "… 298 more" row — hides the symptom and fixes nothing, which is why it was refused. What changed is that the display no longer has to choose between hiding and drowning: under the display model below, 800 identities render as a handful of loop rows, so the count stops being a display problem without the signal being suppressed. A budget then allocates the rows that remain, by relevance rather than by arrival order. `LUMBERJACK_MAX_BARS` remains a debug/terminal-compat escape hatch — opt-in, absent from the README, reported once at exit. Issue #8 is the home for the merging work.
 - **Two bar kinds share one `Live`; they are never two started `Progress` objects.** `Progress.start()` starts a `Live` of its own, and rich allows only one live per console: the second becomes `_nested`, at which point its `refresh()` re-renders *the root's* renderable and returns, so its bars never draw (verified against rich 15.0.0, `Live.refresh`). Giving each its own `Console` is worse — two Lives writing cursor control to one stderr corrupt the frame. The working shape is rich's documented one: the renderer owns a single `Live(Group(task_progress, source_progress))` and **neither `Progress` is started**. Exact bars go in the group first, because the ellipsis crops bottom-up and instrumented bars must not lose their slots to inferred ones. Owning the `Live` is also where issue #28's bounded final frame belongs.
 - **Rich crops rather than corrupts.** `Progress` runs `Live` with `vertical_overflow="ellipsis"`, so an over-tall live frame shows the first N bars plus an ellipsis with correct cursor arithmetic. Do not justify display work by claiming otherwise. `Live.stop()` does *not* crop, though — see issue #28.
 - **At exit, drain before closing the display.** A live bar draws its closing frame from the store, so `teardown.run()` flushes the buffer first; closing first leaves the final count short, or with the pump disabled draws no bar at all. The excepthook path is the opposite by design — there a traceback is imminent, so the display comes down first.
 - **Pulse means "no claim", and confidence only ever increases.** `add_task(total=None)` gives rich an indeterminate, pulsing bar, and that one mechanism carries all the uncertainty the display needs: pulsing before a cycle is detected (work is happening, nothing more is claimed), determinate once a total is known, and **pulsing again if the count exceeds the estimate** — degrading to honesty rather than showing 127% or freezing at 100%. Promotion is one-way, for the same reason bars never move: a display that oscillates between spinner and bar as confidence wobbles is worse than one that stays a spinner.
 - **A bar retires on idle relative to its own period,** not on any completion signal — there isn't one. Absence of events is ambiguous (a slow iteration and a finished loop look identical), because nothing raises `StopIteration` at a log line. Roughly 10× the measured interval with no event is the 80% answer: wrong for a loop with wildly varying iterations, right nearly always, and cheap. Do not hold out for a correct answer here; there is no signal that would provide one. Two details the implementation forced. The threshold is floored at a second, because a millisecond loop's 10× threshold is shorter than the buffer-flush plus redraw latency feeding the model, and it would retire and resurrect on alternate frames. And "retires" means *marked idle in place* — the bar fills, the rate column reads `idle`, and the row stays: deleting it would empty the final frame that "drain before closing" exists to preserve, and would say the work stopped existing rather than stopped.
 - **Nesting depth is derived, never declared.** `tqdm` makes the author pass `position=` and manage `leave=` by hand, so depth is static and known at authoring time — which breaks on recursion, on a function that is sometimes top-level and sometimes inside a loop, and with threads. Deriving depth from observed containment removes the bookkeeping *and* covers the cases tqdm structurally cannot, because depth becomes a property of what happened rather than something declared in advance. This is the strongest form of the pitch and should not be traded away for implementation convenience.
-- **Bar display order is append-only, first-qualified.** Bars never move once placed, because a bar that jumps around as counts overtake each other is unreadable. Two known costs, both open under issue #8. With cropping the visible window is permanently the earliest qualifiers, not the busiest. And an inner loop always qualifies *before* its outer one — it logs N times per outer iteration — so a nested bar is drawn above the parent it is indented under, every time (#43). Ordering the model's output as a tree does not fix that: `rich.progress.Progress` renders tasks in `add_task()` order, so placement is decided when a bar is registered, not when it is returned.
+- **Rows move on structural change, never on counts.** The original rule was "bars never move once placed", justified by a bar that jumps around as counts overtake each other being unreadable. That justification is sound and is kept — but it was over-applied. It bans reordering by a *continuously changing* metric; it does not follow that structure may never be re-laid-out. Inferred containment changes rarely and is frozen once confirmed, so moving a row when the *structure* changes is stable in practice, while refusing to move it is wrong permanently.
+
+  This was not an abstract cost. In `examples/demo.py` the model correctly infers that `reconcile:124` (190/s) nests inside `reconcile:122` (10/s) — ratio 19.7, drawn `20/20` — and then renders it indented beneath **`extract:90`**, an unrelated loop on another thread, because that is where it first qualified. An inner loop always qualifies before its outer one, so this is the norm and not an edge case. The single visual cue for hierarchy was reporting a false hierarchy, which is worse than reporting none: it is the display asserting something untrue, and Principle 10's "the display may be wrong" licenses an imprecise bar, not a fabricated relationship.
+
+  `rich.progress.Progress` renders tasks in `add_task()` order, so placement is decided at registration. Re-laying-out therefore means rebuilding the task set on a structural change, not sorting the model's output — see #43.
 - **A `TaskHandle` parents only inside a `with`,** and out-of-order resets are handled rather than prevented. Only `__enter__` sets the ambient contextvar and only `__exit__` clears it, so a handle used bare holds no token and cannot be the one whose reset misfires. That is *not* enough to make out-of-order resets impossible: `with` is LIFO only within one frame, two suspended generators each holding one interleave freely, and `ContextVar.reset()` does **not** raise for an out-of-order token from the same Context — it silently writes the old value back. So the ambient slot is never trusted directly. `_unbind()` resets only while still the current binding, and `_ambient_parent()` walks past any handle that has already ended, following where each was *entered* rather than where it was created. Both guards are load-bearing and separately mutation-tested; a bug was found here twice.
 - **`.subtask()` takes its parent as `self`,** never from ambient context, because contextvars propagate into asyncio tasks but **not** into a bare `threading.Thread`. It must also build the child's OTel context from `self._span`, or the log and span hierarchies disagree in exactly that threaded case.
 - **`GeneratorExit` is not a task failure.** It is what a user's generator receives when the consumer stops early, so a plain `break` must not put a traceback on the ERROR channel — the one line a user is guaranteed to see — or mark the span failed. `track()`'s own early `break` already records a clean end; a bare `with` inside a generator has to agree.
-- **Progress ticks are sampled; the `end` row is not.** `advance()` emits at most one record per 50ms. The unconditional reason is that non-TTY output is write-through, one line per record, so per-item ticks print a million lines for a million-item loop — the disease the package exists to cure, caused by the cure. A second reason is real but machine-dependent and should not be quoted as a law: an unsampled loop measures ~59,000 records/s through the handler alone and ~24,000 with the JSON-lines renderer, against a 50,000/s drain ceiling, so fast hardware overflows lumberjack's own buffer and trips its own dropped-records warning while slower hardware does not. (An earlier note here claimed 85,000/s unconditionally; it did not reproduce — measure before quoting.) Nothing is lost either way, because `progress_current` is **absolute**, not a delta, and `end()` writes the final count unsampled. Do not "fix" a bar that looks coarse by lowering the interval.
+- **Progress ticks are sampled; the `end` row is not.** `advance()` emits at most one record per 50ms. The unconditional reason is that non-TTY output is write-through, one line per record, so per-item ticks print a million lines for a million-item loop — the disease the package exists to cure, caused by the cure. A second reason is real but machine-dependent and should not be quoted as a law: an unsampled loop can emit faster than the pump drains, so fast hardware overflows lumberjack's own buffer and trips its own dropped-records warning while slower hardware does not. **Do not quote a number for this from memory — run `benchmarks/capture.py`.** Three different figures have been written down here (85,000/s, then 59,000/s, then 85,000/s again on a third box) and each contradicted the last, which is why the benchmark exists and why this sentence no longer carries one. What is durable is the *shape*: a write-through renderer costs per record and a live bar does not, so plain and JSON are several times more expensive per call than rich, and the buffer→store drain is a ceiling above which records are evicted rather than the loop being slowed. Nothing is lost either way, because `progress_current` is **absolute**, not a delta, and `end()` writes the final count unsampled. Do not "fix" a bar that looks coarse by lowering the interval.
 - **Spans are attached unconditionally, never gated on `is_recording()`.** That is also False for a span the provider sampled out, so gating on it breaks parent/child propagation under head sampling — silently, and only in production.
 
 ### Record schema
@@ -143,11 +241,30 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
    - **4a.** Named determinate bars from stored tracking data, no inference at all. `TaskProgressModel` folds `store.task_events_since()` into one bar per task; the renderer draws them above the source bars in one shared `Live`.
    - **4b** (issue #38): per-source rate and count, then containment from period ordering scoped to one worker, pulse→promote, idle retirement. Reuses 4a's display model rather than inventing one. Interleaving verification and 1:1 bar merging were designed and deliberately left out — see the analysis section above.
 5. Hints config.
-6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries).
+6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries). **Re-evaluate before starting — see below.**
 7. Polish & extensibility (renderer interface finalized, theming, performance pass, docs).
 8. (Post-1.0) Progress provider interception — monkeypatch `tqdm.tqdm` at `init()`.
 9. (Stretch) Web renderer & disk-backed persistence.
 10. (Stretch) Profiling & contingent Rust migration for a specific bottleneck, gated on profiling data — not scheduled work.
+
+### Where OTel actually sits, revisited
+
+Phase 2 was "tracking API, outbound OTel only", and in hindsight the OTel half was early. Worth separating the two, because they are not the same bet:
+
+- **The tracking API (`task`/`track`) was right and is load-bearing.** It is rung 3, and it is what settles a total or a parent/child relationship that inference cannot. Most of Phase 2 was this.
+- **Outbound spans deliver nothing to lumberjack's own display.** They emit *to* an OTel backend. Real interop value for someone already running OTel; zero value to the question at the top of this document. Being shipped and inert is fine — it is small and guarded — but it should not have been sequenced ahead of anything the display needed.
+- **The inbound bridge is the half with nesting information**, and that is the argument for keeping Phase 6: parent/child span relationships from an already-instrumented third-party library are ground truth about containment that nothing else can supply. If a library emits spans, we learn its structure without its source and without inference.
+
+But rank the sources of containment ground truth by coverage before scheduling it:
+
+| Source | Exact? | Coverage | Status |
+|---|---|---|---|
+| Period-ratio inference | no | any code that logs | built |
+| `task()` / `.subtask()` | yes | code you chose to instrument | built |
+| Static AST | yes (lexical only) | any code with source on disk | not designed |
+| Inbound OTel spans | yes | code already OTel-instrumented | Phase 6, unbuilt |
+
+Inbound OTel is exact but has the narrowest reach of the three exact sources, and it is the only one requiring a dependency and a running collector. Static analysis covers far more code for less. So the honest sequencing is that **Phase 6 is interop, not the nesting fix** — it should be justified by "lumberjack works in an OTel shop", which is a real reason, rather than by the structure it happens to carry.
 
 ### Phases are GitHub milestones
 
@@ -193,9 +310,43 @@ The full local gate, which is what CI runs:
 ```bash
 uv sync --all-extras
 uv run ruff check . && uv run black --check .
-uv run mypy --strict src && uv run mypy tests examples
+uv run mypy --strict src && uv run mypy tests examples benchmarks
 uv run pytest
 ```
+
+### Benchmarking
+
+`benchmarks/capture.py` answers the question the pitch depends on: what does it cost to leave the debug logging in? Seven arms — no logging, a `logger.debug` the level discards, stdlib to a `NullHandler`, stdlib to a file, then lumberjack in `plain` / `json` / `rich` — so the package is measured against the alternatives a developer actually has rather than against zero.
+
+Five things about its construction are deliberate and should survive edits:
+
+- **Two numbers per arm, because either alone lies.** *In-loop* is time inside the logging call, which is what the calling thread feels. *Total* adds the drain, forced with a final `flush()`. lumberjack defers the drain to a background thread, so in-loop understates the true cost and total overstates the felt one.
+- **The buffer is sized to the run.** At the default 10,000 a fast loop outruns the pump, the buffer evicts, and the row measures how quickly lumberjack discards a record — a different question, and one the separate `measure_drain()` answers properly. A row that lost records is not a measurement, so it is annotated and the script exits non-zero.
+- **Minimum of repeats, not mean, and the raw repeats are kept beside it.** The noise is one-sided — every source of it adds time and none subtracts — so the distribution is right-skewed and its lower envelope is the most reproducible feature. Measured across repeated runs the minimum was as stable as or better than the median in 12 of 14 arm×metric cells; mean±stddev is worse on both counts, since the mean tracks box load and the standard deviation assumes a symmetry the data lacks. The per-repeat values are retained anyway, because the minimum alone cannot say whether a delta cleared the noise, and because a later comparison can then compute a statistic this version did not think of without invalidating baselines already on disk.
+- **`stored` is a correctness check, not a statistic.** `dropped == 0` only says the buffer never evicted; comparing `stored` against records-plus-warmup says they reached the store, which is Principle 6's actual promise. Both checks run over **every** repeat, not the fastest one — an earlier version carried the fastest repeat's notes while reporting the worst repeat's drop count, so a set where only a slow repeat overflowed printed `dropped=500` and still exited zero. `tests/test_benchmark.py` drives that aggregation with stub samples, because no end-to-end run catches it.
+- **The floor arm declares itself with `Arm.emits`,** rather than the setup function's name being sniffed. Renaming `_no_logging` under the old scheme silently demoted the floor to a second filtered-out arm — every "vs floor" ratio shrinking about tenfold — and nothing asserted otherwise, since the corrupted floor was still the cheapest row.
+
+The drain figure it prints is the **batched best case** — one `flush()` of the whole run against the pump's many small timer-driven batches. It is an upper bound, not a rate to plan against.
+
+#### What the instrument can and cannot resolve
+
+Measured on a 4-vCPU shared Xeon, and the reason `--repeats` defaults to 5 rather than 3:
+
+| | |
+|---|---|
+| Within one process, 10 repeats | MAD 0.5–2.4% of median; spread 2.5–11.3%; **every** outlier high, none low |
+| Reported minimum, run-to-run, `--repeats 3` | 7–13% |
+| Reported minimum, run-to-run, `--repeats 5`, quiet box | 1.3–5.6% |
+| Ratio against the floor, run-to-run | 8–12% |
+| `measure_drain()`, run-to-run | 13.7% |
+
+So **a sub-5% change is invisible to a single before/after pair** on this class of machine. That is a property of the instrument, and `--compare` says so rather than implying precision it does not have: verdicts are `noise` unless the two runs' repeat *ranges* are disjoint, and `suspect` when they are disjoint but the delta is under 5%. Range-disjointness rather than a t-test because five samples of a skewed one-sided distribution do not meet a parametric test's assumptions, and a reader can check non-overlap by eye against the spreads printed beside it.
+
+**Per-record cost is run-length dependent, so a baseline is only valid at its own `--records`.** The write-through modes measure ~25µs/record at 10k and ~44µs at 200k; the stdlib arms and rich are flat. The cause is the pump regime — a 10k run finishes in ~0.24s, barely one 200ms tick, so it never pays steady-state contention. The default of 100k sits in the steady state deliberately. It is *not* store growth across repeats: each `_measure()` re-runs `init()`/`shutdown()` against a fresh `:memory:` store, and later repeats measured slightly faster, so the min-of-repeats estimator is not biased by it.
+
+**Ratios are what travels between machines; absolutes are what to diff on one.** This inverts for comparison and the distinction matters: run-to-run on one box the ratios are *less* stable than the absolutes they are built from, because the denominator is 12ns of pure loop overhead carrying its own noise. Quote ratios in prose — see the sampling note above for three mutually contradictory absolute figures each written down as fact — and let `--compare` read absolutes.
+
+**Baselines are gitignored (`benchmarks/*.local.json`), never committed,** and `--compare` withholds verdicts when the record count, repeat count or machine fingerprint differs. Committing one would recreate precisely the failure the sampling note records. `tests/test_benchmark.py` also runs the script end to end at 200 records on every suite run, asserting only that it executes and loses nothing — never on timings, which at that size are noise and would flap on a busy CI runner. Making it a CI *gate* needs a dedicated runner, which does not exist; that decision lives in its own issue rather than being relitigated here.
 
 ### CI
 
@@ -211,6 +362,22 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 | `coverage` | One suite run with `--cov-report=xml`, uploaded to Codacy, which renders the README badge from it |
 
 CodeQL and Codacy also run, both configured outside this workflow.
+
+### Releasing
+
+`.github/workflows/release.yml`, separate from CI because it runs on different events and needs a permission CI must never have.
+
+**Publishing is one-shot per version number.** PyPI refuses a re-upload of a version even after you delete it, so every mistake costs a number. Everything about the workflow's shape follows from that:
+
+- **`workflow_dispatch` defaults to TestPyPI.** It is the rehearsal, and the only way to see how the long description renders and whether the metadata is right *before* spending a version. Use it first, every time.
+- **Publishing a GitHub Release publishes to PyPI.** That is the real one.
+- **The tag must match `pyproject.toml`.** Tagging `v0.1.0` while the file still says `0.1.0.dev0` would publish a dev release under a number nobody meant to spend, so the build fails instead. Bump the version and the `CHANGELOG.md` heading in the same commit as the tag.
+- **`twine check --strict` runs before anything is uploaded.** A README that fails to render leaves a permanently ugly project page. This nearly happened once already: the coverage badge used to be a *relative* path, which renders on GitHub and nowhere else.
+- **The wheel is built once and verified, then that same artifact is published.** Rebuilding between the check and the upload would mean publishing something nothing tested.
+
+**Trusted Publishing, not an API token.** GitHub mints a short-lived OIDC token that the index exchanges for upload rights, so no long-lived credential exists to leak — the same reasoning that keeps CI on a read-only workflow token. It binds to the repository, the workflow *filename*, and the GitHub environment name, so all three are configured on the index side: renaming `release.yml` or the `pypi` / `testpypi` environments breaks publishing until the publisher is updated to match.
+
+The `pypi` environment is also where a required reviewer belongs, if publishing should ever need a second pair of eyes.
 
 The workflow is also `workflow_dispatch`-able, which is not a convenience. A commit message can suppress a run outright — GitHub scans the entire message for a skip directive, body included, so *quoting* one in prose is enough — and a suppressed run is never created, so there is nothing to re-run afterwards. Branch protection then refuses the empty commit that would force one. The result is a trunk commit with no verdict at all, which is indistinguishable from a green one at a glance. Manual dispatch is the way back.
 
@@ -241,4 +408,4 @@ Both follow the same rule: a bad **argument** is a caller's bug and raises; a ba
 
 ### Verifying display behaviour
 
-Bars only render on a TTY, so piping the demo shows the plain renderer instead. To see the real thing, run it under a pty and strip ANSI. Note `examples/demo.py` calls `shutdown()`, which unregisters the `atexit` hook — a script that exits naturally is needed to observe exit-time diagnostics.
+`examples/demo.py` carries one scenario per shape of log stream (`--list` describes them, `--all` runs every one); several are shapes the display handles badly and are there as design fixtures. Bars only render on a TTY, so piping the demo shows the plain renderer instead. To see the real thing, run it under a pty and strip ANSI. Note `examples/demo.py` calls `shutdown()`, which unregisters the `atexit` hook — a script that exits naturally is needed to observe exit-time diagnostics.

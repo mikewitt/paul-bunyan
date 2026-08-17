@@ -45,7 +45,12 @@ target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+# `G` is not housekeeping here, it is dogfooding. G001-G004 forbid building a
+# log message with an f-string, `.format()` or `+`, which keeps `record.msg`
+# the *template* and `record.args` the data. lumberjack reads both as separate
+# columns; an f-string destroys the template at the call site and it cannot be
+# recovered. The package that depends on that discipline should be held to it.
+select = ["E", "F", "I", "B", "UP", "G"]
 
 [tool.black]
 target-version = ["py312"]

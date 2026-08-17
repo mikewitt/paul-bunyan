@@ -65,26 +65,28 @@ the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-demo.py:49 extract()     ━━━━━━━━━━━━━━━━━━━━━ 700 records         229/s 0:00:02
-  demo.py:83 reconcile() ━━━━━━━━━━━━━━━━━━━╸━ 19/20 · 480 records 191/s 0:00:02
-demo.py:55 transform()   ━━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
-demo.py:66 load()        ━━━━━━━━━━━━━━━━━━━━━ 300 records         96/s  0:00:02
-demo.py:81 reconcile()   ━━━━━━━━━━━━━━━━━━━━━ 24 records          10/s  0:00:02
+demo.py:90 extract()      ━━━━━━━━━━━━━━━━━━━━ 700 records         238/s 0:00:02
+  demo.py:124 reconcile() ━━━━━━━━━━━━━━━━━━━╺ 19/20 · 480 records 191/s 0:00:02
+demo.py:96 transform()    ━━━━━━━━━━━━━━━━━━━━ 450 records         142/s 0:00:02
+demo.py:107 load()        ━━━━━━━━━━━━━━━━━━━━ 300 records         98/s  0:00:02
+demo.py:122 reconcile()   ━━━━━━━━━━━━━━━━━━━━ 24 records          9/s   0:00:02
 ```
 
 One bar per source location, no concurrency-specific setup. Three of those
 loops are flat, so their bars only count and pace: nothing in the stream says
 how long they are, and claiming otherwise would be a guess. `reconcile` runs a
-loop inside a loop, and *that* is in the stream — line 83 fires twenty times
-between consecutive firings of line 81 — so it draws indented under its
-parent with a real `19/20`, from a total nobody declared. When a loop goes
-quiet for long enough its bar fills and reads `idle`.
+loop inside a loop, and *that* is in the stream — line 124 fires twenty times
+between consecutive firings of line 122 — so it draws indented with a real
+`19/20`, from a total nobody declared. When a loop goes quiet for long enough
+its bar fills and reads `idle`.
 
 Two things this deliberately does not do. It does not group by worker: two
 threads running the same loop share a bar, though thread and process are
 recorded on every record and *are* what stop two unrelated loops being read as
-nested. And it does not move a bar once drawn, which is why the indented child
-above sits above its parent rather than beneath it — see
+nested. And it does not move a bar once drawn — which is why the indented
+child above is sitting under `extract`, an unrelated loop on another thread,
+rather than under the `reconcile` line it actually belongs to. That one is a
+real defect, not a trade-off; see
 [#43](https://github.com/mikewitt/paul-bunyan/issues/43).
 
 Inference is an 80% solution on purpose, and it will be wrong sometimes. When
@@ -116,6 +118,20 @@ LUMBERJACK_OUTPUT_MODE=plain uv run python examples/demo.py   # the scrolling th
 The worker functions are identical between those two runs and know nothing
 about lumberjack. That is the point: the display is a property of how the
 application was configured, not of how the code was written.
+
+The demo carries other shapes of log stream too — a slow loop narrating its
+own stages, one loop with several call sites in its body, startup lines that
+never repeat, a wrapper that collapses every call site onto one:
+
+```bash
+uv run python examples/demo.py --list       # every shape, and what it exercises
+uv run python examples/demo.py sequence     # one of them on its own
+```
+
+Several are shapes lumberjack currently handles badly, and they are in there
+for that reason — each states what it logs, what the display does with it
+today, and what it *should* do, with the open questions marked. They are the
+working material for the display design, not a feature tour.
 
 #### `init()` is for applications, never libraries
 
@@ -371,5 +387,44 @@ uv run pytest
 uv run ruff check .
 uv run black --check .
 uv run mypy --strict src
-uv run mypy tests examples
+uv run mypy tests examples benchmarks
 ```
+
+### What it costs to leave the logging in
+
+`benchmarks/capture.py` measures the capture path against the alternatives a
+developer actually has — no logging at all, a `logger.debug` the level throws
+away, stdlib to a `NullHandler`, stdlib to a file, then lumberjack in each of
+its three output modes.
+
+```bash
+uv run python benchmarks/capture.py                    # the table
+uv run python benchmarks/capture.py --records 200000 --json
+```
+
+**Quote the ratios, not the nanoseconds.** Absolutes move with the machine and
+the interpreter build; the relationship between the arms is what survives the
+trip to someone else's box.
+
+To track a change across features, record a baseline and diff against it:
+
+```bash
+uv run python benchmarks/capture.py --json > benchmarks/baseline.local.json
+uv run python benchmarks/capture.py --compare benchmarks/baseline.local.json
+```
+
+Comparison works on the **absolute** per-arm numbers, not the ratios — on one
+machine the ratios have a tiny, noisy denominator and travel worse than what
+they are built from. Baselines are gitignored, and `--compare` withholds its
+verdicts unless the record count, the repeat count and the machine fingerprint
+all match, so a diff can never quietly span two boxes.
+
+Two limits, both measured rather than assumed: the instrument cannot resolve a
+change below about **5%**, and per-record cost is run-length dependent below
+~50k records, so a baseline is only comparable at the `--records` it was taken
+at. Two runs of unchanged code should read `noise` on every row.
+
+The script exits non-zero if any arm lost records, which makes it a check as
+well as a report — and `tests/test_benchmark.py` runs it at a tiny record count
+on every suite run, so it cannot rot against an API change between the times
+somebody looks at the numbers.
