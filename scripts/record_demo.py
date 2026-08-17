@@ -210,6 +210,7 @@ def render(
     rows: int,
     fonts: list[tuple[ImageFont.FreeTypeFont, ...]],
     coverage: list[set[int]],
+    caption: str = "",
 ) -> Image.Image:
     """One screen snapshot as an image.
 
@@ -222,8 +223,21 @@ def render(
     cw = fonts[0][0].getlength("M")
     ch = FONT_SIZE + 3
     pad = 12
-    img = Image.new("RGB", (int(cols * cw) + pad * 2, rows * ch + pad * 2), BACKGROUND)
+    # The caption gets its own row *below* the content rather than being
+    # drawn over the last one: the crop already sized `rows` to what the
+    # display used, and provenance must not cover pixels it attests to.
+    extra = ch + 4 if caption else 0
+    img = Image.new(
+        "RGB", (int(cols * cw) + pad * 2, rows * ch + pad * 2 + extra), BACKGROUND
+    )
     draw = ImageDraw.Draw(img)
+    if caption:
+        draw.text(
+            (pad, pad + rows * ch + 4),
+            caption,
+            font=fonts[0][0],
+            fill=NAMED["brightblack"],
+        )
 
     for y, line in enumerate(snapshot.split("\n")[:rows]):
         cells = line.split("\x00")
@@ -305,6 +319,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--caption",
+        default="",
+        help=(
+            "a dim provenance line rendered under every frame, outside the "
+            "recorded area. CI passes the source commit, so the published "
+            "gif states in its own pixels which trunk commit it shows — a "
+            "claim that survives caching proxies, downloads and hotlinks, "
+            "where a caption in surrounding markup would not."
+        ),
+    )
+    parser.add_argument(
         "--require",
         default="",
         help=(
@@ -370,7 +395,10 @@ def main(argv: list[str] | None = None) -> int:
     height = max(used, 1)
 
     fonts, coverage = _load_faces()
-    images = [render(snap, args.cols, height, fonts, coverage) for snap, _ in kept]
+    images = [
+        render(snap, args.cols, height, fonts, coverage, args.caption)
+        for snap, _ in kept
+    ]
     if not images:
         print("nothing captured", file=sys.stderr)
         return 1

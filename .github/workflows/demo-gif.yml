@@ -78,10 +78,15 @@ jobs:
       # backstop: the run fails unless some frame actually drew a bar, so a
       # future fallback (missing extra, broken TTY detection) reads as a red
       # check instead of a wrong recording.
+      # The caption ties the pixels to their source: the published gif
+      # states in its own bottom row which commit it was recorded from, so
+      # provenance survives the camo cache, downloads and hotlinks. Compare
+      # it against `git log -1 demo-assets`, which stamps the same SHA.
       - name: Record the pipeline scenario
         run: >
           uv run --all-extras --with pillow --with pyte --with fonttools
           python scripts/record_demo.py pipeline --require '━'
+          --caption "recorded from ${GITHUB_SHA:0:9} · $(date -u +%F)"
       - name: Assert the recording is not trivially small
         # ~140 KiB is the healthy size; a run that captured a blank screen or
         # died after one frame still writes a gif, just a tiny one. The floor
