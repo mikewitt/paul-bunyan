@@ -55,13 +55,13 @@ def test_polling_twice_without_new_rows_changes_nothing(store, make_row):
 def test_a_task_without_a_total_is_indeterminate(store, make_row):
     store.append([_event(make_row, 1, "update", progress_current=7)])
     (bar,) = TaskProgressModel(store).poll()
-    assert bar.total is None and not bar.is_determinate
+    assert bar.total is None
 
 
 def test_a_task_with_a_total_is_determinate(store, make_row):
     store.append([_event(make_row, 1, "update", progress_current=7, progress_total=10)])
     (bar,) = TaskProgressModel(store).poll()
-    assert bar.is_determinate
+    assert bar.total is not None
 
 
 def test_the_end_row_finishes_the_bar(store, make_row):

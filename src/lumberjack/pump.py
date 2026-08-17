@@ -37,10 +37,6 @@ class FlushPump:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    @property
-    def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
-
     def start(self) -> None:
         """Start pumping. Idempotent."""
         if self._thread is not None:

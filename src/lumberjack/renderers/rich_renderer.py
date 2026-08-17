@@ -17,7 +17,6 @@ Two renderers live here:
 
 from __future__ import annotations
 
-import logging
 import sys
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -56,6 +55,7 @@ from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     HEARTBEAT_FRAMES_ASCII,
+    PASSTHROUGH_LEVEL,
     BarState,
     CyclePosition,
     HeartbeatState,
@@ -63,6 +63,7 @@ from lumberjack.renderers.progress import (
     LoopRowModel,
     SessionHeartbeat,
     TaskProgressModel,
+    ascii_fallback,
     heartbeat_frames,
     resolve_max_bars,
 )
@@ -431,7 +432,7 @@ class RichProgressRenderer:
         stream: TextIO | None = None,
         min_repeats: int = DEFAULT_MIN_REPEATS,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
-        passthrough_level: int = logging.WARNING,
+        passthrough_level: int = PASSTHROUGH_LEVEL,
         max_bars: int | None = None,
     ) -> None:
         if Progress is None:
@@ -475,11 +476,9 @@ class RichProgressRenderer:
             collapsed_mark = _COLLAPSED_BAR_ASCII
         else:
             self._frames = heartbeat_frames(self._console.encoding)
-            collapsed_mark = _COLLAPSED_BAR
-            try:
-                _COLLAPSED_BAR.encode(self._console.encoding)
-            except (UnicodeEncodeError, LookupError):
-                collapsed_mark = _COLLAPSED_BAR_ASCII
+            collapsed_mark = ascii_fallback(
+                _COLLAPSED_BAR, _COLLAPSED_BAR_ASCII, self._console.encoding
+            )
         # markup=False throughout: labels carry file paths and user-supplied
         # task names, and a stray "[" in either must not parse as a rich tag.
         self._task_progress = Progress(
@@ -773,8 +772,13 @@ class RichProgressRenderer:
                 drawn_total = bar.total
             rich_id = self._task_bars.get(bar.task_id)
             if rich_id is None:
+                # Splatted, not passed as `fields=`: `add_task` collects
+                # `**fields` itself, so a literal `fields=` kwarg stores one
+                # entry literally named "fields" — the exact trap
+                # `_row_fields` documents — and `task.fields["count"]` reads
+                # nothing until the `update()` below happens to set it.
                 rich_id = self._task_progress.add_task(
-                    label, total=drawn_total, fields={"count": count}
+                    label, total=drawn_total, count=count
                 )
                 self._task_bars[bar.task_id] = rich_id
             # See `_set_total`: `update(total=None)` would leave a stale total

@@ -169,11 +169,6 @@ class CallSite:
         """The innermost enclosing loop, or None outside any loop."""
         return self.loop_chain[-1] if self.loop_chain else None
 
-    @property
-    def depth(self) -> int:
-        """Loop nesting depth within the enclosing scope; 0 outside a loop."""
-        return len(self.loop_chain)
-
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Loop:
@@ -640,9 +635,8 @@ __all__ = [
     "CallSite",
     "FileStructure",
     "Loop",
-    "LoopKind",
-    "MessageKind",
     "analyze_file",
     "clear_cache",
+    "message_arg_index",
     "template_matches",
 ]

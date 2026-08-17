@@ -135,7 +135,6 @@ def test_a_row_with_no_template_falls_back_to_the_source_location(store, make_ro
     store.append([make_row(msg="", created=100.0 + i) for i in range(4)])
     (row,) = model.poll()
     assert row.label == "foo.py:10 bar()"
-    assert row.location == "foo.py:10 bar()"
 
 
 def test_a_label_does_not_change_when_the_message_does(store, make_row):

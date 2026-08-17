@@ -14,7 +14,6 @@ from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     MAX_BARS_ENV_VAR,
     PERIOD_SMOOTHING,
-    BarState,
     RepeatingSourceModel,
     resolve_max_bars,
 )
@@ -122,11 +121,6 @@ def test_a_source_qualifies_on_its_total_not_one_poll(store, make_row):
     assert [b.count for b in model.poll()] == [3]
 
 
-def test_label_names_the_source_location():
-    bar = BarState(source=SourceKey("/srv/app/worker.py", 42, "process"), count=1)
-    assert bar.label == "worker.py:42 process()"
-
-
 # --- the opt-in bar ceiling ------------------------------------------------
 #
 # An environment variable rather than an init() option, and a terminal-compat
@@ -183,7 +177,7 @@ def test_no_period_before_two_records(store, make_row):
     store.append([make_row(created=100.0)])
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
-    assert bar.period is None and bar.rate is None
+    assert bar.period is None
 
 
 def test_the_period_comes_from_the_deltas_own_span_on_first_sight(store, make_row):
@@ -192,7 +186,6 @@ def test_the_period_comes_from_the_deltas_own_span_on_first_sight(store, make_ro
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
     assert bar.period == pytest.approx(1.0)
-    assert bar.rate == pytest.approx(1.0)
 
 
 def test_the_period_spans_the_gap_between_polls(store, make_row):
@@ -231,7 +224,7 @@ def test_records_sharing_a_timestamp_report_no_rate(store, make_row):
     store.append([make_row(created=100.0) for _ in range(5)])
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
-    assert bar.period is None and bar.rate is None
+    assert bar.period is None
 
 
 def test_each_source_times_itself(store, make_row):
@@ -459,8 +452,11 @@ def test_an_inner_loop_that_outruns_its_total_stops_claiming_one(store, make_row
         + [make_row(lineno=6, func_name="inner", created=at + i) for i in range(30)]
     )
     bar = _by_line(model.poll())[6]
-    assert bar.total == 8 and bar.cycle_current > 8
-    assert not bar.is_determinate, "an overrun bar must withdraw its claim"
+    assert bar.total == 8
+    # `is_determinate` used to compute exactly this; the withdrawal is the
+    # count outrunning a total that is never cleared — `total` stays 8, only
+    # `cycle_current` is allowed to exceed it — so this is the raw claim now.
+    assert bar.cycle_current > bar.total, "an overrun bar must withdraw its claim"
 
 
 def test_an_untimed_source_takes_no_part_in_containment(store, make_row):

@@ -125,7 +125,6 @@ def test_siblings_are_four_call_sites_in_one_body(demo: static.FileStructure) ->
         "row %d: enriched from cache",
         "row %d: emitted downstream",
     ]
-    assert all(site.depth == 1 for site in loop.call_sites)
     assert all(site.loop_lineno == loop.lineno for site in loop.call_sites)
 
 
@@ -443,7 +442,6 @@ def test_a_call_outside_any_loop_has_no_position(
     for site in (module_site, function_site):
         assert site.loop_chain == ()
         assert site.loop_lineno is None
-        assert site.depth == 0
         assert (site.position, site.body_size) == (None, None)
 
 
@@ -476,7 +474,6 @@ def test_only_the_loop_body_repeats(
 
     body, otherwise = structure.call_sites.values()
     assert body.template == "in the body"
-    assert body.depth == 1
     # `for … else` runs once after the loop, so a bar built on it would tick
     # once per *loop*, not once per iteration.
     assert otherwise.template == "in the else clause"
@@ -528,7 +525,6 @@ def test_conditional_is_relative_to_the_innermost_body(
     # iteration of *that* loop runs this line, which is what a sub-iteration
     # bar is asking about.
     assert not sites["inner %s"].conditional
-    assert sites["inner %s"].depth == 2
     for template in ("matched", "attempted", "failed"):
         assert sites[template].conditional, template
 

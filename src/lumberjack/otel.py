@@ -38,11 +38,6 @@ if TYPE_CHECKING:
 INSTRUMENTATION_NAME = "lumberjack"
 
 
-def is_available() -> bool:
-    """Whether `opentelemetry-api` imported."""
-    return _OTEL_IMPORT_ERROR is None
-
-
 def tracer() -> Tracer | None:
     """The tracer to open spans on, or None when OTel is not installed.
 

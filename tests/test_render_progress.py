@@ -115,8 +115,9 @@ def test_a_loop_of_log_lines_becomes_one_advancing_bar(rig: _Rig):
 
     (bar,) = rig.renderer.bars()
     assert bar.count == 50
-    assert bar.label.startswith("test_render_progress.py:")
-    assert bar.label.endswith("test_a_loop_of_log_lines_becomes_one_advancing_bar()")
+    label = bar.source.format()
+    assert label.startswith("test_render_progress.py:")
+    assert label.endswith("test_a_loop_of_log_lines_becomes_one_advancing_bar()")
 
 
 def test_the_bar_advances_while_the_loop_runs(rig: _Rig):

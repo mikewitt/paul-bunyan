@@ -57,8 +57,10 @@ from lumberjack.renderers.progress.heartbeat import (
     HEARTBEAT_FRAMES,
     HEARTBEAT_FRAMES_ASCII,
     MESSAGE_LOOKBACK,
+    PASSTHROUGH_LEVEL,
     HeartbeatState,
     SessionHeartbeat,
+    ascii_fallback,
     heartbeat_frames,
 )
 from lumberjack.renderers.progress.layout import depth_first_order
@@ -98,6 +100,7 @@ __all__ = [
     "DEFAULT_REFRESH_INTERVAL",
     "HEARTBEAT_FRAMES",
     "HEARTBEAT_FRAMES_ASCII",
+    "ascii_fallback",
     "heartbeat_frames",
     "IDLE_PERIODS",
     "LOOKBACKS",
@@ -108,6 +111,7 @@ __all__ = [
     "MIN_IDLE_SECONDS",
     "MIN_LEGIBLE_PERIOD",
     "MIN_NESTING_RATIO",
+    "PASSTHROUGH_LEVEL",
     "PERIOD_SMOOTHING",
     "RATIO_TOLERANCE",
     "SAME_LOOP_TOLERANCE",

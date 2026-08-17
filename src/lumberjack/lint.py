@@ -513,20 +513,15 @@ def _nothing_repeating(
         if scope.loops or len(sites) < ONESHOT_CALLS or len(sites) != len(scope.sites):
             continue
         first = sites[0]
-        where = (
-            "this module"
-            if first.func_name == static.MODULE_SCOPE
-            else f"{first.func_name}()"
-        )
         yield Finding(
             rule="nothing-repeating",
             pathname=structure.pathname,
             lineno=first.lineno,
             what=(
-                f"{where} logs {len(sites)} times and contains no loop at all, so "
-                f"nothing here repeats. No source has a period, so nothing will "
-                f"draw a bar — the display can show a heartbeat and the newest "
-                f"line, and that is the whole of it."
+                f"{_subject(first.func_name)} logs {len(sites)} times and contains "
+                f"no loop at all, so nothing here repeats. No source has a period, "
+                f"so nothing will draw a bar — the display can show a heartbeat and "
+                f"the newest line, and that is the whole of it."
             ),
             fix=(
                 "if there is repeated work here that is not written as a loop, or "
@@ -570,13 +565,21 @@ def _findings_for(
     ]
 
 
-def check_file(pathname: str, *, all_loops: bool = False) -> tuple[Finding, ...] | None:
-    """Every finding for one file, or None if it cannot be read or parsed."""
+def _report_for(
+    pathname: str, *, all_loops: bool = False
+) -> tuple[static.FileStructure, tuple[Finding, ...]] | None:
+    """One file's structure and its sorted findings, or None if unreadable.
+
+    The one place `check()`'s per-file walk lives: parse, find, sort. Private
+    because nothing outside this module needs one file's report on its own —
+    `check()` is the public surface, over any number of paths, and folds this
+    into the totals it also has to compute from `structure`.
+    """
     structure = static.analyze_file(pathname)
     if structure is None:
         return None
     findings = _findings_for(structure, all_loops=all_loops)
-    return tuple(sorted(findings, key=lambda finding: finding.sort_key))
+    return structure, tuple(sorted(findings, key=lambda finding: finding.sort_key))
 
 
 # --------------------------------------------------------------------------
@@ -612,16 +615,17 @@ def check(paths: Iterable[str], *, all_loops: bool = False) -> Report:
     findings: list[Finding] = []
     files = loops = sites = repeating = silent = unlogged = 0
     for pathname in python_files(paths):
-        structure = static.analyze_file(pathname)
-        if structure is None:
+        result = _report_for(pathname, all_loops=all_loops)
+        if result is None:
             continue
+        structure, file_findings = result
         files += 1
         unlogged += not structure.imports_logging
         loops += len(structure.loops)
         sites += len(structure.call_sites)
         repeating += sum(1 for s in structure.call_sites.values() if s.loop_chain)
         silent += sum(1 for loop in structure.loops.values() if not loop.call_sites)
-        findings.extend(_findings_for(structure, all_loops=all_loops))
+        findings.extend(file_findings)
     return Report(
         findings=tuple(sorted(findings, key=lambda finding: finding.sort_key)),
         files=files,

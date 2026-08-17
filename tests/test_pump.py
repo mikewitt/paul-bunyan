@@ -50,14 +50,6 @@ def test_pump_calls_flush_repeatedly():
         pump.stop()
 
 
-def test_stop_halts_flushing():
-    pump = FlushPump(interval=0.001, flush=lambda: None)
-    pump.start()
-    assert pump.running
-    pump.stop()
-    assert not pump.running
-
-
 def _pump_threads(name: str) -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name == name]
 

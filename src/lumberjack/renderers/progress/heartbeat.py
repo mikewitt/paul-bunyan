@@ -11,7 +11,11 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
-from lumberjack.renderers.progress.smoothing import _smoothed
+from lumberjack.renderers.progress.smoothing import (
+    _smoothed,
+    advance_watermark,
+    fold_interval,
+)
 
 if TYPE_CHECKING:
     from lumberjack.store import RecordStore, SourceDelta
@@ -48,25 +52,48 @@ HEARTBEAT_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 #: so anything drawn from this module owes its own fallback.
 HEARTBEAT_FRAMES_ASCII = "|/-\\"
 
+#: The level at and above which a record prints above the bars in full,
+#: rather than being collapsed into the heartbeat's count and last-message
+#: fields. `SessionHeartbeat`'s constructor default and
+#: `RichProgressRenderer`'s are the same choice stated once: the renderer
+#: always threads its own value down to the heartbeat it builds, so this
+#: constant's only live use is `SessionHeartbeat(store)` built directly, with
+#: no renderer supplying one.
+PASSTHROUGH_LEVEL = logging.WARNING
 
-def heartbeat_frames(encoding: str | None) -> str:
-    """The frame set `encoding` can actually carry.
+
+def ascii_fallback(glyphs: str, ascii_glyphs: str, encoding: str | None) -> str:
+    """`glyphs` if `encoding` can carry them, `ascii_glyphs` if it cannot.
 
     Principle 9's rule — degrade, never error — applied to the terminal rather
     than to a package: an unencodable glyph is exactly as fatal as a missing
-    dependency, and just as unnecessary.
+    dependency, and just as unnecessary. Shared by every character lumberjack
+    draws itself, per the module docstring above — `heartbeat_frames()` below
+    is one caller, `RichProgressRenderer`'s collapsed-row mark is the other.
+
+    Two signals, handled in the order rich itself would encounter them.
+    `encoding is None` is rich's own convention for a stream that did not say,
+    which it reads as utf-8 — agreeing with it is what keeps our glyphs and
+    its box characters consistent. An empty string is a stream that said
+    "nothing" rather than one that said nothing, so it is taken at its word
+    and gets the fallback. Anything else is tried for real: `HEARTBEAT_FRAMES`
+    and `▪` both fail to encode under `cp1252`, a Windows console's default,
+    and an unencodable write raises rather than degrading.
     """
     if encoding is None:
-        # rich's own convention for a stream that does not declare one, and
-        # the reason to match it is that rich is what performs the write.
-        return HEARTBEAT_FRAMES
+        return glyphs
     if not encoding:
-        return HEARTBEAT_FRAMES_ASCII
+        return ascii_glyphs
     try:
-        HEARTBEAT_FRAMES.encode(encoding)
+        glyphs.encode(encoding)
     except (UnicodeEncodeError, LookupError):
-        return HEARTBEAT_FRAMES_ASCII
-    return HEARTBEAT_FRAMES
+        return ascii_glyphs
+    return glyphs
+
+
+def heartbeat_frames(encoding: str | None) -> str:
+    """The frame set `encoding` can actually carry. See `ascii_fallback`."""
+    return ascii_fallback(HEARTBEAT_FRAMES, HEARTBEAT_FRAMES_ASCII, encoding)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -147,7 +174,7 @@ class SessionHeartbeat:
     """
 
     def __init__(
-        self, store: RecordStore, *, passthrough_level: int = logging.WARNING
+        self, store: RecordStore, *, passthrough_level: int = PASSTHROUGH_LEVEL
     ) -> None:
         self._store = store
         self._passthrough_level = passthrough_level
@@ -193,29 +220,23 @@ class SessionHeartbeat:
         return self._state
 
     def _observe_period(self, arrived: int, delta: SourceDelta) -> None:
-        """Time the arrivals, exactly as `_update_period` times one source.
+        """Time the arrivals, via the same fold `_update_period` uses per source.
 
-        Same two cases: a window running from the newest record we already
-        knew about, or — on first sight, with nothing to measure back to — the
-        delta's own span, which holds one fewer interval than it does records.
+        Same two cases, over the whole delta rather than one source: a window
+        running from the newest record we already knew about, or — on first
+        sight, with nothing to measure back to — the delta's own span, which
+        holds one fewer interval than it does records. See
+        `smoothing.fold_interval` and `smoothing.advance_watermark` — the
+        latter is why the watermark never moves backwards, which matters here
+        because several workers can land in one delta.
         """
         newest = max(delta.last_at.values())
         previous = self._last_at
-        # Never backwards: several workers land in one delta, so a later poll
-        # can carry a newest timestamp older than an earlier poll's. Moving
-        # the mark back would inflate the next span with time already counted.
-        self._last_at = newest if previous is None else max(newest, previous)
-        if previous is not None:
-            span, intervals = newest - previous, arrived
-        else:
-            if arrived < 2:
-                return
-            span, intervals = newest - min(delta.first_at.values()), arrived - 1
-        if span <= 0 or intervals <= 0:
-            # Records sharing a timestamp, or arriving out of order across
-            # polls. No interval to learn from, and dividing by the span would
-            # report an infinite rate.
+        self._last_at = advance_watermark(previous, newest)
+        folded = fold_interval(previous, newest, min(delta.first_at.values()), arrived)
+        if folded is None:
             return
+        span, intervals = folded
         self._period = _smoothed(self._period, span / intervals)
 
     def _newest_message(self, previous: str | None) -> str | None:

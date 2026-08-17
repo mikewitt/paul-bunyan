@@ -93,13 +93,6 @@ def test_context_with_span_is_none_for_a_parentless_task():
     assert otel.context_with_span(None) is None
 
 
-@pytest.mark.skipif(otel.is_available(), reason="otel is installed")
-def test_the_import_guard_reports_the_absence():
-    """Runs only on the bare job, where the real ImportError path is live."""
-    assert not otel.is_available()
-    assert otel.tracer() is None
-
-
 # --- a real provider --------------------------------------------------------
 
 
