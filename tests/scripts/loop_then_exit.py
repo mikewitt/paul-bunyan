@@ -2,7 +2,7 @@
 same line N times from a loop — what a developer's debug logging inside a
 loop actually looks like.
 
-The parent test (test_integration.py) checks the whole premise in a real
+The parent test (test_exit_paths.py) checks the whole premise in a real
 process: the loop's lines don't scroll, a bar is drawn instead, every record
 still lands in the store, and a WARNING still gets through. The env knobs
 exist so one script can cover the clean-exit case and both sides of the

@@ -3,7 +3,7 @@
 The excepthook-fires-for-real and atexit-fires-for-real paths can't be
 exercised in-process (pytest owns exception handling; atexit only runs at
 real interpreter shutdown) — those are covered via subprocess in
-test_integration.py instead.
+test_exit_paths.py instead.
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ def test_teardown_drains_before_dumping(capsys, make_row):
 
 
 def test_dump_survives_the_flush_pump_draining_the_buffer(
-    capsys, wait_until: Callable[..., bool]
+    capsys, wait_until: Callable[..., bool], attached_logger
 ):
     # The regression this ordering exists for: with the pump running, the
     # buffer is empty most of the time, so a buffer-sourced dump recovered
@@ -227,26 +227,22 @@ def test_dump_survives_the_flush_pump_draining_the_buffer(
     handler = LumberjackHandler(level=logging.DEBUG)
     store = SQLiteRecordStore(":memory:")
     pump = FlushPump(interval=0.001, flush=lambda: store.append(handler.drain()))
-    logger = logging.getLogger("teardown-pump-test")
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
     pump.start()
     try:
-        for i in range(5):
-            logger.info("swallowed by the bar %d", i)
-        assert wait_until(lambda: len(store.recent()) == 5), "pump never drained"
-        assert handler.drain() == [], "the pump emptied the buffer, as it does"
-        _install(
-            renderer=_FakeRenderer(write_through=False),
-            handler=handler,
-            store=store,
-            dump_last_n=50,
-        )
-        teardown.run()
+        with attached_logger(handler, name="teardown-pump-test") as logger:
+            for i in range(5):
+                logger.info("swallowed by the bar %d", i)
+            assert wait_until(lambda: len(store.recent()) == 5), "pump never drained"
+            assert handler.drain() == [], "the pump emptied the buffer, as it does"
+            _install(
+                renderer=_FakeRenderer(write_through=False),
+                handler=handler,
+                store=store,
+                dump_last_n=50,
+            )
+            teardown.run()
     finally:
         pump.stop()
-        logger.removeHandler(handler)
         store.close()
     err = capsys.readouterr().err
     assert "swallowed by the bar 0" in err
@@ -306,41 +302,53 @@ def test_overflow_report_is_not_suppressed_by_write_through(capsys):
     assert "2 record(s) dropped" in capsys.readouterr().err
 
 
-def test_a_hidden_bar_count_is_reported_at_exit(capsys):
+@pytest.mark.parametrize(
+    "suppressed_bars, expected_substrings",
+    [
+        pytest.param(
+            798,
+            ["798 progress bar(s) hidden", "LUMBERJACK_MAX_BARS"],
+            id="counts them and names the ceiling",
+        ),
+        pytest.param(
+            5,
+            ["hides rather than"],
+            id="does not advise raising the ceiling",
+        ),
+    ],
+)
+def test_a_hidden_bar_count_is_reported_at_exit(
+    capsys, suppressed_bars, expected_substrings
+):
     """The ceiling is opt-in and quiet during the run, so exit is the only
-    place a user learns part of the display was withheld."""
-    _install(renderer=_FakeRenderer(suppressed_bars=798), dump_last_n=0)
+    place a user learns part of the display was withheld — and the honest
+    remedy is that the ceiling hides a grouping problem rather than fixing
+    it, never "set a bigger number"."""
+    _install(renderer=_FakeRenderer(suppressed_bars=suppressed_bars), dump_last_n=0)
     teardown.run()
     err = capsys.readouterr().err
-    assert "798 progress bar(s) hidden" in err
-    assert "LUMBERJACK_MAX_BARS" in err
+    for substring in expected_substrings:
+        assert substring in err
 
 
-def test_the_hidden_bar_report_does_not_advise_raising_the_ceiling(capsys):
-    """The honest remedy is that the ceiling hides a grouping problem rather
-    than fixing it — not "set a bigger number"."""
-    _install(renderer=_FakeRenderer(suppressed_bars=5), dump_last_n=0)
-    teardown.run()
-    err = capsys.readouterr().err
-    assert "hides rather than" in err
-
-
-def test_no_hidden_bar_report_when_nothing_was_hidden(capsys):
-    _install(renderer=_FakeRenderer(suppressed_bars=0), dump_last_n=0)
-    teardown.run()
-    assert "progress bar(s) hidden" not in capsys.readouterr().err
-
-
-def test_a_renderer_without_a_ceiling_is_not_asked_about_one(capsys):
+class _NoBars:
     """Plain renderers have no bars; the duck-typed read must not blow up."""
 
-    class _NoBars:
-        write_through = True
+    write_through = True
 
-        def close(self) -> None:
-            pass
+    def close(self) -> None:
+        pass
 
-    _install(renderer=_NoBars(), dump_last_n=0)
+
+@pytest.mark.parametrize(
+    "renderer",
+    [
+        pytest.param(_FakeRenderer(suppressed_bars=0), id="nothing was hidden"),
+        pytest.param(_NoBars(), id="the renderer has no ceiling to ask about"),
+    ],
+)
+def test_no_hidden_bar_report_when_there_is_nothing_to_report(capsys, renderer):
+    _install(renderer=renderer, dump_last_n=0)
     teardown.run()
     assert "progress bar(s) hidden" not in capsys.readouterr().err
 

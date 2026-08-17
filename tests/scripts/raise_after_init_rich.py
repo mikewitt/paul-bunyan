@@ -1,6 +1,6 @@
 """Standalone script: init lumberjack in rich mode, log a few records, raise.
 
-The parent test (test_integration.py) skips this when `rich` isn't
+The parent test (test_exit_paths.py) skips this when `rich` isn't
 installed.
 """
 

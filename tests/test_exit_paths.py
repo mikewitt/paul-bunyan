@@ -1,4 +1,4 @@
-"""Subprocess-based integration tests.
+"""Subprocess-based exit-path tests: excepthook, atexit, and the on-disk store.
 
 sys.excepthook and atexit can't be exercised meaningfully in-process (pytest
 owns exception handling; atexit only runs at real interpreter shutdown), so
@@ -14,11 +14,15 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-_ANSI_RE = re.compile(rb"\x1b\[[0-9;]*[a-zA-Z]")
+# The `?` matters: these are *negative* assertions, and without it a
+# private-mode sequence such as hide-cursor (`\x1b[?25l`) slips through
+# unmatched — the exact drift the conftest `strip_ansi` note records.
+_ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
 
 #: Some of these scripts ask for `output_mode="rich"` and then assert on what
 #: only the *lossy* live bar does — collapsing the loop, and the exit dump that
@@ -32,36 +36,49 @@ _needs_rich = pytest.mark.skipif(
 
 
 def _run_script(
-    scripts_dir: Path, name: str, env: dict[str, str] | None = None
+    scripts_dir: Path,
+    name: str,
+    subprocess_env: Callable[..., dict[str, str]],
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, str(scripts_dir / name)],
+        capture_output=True,
+        env=subprocess_env(env),
+        timeout=30,
+    )
+
+
+@pytest.fixture(scope="module")
+def raise_after_init_plain() -> subprocess.CompletedProcess[bytes]:
+    """`raise_after_init.py`, run once and shared by every test that reads
+    its result — three tests used to launch it separately for three
+    disjoint assertion sets on the same output.
+
+    Module-scoped, so it cannot request the function-scoped `subprocess_env`
+    fixture (`_run_script`'s other callers do); the environment is built
+    inline here instead, deliberately duplicating those few lines rather than
+    forcing this fixture down to function scope and re-launching the process
+    per test.
+    """
+    scripts_dir = Path(__file__).parent / "scripts"
     full_env = dict(os.environ)
     src_dir = str(Path(__file__).parent.parent / "src")
     full_env["PYTHONPATH"] = os.pathsep.join([src_dir, full_env.get("PYTHONPATH", "")])
-    # These children are the only place the excepthook, atexit and
-    # file-backed-store paths run at all. pytest-cov's .pth hook starts
-    # measuring in a subprocess only when this points at the config.
-    # The child's own stdio encoding, pinned. Its output carries the display's
-    # `…` and `━`, and on Windows the default is cp1252 — so the child would
-    # encode them in cp1252 while the assertions below decode as UTF-8, and a
-    # perfectly correct `…` would arrive as a replacement character. What the
-    # display does on a terminal that cannot take those characters is a real
-    # question with its own tests; this one is about what it draws.
     full_env["PYTHONIOENCODING"] = "utf-8"
     full_env["COVERAGE_PROCESS_START"] = str(
         Path(__file__).parent.parent / "pyproject.toml"
     )
-    if env:
-        full_env.update(env)
     return subprocess.run(
-        [sys.executable, str(scripts_dir / name)],
+        [sys.executable, str(scripts_dir / "raise_after_init.py")],
         capture_output=True,
         env=full_env,
         timeout=30,
     )
 
 
-def test_traceback_intact_after_raise_in_plain_mode(scripts_dir):
-    result = _run_script(scripts_dir, "raise_after_init.py")
+def test_traceback_intact_after_raise_in_plain_mode(raise_after_init_plain):
+    result = raise_after_init_plain
     assert result.returncode == 1
     stderr = result.stderr
     assert b"Traceback (most recent call last):" in stderr
@@ -69,11 +86,14 @@ def test_traceback_intact_after_raise_in_plain_mode(scripts_dir):
     tb_start = stderr.index(b"Traceback (most recent call last):")
     tb_block = stderr[tb_start:]
     assert not _ANSI_RE.search(tb_block)
+    # Superset of the old test_piped_output_has_no_ansi_in_plain_mode: no
+    # cursor control anywhere in the stream, not only inside the traceback.
+    assert not _ANSI_RE.search(stderr)
 
 
-def test_traceback_intact_after_raise_in_rich_mode(scripts_dir):
+def test_traceback_intact_after_raise_in_rich_mode(scripts_dir, subprocess_env):
     pytest.importorskip("rich")
-    result = _run_script(scripts_dir, "raise_after_init_rich.py")
+    result = _run_script(scripts_dir, "raise_after_init_rich.py", subprocess_env)
     assert result.returncode == 1
     stderr = result.stderr
     assert b"Traceback (most recent call last):" in stderr
@@ -83,17 +103,15 @@ def test_traceback_intact_after_raise_in_rich_mode(scripts_dir):
     assert not _ANSI_RE.search(tb_block)
 
 
-def test_piped_output_has_no_ansi_in_plain_mode(scripts_dir):
-    result = _run_script(scripts_dir, "raise_after_init.py")
-    assert not _ANSI_RE.search(result.stderr)
-
-
-def test_write_through_records_printed_once_on_clean_exit(scripts_dir, tmp_path):
+def test_write_through_records_printed_once_on_clean_exit(
+    scripts_dir, subprocess_env, tmp_path
+):
     # Regression: the atexit diagnostic dump replayed the buffer unconditionally,
     # so a write-through renderer printed the entire run a second time.
     result = _run_script(
         scripts_dir,
         "log_then_exit.py",
+        subprocess_env,
         env={
             "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
             "LUMBERJACK_TEST_RECORD_COUNT": "5",
@@ -104,9 +122,10 @@ def test_write_through_records_printed_once_on_clean_exit(scripts_dir, tmp_path)
         assert result.stderr.count(f"record {i}".encode()) == 1, result.stderr
 
 
-def test_write_through_records_printed_once_after_traceback(scripts_dir):
-    result = _run_script(scripts_dir, "raise_after_init.py")
-    assert result.stderr.count(b"about to fail") == 1, result.stderr
+def test_write_through_records_printed_once_after_traceback(raise_after_init_plain):
+    assert (
+        raise_after_init_plain.stderr.count(b"about to fail") == 1
+    ), raise_after_init_plain.stderr
 
 
 def _store_count(db_path: Path) -> int:
@@ -118,13 +137,16 @@ def _store_count(db_path: Path) -> int:
 
 
 @_needs_rich
-def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
+def test_a_logging_loop_becomes_a_bar_in_a_real_process(
+    scripts_dir, subprocess_env, tmp_path
+):
     # The Phase 1 premise, end to end in its own interpreter: 200 log lines in,
     # no scrolling out, one bar for the loop that produced them.
     db_path = tmp_path / "records.db"
     result = _run_script(
         scripts_dir,
         "loop_then_exit.py",
+        subprocess_env,
         env={
             "LUMBERJACK_TEST_DB_PATH": str(db_path),
             "LUMBERJACK_TEST_RECORD_COUNT": "200",
@@ -151,46 +173,57 @@ def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
     assert _store_count(db_path) == 201  # 200 loop records + the warning
 
 
-def test_a_warning_survives_the_collapse(scripts_dir, tmp_path):
+def test_a_warning_survives_the_collapse(scripts_dir, subprocess_env, tmp_path):
+    """A rich bar is explicitly requested but stderr is a pipe, so the
+    warning inside the collapsed loop must still reach it exactly once — and
+    no cursor control may reach a consumer that isn't a terminal."""
     result = _run_script(
         scripts_dir,
         "loop_then_exit.py",
+        subprocess_env,
         env={
             "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
             "LUMBERJACK_TEST_RECORD_COUNT": "50",
         },
     )
     assert result.stderr.count(b"something looked odd") == 1, result.stderr
-
-
-def test_live_bar_writes_no_ansi_when_piped(scripts_dir, tmp_path):
-    # Explicitly asked for rich, but stderr is a pipe: no cursor control may
-    # reach a consumer that isn't a terminal.
-    result = _run_script(
-        scripts_dir,
-        "loop_then_exit.py",
-        env={
-            "LUMBERJACK_TEST_DB_PATH": str(tmp_path / "records.db"),
-            "LUMBERJACK_TEST_RECORD_COUNT": "20",
-        },
-    )
     assert not _ANSI_RE.search(result.stderr), result.stderr
 
 
 @_needs_rich
-def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
-    # The other half of the write_through=False contract: records the bar
-    # swallowed are replayed at exit, and still reach the store. Regression:
-    # the dump used to read the handler's buffer, which the flush pump — left
-    # running here, as in any real run — has emptied long before exit.
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        pytest.param({}, id="pump and final flush left on"),
+        pytest.param(
+            {
+                "LUMBERJACK_TEST_FLUSH_INTERVAL": "0",
+                "LUMBERJACK_TEST_FINAL_FLUSH": "0",
+            },
+            id="pump and final flush both off",
+        ),
+    ],
+)
+def test_lossy_renderer_dumps_the_tail_at_exit(
+    scripts_dir, subprocess_env, tmp_path, extra_env
+):
+    """The other half of the write_through=False contract: records the bar
+    swallowed are replayed at exit, and still reach the store — whether the
+    pump drained the buffer long before exit (the regression: the dump used
+    to read the handler's buffer, which is empty by then) or the whole run
+    was still sitting in the buffer because the pump and the final flush were
+    both disabled (the ordering guard: the dump reads the store, so the
+    atexit drain has to run first or it dumps nothing)."""
     db_path = tmp_path / "records.db"
     result = _run_script(
         scripts_dir,
         "loop_then_exit.py",
+        subprocess_env,
         env={
             "LUMBERJACK_TEST_DB_PATH": str(db_path),
             "LUMBERJACK_TEST_RECORD_COUNT": "20",
             "LUMBERJACK_TEST_DUMP_LAST_N": "5",
+            **extra_env,
         },
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
@@ -199,34 +232,12 @@ def test_lossy_renderer_dumps_the_tail_at_exit(scripts_dir, tmp_path):
     assert _store_count(db_path) == 21
 
 
-@_needs_rich
-def test_an_undrained_buffer_still_reaches_the_exit_dump(scripts_dir, tmp_path):
-    # The ordering guard, from the other side: pump and final flush both off,
-    # so at exit the whole run is still in the buffer. The dump reads the
-    # store, so the atexit drain has to run first or it dumps nothing.
-    db_path = tmp_path / "records.db"
-    result = _run_script(
-        scripts_dir,
-        "loop_then_exit.py",
-        env={
-            "LUMBERJACK_TEST_DB_PATH": str(db_path),
-            "LUMBERJACK_TEST_RECORD_COUNT": "20",
-            "LUMBERJACK_TEST_DUMP_LAST_N": "5",
-            "LUMBERJACK_TEST_FLUSH_INTERVAL": "0",
-            "LUMBERJACK_TEST_FINAL_FLUSH": "0",
-        },
-    )
-    assert result.returncode == 0, result.stderr.decode(errors="replace")
-    assert b"processing item 19" in result.stderr, result.stderr
-    assert b"processing item 0" not in result.stderr, "dumped more than the tail"
-    assert _store_count(db_path) == 21
-
-
-def test_no_records_lost_on_process_exit(scripts_dir, tmp_path):
+def test_no_records_lost_on_process_exit(scripts_dir, subprocess_env, tmp_path):
     db_path = tmp_path / "records.db"
     result = _run_script(
         scripts_dir,
         "log_then_exit.py",
+        subprocess_env,
         env={
             "LUMBERJACK_TEST_DB_PATH": str(db_path),
             "LUMBERJACK_TEST_RECORD_COUNT": "25",

@@ -18,13 +18,11 @@ usable on a real codebase, so it is asserted directly too.
 from __future__ import annotations
 
 import ast
-import itertools
 import os
 import re
 import subprocess
 import sys
-import textwrap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -33,25 +31,6 @@ from lumberjack import lint, static
 
 REPO = Path(__file__).resolve().parent.parent
 DEMO = REPO / "examples" / "demo.py"
-
-
-@pytest.fixture(autouse=True)
-def _clear_static_cache() -> Iterator[None]:
-    static.clear_cache()
-    yield
-    static.clear_cache()
-
-
-@pytest.fixture
-def write_module(tmp_path: Path) -> Callable[..., Path]:
-    counter = itertools.count()
-
-    def _write(source: str, *, name: str | None = None) -> Path:
-        path = tmp_path / (name or f"mod{next(counter)}.py")
-        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
-        return path
-
-    return _write
 
 
 @pytest.fixture

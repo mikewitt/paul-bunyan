@@ -1,7 +1,7 @@
 """Standalone script: init lumberjack with a file-backed sqlite store, log N
 records, then exit normally (no explicit flush/shutdown call).
 
-The parent test (test_integration.py) re-opens the sqlite file after this
+The parent test (test_exit_paths.py) re-opens the sqlite file after this
 process exits and asserts all N records are present, proving the atexit-time
 flush ran.
 """

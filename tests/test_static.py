@@ -15,11 +15,9 @@ between versions, and CI runs it on 3.12, 3.13 and 3.14.
 
 from __future__ import annotations
 
-import itertools
 import logging
 import os
-import textwrap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -28,28 +26,6 @@ import pytest
 from lumberjack import static
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "demo.py"
-
-
-@pytest.fixture(autouse=True)
-def _clear_static_cache() -> Iterator[None]:
-    # Every test writes its own file, but the cache is module state and a test
-    # that edits a path another test parsed would otherwise read a stale entry.
-    static.clear_cache()
-    yield
-    static.clear_cache()
-
-
-@pytest.fixture
-def write_module(tmp_path: Path) -> Callable[..., Path]:
-    """Write dedented source to a uniquely named module and return its path."""
-    counter = itertools.count()
-
-    def _write(source: str, *, name: str | None = None) -> Path:
-        path = tmp_path / (name or f"mod{next(counter)}.py")
-        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
-        return path
-
-    return _write
 
 
 @pytest.fixture
@@ -385,23 +361,38 @@ def test_an_fstring_call_site_is_recorded_without_a_template(
 # --------------------------------------------------------------------------
 
 
-def test_a_missing_file_is_none(tmp_path: Path) -> None:
-    assert static.analyze_file(str(tmp_path / "nope.py")) is None
+def _a_missing_file(tmp_path: Path, write_module: Callable[..., Path]) -> Path:
+    return tmp_path / "nope.py"
 
 
-def test_a_directory_is_none(tmp_path: Path) -> None:
-    assert static.analyze_file(str(tmp_path)) is None
+def _a_directory(tmp_path: Path, write_module: Callable[..., Path]) -> Path:
+    return tmp_path
 
 
-def test_a_syntax_error_is_none(write_module: Callable[..., Path]) -> None:
-    path = write_module("def f(:\n    pass\n")
-    assert static.analyze_file(str(path)) is None
+def _a_syntax_error(tmp_path: Path, write_module: Callable[..., Path]) -> Path:
+    return write_module("def f(:\n    pass\n")
 
 
-def test_null_bytes_are_none(tmp_path: Path) -> None:
+def _null_bytes(tmp_path: Path, write_module: Callable[..., Path]) -> Path:
     path = tmp_path / "nulls.py"
     path.write_bytes(b"x = 1\x00\n")
-    assert static.analyze_file(str(path)) is None
+    return path
+
+
+@pytest.mark.parametrize(
+    "make_path",
+    [_a_missing_file, _a_directory, _a_syntax_error, _null_bytes],
+    ids=["a missing file", "a directory", "a syntax error", "null bytes"],
+)
+def test_unreadable_or_unparseable_files_are_none(
+    make_path: Callable[[Path, Callable[..., Path]], Path],
+    tmp_path: Path,
+    write_module: Callable[..., Path],
+) -> None:
+    """A missing file, a directory, a syntax error and null bytes are all
+    reasons `analyze_file` cannot produce a structure — degrade to None
+    rather than raising, since a bad file must not crash the display."""
+    assert static.analyze_file(str(make_path(tmp_path, write_module))) is None
 
 
 def test_an_encoding_declaration_is_honoured(tmp_path: Path) -> None:

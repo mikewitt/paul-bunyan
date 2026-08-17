@@ -54,32 +54,15 @@ def _named(get_spans) -> dict[str, object]:
 # --- degradation: OTel absent ----------------------------------------------
 
 
-def test_a_task_works_with_no_tracer(monkeypatch):
-    """Principle 9: no OTel means no-ops, not errors. Forced here rather than
-    left to the bare job, so every leg of the matrix runs it."""
-    monkeypatch.setattr(otel, "tracer", lambda: None)
-    with lumberjack.task("no tracer", total=2) as t:
-        t.advance()
-        child = t.subtask("child")
-        child.end()
-    assert t._span is None and child._span is None
-
-
-def test_track_works_with_no_tracer(monkeypatch):
-    monkeypatch.setattr(otel, "tracer", lambda: None)
-    assert list(lumberjack.track([1, 2, 3], name="items")) == [1, 2, 3]
-
-
-def test_a_failing_task_works_with_no_tracer(monkeypatch):
-    monkeypatch.setattr(otel, "tracer", lambda: None)
-    with pytest.raises(ValueError):
-        with lumberjack.task("doomed"):
-            raise ValueError("boom")
-
-
 def test_the_helpers_are_all_no_ops_without_otel(monkeypatch):
     """Each guard exercised directly, so a missing one cannot hide behind the
-    others in a single end-to-end pass."""
+    others in a single end-to-end pass. `context_with_span(None)` is also
+    exercised on its own here, so the parentless-task case is not only ever
+    seen bundled with the rest.
+
+    The task/track no-op behaviour itself — Principle 9: no OTel means
+    no-ops, not errors — is pinned in test_tracking.py, which reaches the
+    same absent-tracer path without needing a real OTel dependency at all."""
     monkeypatch.setattr(otel, "otel_trace", None)
     monkeypatch.setattr(otel, "otel_context", None)
     assert otel.tracer() is None
@@ -87,10 +70,6 @@ def test_the_helpers_are_all_no_ops_without_otel(monkeypatch):
     assert otel.attach(object()) is None
     assert otel.detach(None) is None
     assert otel.record_failure(cast("Span", object()), ValueError("x")) is None
-
-
-def test_context_with_span_is_none_for_a_parentless_task():
-    assert otel.context_with_span(None) is None
 
 
 # --- a real provider --------------------------------------------------------
