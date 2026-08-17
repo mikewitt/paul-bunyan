@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 try:
     from rich.console import Console, Group
@@ -56,6 +56,7 @@ from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     BarState,
+    CyclePosition,
     HeartbeatState,
     LoopRow,
     LoopRowModel,
@@ -217,6 +218,18 @@ def _format_source_detail(row: LoopRow) -> str:
     return f"{row.cycle_current}/{row.total} · {iterations}"
 
 
+def _format_position_detail(position: CyclePosition) -> str:
+    """The count column for a position row: which stage of how many.
+
+    "of" rather than the loop row's slash, because the two numbers mean
+    different things and should not look alike. `3/5` on a loop row is an
+    inferred cycle position — a guess. `3 of 5` here is the AST's count of the
+    call sites in a body and the ordinal of the one that just fired, which is
+    read rather than measured.
+    """
+    return f"{position.current} of {position.total}"
+
+
 #: The mark a collapsed row shows where a running one shows a bar.
 _COLLAPSED_BAR = "▪"
 
@@ -224,6 +237,26 @@ _COLLAPSED_BAR = "▪"
 #: rather than looked up per render, because a column is handed a `Task` and
 #: nothing else.
 _COLLAPSED = "collapsed"
+
+#: The task field marking a position row — the second row a slow loop earns,
+#: drawn under the loop it belongs to. Set for the same reason `_COLLAPSED`
+#: is: the trailing columns have to know, and a column sees only a `Task`.
+_SUBROW = "subrow"
+
+
+def _row_fields(
+    *, rate: str = "", detail: str = "", collapsed: bool = False, subrow: bool = False
+) -> dict[str, Any]:
+    """The custom cells every loop-progress task carries.
+
+    Spread with `**` at the call site rather than handed over as `fields=`.
+    `Progress.add_task` collects `**fields`, so `fields={...}` stores one entry
+    literally named "fields" and none of the real keys exist — a column reading
+    `task.fields["subrow"]` then sees nothing until the first `update()`
+    happens to set it. Harmless where an `update()` follows immediately and a
+    trap everywhere else, so the bundle is built in one place and splatted.
+    """
+    return {"rate": rate, "detail": detail, _COLLAPSED: collapsed, _SUBROW: subrow}
 
 
 class _RowBarColumn(ProgressColumn):
@@ -284,6 +317,27 @@ class _RowTextColumn(ProgressColumn):
         return Text(value, style="dim" if task.fields.get(_COLLAPSED) else self._style)
 
 
+class _RowElapsedColumn(ProgressColumn):
+    """Elapsed time, except on a position row, which has none to report.
+
+    A loop row's clock measures how long the loop has been running, which is a
+    fact about the work. A position row's would measure how long ago the
+    display started drawing it — near-identical to the loop's, restated one
+    line below it, and describing nothing anybody asked about. Blank is the
+    honest cell: the subordinate row carries the stage and its ordinal, and
+    borrows every other number from the row above.
+    """
+
+    def __init__(self) -> None:
+        self._elapsed = TimeElapsedColumn()
+        super().__init__()
+
+    def render(self, task: Task) -> RenderableType:
+        if task.fields.get(_SUBROW):
+            return Text("")
+        return self._elapsed.render(task)
+
+
 def _format_record(row: LogRecordRow) -> Text:
     style = _LEVEL_STYLES.get(row.level_name, "")
     text = Text()
@@ -328,6 +382,11 @@ class RichProgressRenderer:
       row counting iterations, not four rows counting records. Nothing declared
       them, so they are pulsing counters until the model works out what encloses
       them, determinate once it has, and collapsed when the loop goes quiet.
+    * **Position rows**, under a loop row that ticks too slowly to answer "is
+      this still running?". Determinate, ticked by the body's call sites in
+      the order the source puts them in, and named for the stage that just
+      fired. One extra line for a loop that needed one, and nothing at all for
+      the loops that did not — see `position.CyclePositionModel`.
 
     Above both sits the **session heartbeat**, which is neither: one row
     saying whether anything is arriving at all, at what rate, and what the
@@ -406,7 +465,7 @@ class RichProgressRenderer:
             # rather than the bar's own numbers.
             _RowTextColumn("detail"),
             _RowTextColumn("rate", style="progress.remaining"),
-            TimeElapsedColumn(),
+            _RowElapsedColumn(),
         )
         # The two `Progress` objects are the only *durable* members of the
         # group; `_compose()` rebuilds it on every refresh to put the current
@@ -438,6 +497,10 @@ class RichProgressRenderer:
             redirect_stderr=True,
         )
         self._tasks: dict[SourceKey, TaskID] = {}
+        # Keyed on the *loop row's* key rather than the position row's own
+        # anything: a position row has no identity of its own, and the loop
+        # key is the one thing the model guarantees never migrates.
+        self._position_tasks: dict[SourceKey, TaskID] = {}
         self._task_bars: dict[int, TaskID] = {}
         self._closed = False
         self._live.start()
@@ -488,8 +551,9 @@ class RichProgressRenderer:
             # enough, but `add_task()` refreshes the display on every call, so
             # registering the ones we will never draw costs a redraw each.
             rows = rows[: self._max_bars]
+        drawn: list[TaskID] = []
         for row in rows:
-            self._draw_loop_row(row)
+            drawn += self._draw_loop_row(row)
         # Structure, then position. `_draw_loop_row` registers a row wherever
         # the model first reported it, which for a nested loop is always before
         # its parent exists — an inner line logs N times per outer iteration,
@@ -497,7 +561,7 @@ class RichProgressRenderer:
         # that row being indented under whichever unrelated loop happened to
         # precede it. The model's order is a function of structure alone, so
         # this is a no-op on every poll where nothing structural moved.
-        self._relayout_source_bars(rows)
+        _relayout(self._source_progress, drawn)
         # `update()` and not `refresh()`: the frame is drawn once, below.
         self._live.update(self._compose())
         self._live.refresh()
@@ -518,14 +582,7 @@ class RichProgressRenderer:
         rows += [self._task_progress, self._source_progress]
         return Group(*rows)
 
-    def _relayout_source_bars(self, rows: list[LoopRow]) -> None:
-        """Put every drawn row where the model's display order says it goes."""
-        _relayout(
-            self._source_progress,
-            [self._tasks[row.key] for row in rows if row.key in self._tasks],
-        )
-
-    def _draw_loop_row(self, row: LoopRow) -> None:
+    def _draw_loop_row(self, row: LoopRow) -> list[TaskID]:
         """One inferred loop: pulsing, determinate, or collapsed.
 
         Three states, and which one applies is entirely the model's call:
@@ -550,6 +607,13 @@ class RichProgressRenderer:
         than tidy: a key that moved would be a new `Task`, and a new `Task`
         silently restarts the elapsed clock of a loop that has been running for
         ten minutes.
+
+        Returns the tasks it drew, in the order they belong on screen — the
+        loop, then the position row where the loop earned one. The caller
+        collects those into the re-layout, which is why this reports them
+        rather than being asked again afterwards: a position row is not a row
+        of the model's and has no place in the containment order, so nothing
+        downstream could work out where it goes.
         """
         label = f"{'  ' * row.depth}{row.label}"
         if row.idle:
@@ -562,9 +626,7 @@ class RichProgressRenderer:
         task_id = self._tasks.get(row.key)
         if task_id is None:
             task_id = self._source_progress.add_task(
-                label,
-                total=total,
-                fields={"rate": "", "detail": "", _COLLAPSED: False},
+                label, total=total, **_row_fields()
             )
             self._tasks[row.key] = task_id
         # Via `_set_total` rather than `update(total=...)`, which cannot
@@ -580,6 +642,50 @@ class RichProgressRenderer:
             detail=_format_source_detail(row),
             **{_COLLAPSED: row.idle},
         )
+        if row.position is None:
+            return [task_id]
+        return [task_id, self._draw_position_row(row, row.position)]
+
+    def _draw_position_row(self, row: LoopRow, position: CyclePosition) -> TaskID:
+        """The second row: how far through its body this iteration has got.
+
+        Determinate always, and that is the difference between it and every
+        other inferred row here. The loop row pulses because nothing bounds a
+        loop; this one is bounded by construction — the body has as many call
+        sites as the source says it has, and the ordinal of the one that just
+        fired is read from the same place. There is no ratio, no confirmation
+        count and nothing to withdraw, so it starts full-width and stays that
+        way.
+
+        It exists only because the row above it is too slow to answer "is this
+        still running?" — the model decides that, once, and never unmakes it
+        (see `position.CyclePositionModel`). So this never has to remove a
+        task, which is just as well: removing one would take its slot with it.
+
+        Indented one level past its loop, and collapsing with it. A finished
+        loop's last stage is a fact worth keeping on screen — it says where the
+        work stopped — but it should stop shouting, exactly as the bar above
+        it does.
+        """
+        # Padded to the widest stage this body can ever show, so the column
+        # holds still: a grid column is as wide as its widest cell, and a label
+        # that changes length five times an iteration would slide every bar in
+        # the display sideways with it.
+        label = f"{'  ' * (row.depth + 1)}{position.label:<{position.width}}"
+        task_id = self._position_tasks.get(row.key)
+        if task_id is None:
+            task_id = self._source_progress.add_task(
+                label, total=position.total, **_row_fields(subrow=True)
+            )
+            self._position_tasks[row.key] = task_id
+        self._source_progress.update(
+            task_id,
+            description=label,
+            completed=position.current,
+            detail=_format_position_detail(position),
+            **{_COLLAPSED: row.idle, _SUBROW: True},
+        )
+        return task_id
 
     def _refresh_task_bars(self) -> None:
         """Draw what `task()` and `track()` reported. No inference.

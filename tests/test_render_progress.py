@@ -1038,6 +1038,139 @@ def test_an_untimed_loop_shows_no_rate_at_all(
         renderer.close()
 
 
+# --- the second row a slow loop earns (#53) --------------------------------
+#
+# The model decides whether the row exists at all and what it points at (see
+# `test_progress_position.py`); these pin that the display draws it, draws it
+# under the loop it belongs to, and does not draw it for a loop that never
+# earned one.
+
+_SEQUENCE_SOURCE = """\
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def run():
+    for batch in range(6):
+        log.debug("batch %d: opening connection", batch)
+        log.debug("batch %d: fetching manifest", batch)
+        log.debug("batch %d: committing", batch)
+"""
+
+_SEQUENCE_STAGES = (
+    "batch %d: opening connection",
+    "batch %d: fetching manifest",
+    "batch %d: committing",
+)
+
+#: The loop statement in `_SEQUENCE_SOURCE`, which is what a merged row is
+#: named for, and its three call sites.
+_SEQUENCE_LOOP = "sequence.py:7 run()"
+_SEQUENCE_FIRST_LINE = 8
+
+
+def _sequence_frame(store, make_row, tmp_path, *, pace, cycles=4, upto=3, at=None):
+    """One slow loop narrating three stages, drawn once and captured.
+
+    A single `refresh()`, so the captured stream is one frame and the order of
+    its lines is the order they were on screen — which is what the adjacency
+    assertion below needs and what `_line`'s reverse search cannot give.
+    """
+    path = tmp_path / "sequence.py"
+    path.write_text(_SEQUENCE_SOURCE, encoding="utf-8")
+    start = time.time() - cycles * pace if at is None else at
+    step = pace / len(_SEQUENCE_STAGES)
+    for cycle in range(cycles):
+        store.append(
+            [
+                make_row(
+                    pathname=str(path),
+                    lineno=_SEQUENCE_FIRST_LINE + index,
+                    func_name="run",
+                    msg=template,
+                    created=start + cycle * pace + index * step,
+                )
+                for index, template in enumerate(_SEQUENCE_STAGES[:upto])
+            ]
+        )
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        renderer.refresh()
+        return _strip_ansi(stream.getvalue()), renderer.rows()
+    finally:
+        renderer.close()
+
+
+def _frame_lines(frame: str) -> list[str]:
+    return [line for line in re.split(r"[\r\n]", frame) if line.strip()]
+
+
+def test_a_loop_too_slow_to_read_draws_a_second_determinate_row(
+    as_terminal, store: RecordStore, make_row, tmp_path
+):
+    """`sequence`. The loop row pulses — nothing bounds a `for` over a range
+    the display cannot see — and beneath it the stage the body has reached is
+    a real bar, because the AST says how many stages there are."""
+    frame, rows = _sequence_frame(store, make_row, tmp_path, pace=3.0)
+    (row,) = rows
+    assert row.total is None, "the loop row claimed a total it cannot have"
+
+    lines = _frame_lines(frame)
+    loop = next(i for i, line in enumerate(lines) if _SEQUENCE_LOOP in line)
+    assert "3 of 3" in lines[loop + 1], "no position row directly under the loop"
+    assert "batch …: committing" in lines[loop + 1]
+
+
+def test_the_position_row_is_indented_under_its_loop(
+    as_terminal, store: RecordStore, make_row, tmp_path
+):
+    frame, _ = _sequence_frame(store, make_row, tmp_path, pace=3.0)
+    lines = _frame_lines(frame)
+    loop = next(i for i, line in enumerate(lines) if _SEQUENCE_LOOP in line)
+    position = lines[loop + 1]
+    assert position.index("batch") > lines[loop].index("sequence.py")
+
+
+def test_the_position_row_fills_only_as_far_as_the_stage_reached(
+    as_terminal, store: RecordStore, make_row, tmp_path
+):
+    """Determinate from the first frame, and partial: `1 of 3` is a third of a
+    bar. Nothing here is inferred, so there is no pulse-then-promote."""
+    frame, _ = _sequence_frame(store, make_row, tmp_path, pace=3.0, upto=1)
+    line = _line(frame, "batch …: opening connection")
+    assert "1 of 3" in line
+    assert "━" in line and "╺" in line, "a determinate bar drawn full or empty"
+
+
+def test_a_fast_loop_draws_no_second_row(
+    as_terminal, store: RecordStore, make_row, tmp_path
+):
+    """`siblings`. Same file, same body, same merge — twenty iterations a
+    second, and a sub-iteration bar there would show whichever of them the
+    poll happened to land in."""
+    frame, rows = _sequence_frame(store, make_row, tmp_path, pace=0.05, cycles=20)
+    (row,) = rows
+    assert row.position is None
+    # The heartbeat and the loop row, and nothing else: a stage name on screen
+    # would mean a position row got drawn.
+    assert [line for line in _frame_lines(frame) if "batch" in line] == []
+
+
+def test_a_position_row_collapses_with_the_loop_above_it(
+    as_terminal, store: RecordStore, make_row, tmp_path
+):
+    """A finished loop's last stage is worth keeping — it says where the work
+    stopped — but it should stop shouting, exactly as the bar above it does."""
+    frame, _ = _sequence_frame(store, make_row, tmp_path, pace=3.0, at=100.0)
+    line = _line(frame, "batch …: committing")
+    assert "━" not in line, "a collapsed position row still drew a full-width bar"
+    assert "3 of 3" in line, "collapsing must not hide where the work stopped"
+
+
 def test_the_live_display_leaves_stdout_alone(
     as_terminal, store: RecordStore, make_row
 ):

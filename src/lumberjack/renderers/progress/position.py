@@ -54,6 +54,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from lumberjack import static
+from lumberjack.renderers.progress.templates import describe_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -106,6 +107,13 @@ class CyclePosition:
     label: str
     #: Which member fired. The identity underneath the stage name.
     source: SourceKey
+    #: The longest stage name this body can ever show, in characters. Reported
+    #: so a renderer can hold the column still: the label changes on every
+    #: stage, and a cell sized to whichever one is current would drag the whole
+    #: grid sideways several times per iteration. Computed from the AST's view
+    #: of the body, so it is the same number before the first stage as after
+    #: the last.
+    width: int
 
 
 class CyclePositionModel:
@@ -122,16 +130,21 @@ class CyclePositionModel:
       later speeds up keeps a row it no longer needs, which is the cheaper
       wrong answer — the alternative is a row vanishing mid-run, which reads
       as work that stopped existing.
-    * **Whether the body is orderable is asked once per row.** It is a property
-      of one file at one moment, and the group it is asked about is itself
-      frozen, so re-reading it every poll would be an `os.stat` per row per
-      redraw to re-answer a question whose inputs cannot move.
+    * **The body is read once per row.** Whether it has a stable order, and how
+      wide its widest stage name is, are properties of one file at one moment,
+      and the group they are asked about is itself frozen — so re-reading them
+      every poll would be an `os.stat` per row per redraw to re-answer a
+      question whose inputs cannot move.
     """
 
     def __init__(self, *, min_period: float = MIN_LEGIBLE_PERIOD) -> None:
         self._min_period = min_period
         self._earned: set[SourceKey] = set()
-        self._orderable: dict[SourceKey, bool] = {}
+        # Per row: the widest stage name its body can show, or None for a body
+        # with no order worth drawing. One entry answers both questions,
+        # because there is no width worth knowing about a body that has no
+        # position row.
+        self._body: dict[SourceKey, int | None] = {}
 
     def of(
         self,
@@ -149,41 +162,46 @@ class CyclePositionModel:
         None for a row grouped by the runtime fallback — which has no body
         order to read and therefore never draws one of these.
         """
+        width = self._width_of(key, loop)
         if key not in self._earned:
-            if not self._admits(key, loop, period, states, sites):
+            if not self._admits(width, period, states, sites):
                 return None
             self._earned.add(key)
-        return self._where(states, sites, label_of)
+        return self._where(states, sites, label_of, width or 0)
 
     def _admits(
         self,
-        key: SourceKey,
-        loop: SourceKey | None,
+        width: int | None,
         period: float | None,
         states: Sequence[BarState],
         sites: Mapping[SourceKey, static.CallSite | None],
     ) -> bool:
         """Whether this row is both too slow to read and finely enough narrated."""
-        if loop is None or period is None or period < self._min_period:
-            return False
-        if not self._is_orderable(key, loop):
+        if width is None or period is None or period < self._min_period:
             return False
         # An admitted row must be able to answer *now*, not eventually: nothing
         # withdraws admission, so granting it before any member has a position
         # would promise a row that might never have a number in it.
         return next(_stages(states, sites), None) is not None
 
-    def _is_orderable(self, key: SourceKey, loop: SourceKey) -> bool:
-        cached = self._orderable.get(key)
-        if cached is None:
-            self._orderable[key] = cached = _orderable(loop)
-        return cached
+    def _width_of(self, key: SourceKey, loop: SourceKey | None) -> int | None:
+        """This body's widest stage name, or None if it has no order to draw.
+
+        None for a row the runtime fallback grouped, which has no `for`
+        statement to point at and therefore no body to read.
+        """
+        if loop is None:
+            return None
+        if key not in self._body:
+            self._body[key] = _body_width(loop)
+        return self._body[key]
 
     def _where(
         self,
         states: Sequence[BarState],
         sites: Mapping[SourceKey, static.CallSite | None],
         label_of: Callable[[SourceKey], str],
+        width: int,
     ) -> CyclePosition | None:
         """The most recently fired member's ordinal, as a position.
 
@@ -200,6 +218,7 @@ class CyclePositionModel:
             total=total,
             label=label_of(source),
             source=source,
+            width=width,
         )
 
 
@@ -214,30 +233,45 @@ def _stages(
     `position` and `body_size` are both non-None exactly when the call site is
     inside a loop body.
 
-    A member with no site never appears: a source whose template failed the
-    drift guard cannot join a statically grouped row in the first place, so in
-    practice this only skips one that has not been timed yet.
+    A member the AST could not place is skipped rather than counted as stage
+    zero. Through `LoopRowModel` there are none — a source whose template
+    failed the drift guard never joins a statically grouped row, and a source
+    with no records has no bar — so this is the contract holding for a caller
+    that does not come by that route rather than a case seen in a live display.
     """
     for state in states:
         site = sites.get(state.source)
-        if site is None or site.position is None or site.body_size is None:
-            continue
-        if state.last_at is None:
+        if (
+            site is None
+            or site.position is None
+            or site.body_size is None
+            or state.last_at is None
+        ):
             continue
         yield state.last_at, state.source, site.position, site.body_size
 
 
-def _orderable(loop: SourceKey) -> bool:
-    """Whether this loop's body has an order worth drawing a bar against.
+def _body_width(loop: SourceKey) -> int | None:
+    """The widest stage name this body can show, or None if it has no order.
 
     Reads the same `Loop` the grouping was taken from, so the file has already
     passed `template_matches()` for the member that founded the row — the drift
     guard is upstream of here, not repeated in it.
+
+    The width covers *every* call site the AST found, including ones that have
+    not fired yet and one that never will. Sizing it to what has been seen
+    would widen the column the first time a long stage came round, dragging the
+    bars sideways at exactly the moment a reader is watching them move.
     """
     structure = static.analyze_file(loop.pathname)
     if structure is None:  # pragma: no cover - the group came from this file
-        return False
+        return None
     found = structure.loops.get(loop.lineno)
     if found is None:  # pragma: no cover - likewise
-        return False
-    return found.stable_order and len(found.call_sites) >= MIN_BODY_SITES
+        return None
+    if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
+        return None
+    return max(
+        len(describe_template(site.template)) if site.template else 0
+        for site in found.call_sites
+    )
