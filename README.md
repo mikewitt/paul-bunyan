@@ -14,7 +14,7 @@ program already has, it already records which line emitted each record and on
 which thread, and unlike a progress bar it does not get harder when you add
 concurrency.
 
-![Four worker threads logging inside their own loops, rendered as live progress bars](docs/demo-pipeline.gif)
+![Four worker threads logging inside their own loops, rendered as live progress bars](https://raw.githubusercontent.com/mikewitt/paul-bunyan/demo-assets/demo-pipeline.gif)
 
 Four threads, ~2,000 `logger.debug` calls, and **no lumberjack API anywhere in
 the worker functions** — that is `examples/demo.py`, unmodified, under

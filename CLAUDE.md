@@ -380,15 +380,19 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 
 CodeQL and Codacy also run, both configured outside this workflow.
 
-A separate workflow, `demo-gif.yml`, re-records `docs/demo-pipeline.gif` on
-every PR that touches `src/`, `examples/` or the recorder, and uploads it as
-an artifact. It is a smoke test as much as a regeneration: it is the one
-check that runs the whole stack — `init()`, worker threads, the live
-display, teardown — under a real pty, so it failing while the suite is green
-flags something untested. The gif is deliberately *not* committed back
-(the read-only-token rule below applies to it too); refreshing the README's
-copy means downloading the artifact and committing it by hand. It is not a
-required check.
+A separate workflow, `demo-gif.yml`, re-records the demo gif on every PR
+that touches `src/`, `examples/` or the recorder, and uploads it as an
+artifact. It is a smoke test as much as a regeneration: it is the one check
+that runs the whole stack — `init()`, worker threads, the live display,
+teardown — under a real pty, so it failing while the suite is green flags
+something untested. On a push to `daddy` (or a manual dispatch) a second
+`publish` job also force-pushes the gif as a single orphan commit to the
+`demo-assets` branch, which the README's image URL points at — the same
+shape as the coverage badge: trunk is never pushed to from CI, the asset is
+served from somewhere CI *can* write, and the gif is no longer committed to
+the repo at all (`docs/demo-*.gif` is gitignored for local recordings).
+`publish` is the one job anywhere with `contents: write`, scoped to that
+job, and a PR run never reaches it. Neither job is a required check.
 
 ### Releasing
 
@@ -410,7 +414,7 @@ The workflow is also `workflow_dispatch`-able, which is not a convenience. A com
 
 Coverage is uploaded to Codacy from the `coverage` job. It comes from that one ubuntu/3.12 run rather than all six `test` legs: the union across legs would be marginally higher — the bare-install `skipif`, Windows path branches — but collecting it means six `--partial` uploads plus a `final` call, which is a lot of workflow for a fraction of a percent. The upload step is skipped, not failed, when `CODACY_PROJECT_TOKEN` is absent, which is the case for fork pull requests and for anyone who cloned this without a Codacy project — and the skip emits a workflow notice saying so, because a silent skip is indistinguishable from a broken upload when the job goes green either way.
 
-**No job writes to the repository, and the README's coverage badge is Codacy's rather than a committed SVG.** It used to be one: the job rendered `coverage.svg` with `genbadge` and pushed it to trunk under `[skip ci]`. Branch protection ended that — a direct push cannot satisfy status checks that only run *after* a push, so every trunk push failed on that step while all eleven real checks passed. A permanently red trunk that means nothing is worse than no signal. Serving the badge from the coverage already being uploaded removes the push, the `contents: write` escalation, the `[skip ci]` dance, and a generated file the repo had to keep in sync with itself. The whole workflow now runs on a read-only token.
+**No job writes to the repository, and the README's coverage badge is Codacy's rather than a committed SVG.** It used to be one: the job rendered `coverage.svg` with `genbadge` and pushed it to trunk under `[skip ci]`. Branch protection ended that — a direct push cannot satisfy status checks that only run *after* a push, so every trunk push failed on that step while all eleven real checks passed. A permanently red trunk that means nothing is worse than no signal. Serving the badge from the coverage already being uploaded removes the push, the `contents: write` escalation, the `[skip ci]` dance, and a generated file the repo had to keep in sync with itself. The whole workflow now runs on a read-only token. The one deliberate exception lives outside CI: `demo-gif.yml`'s `publish` job holds `contents: write` to force-push the recorded gif to the `demo-assets` branch — a branch with no code, no protection and no checks, so the failure mode that killed the badge push (a trunk push that cannot satisfy its own required checks) structurally cannot recur there.
 
 **One job name is deliberately wrong.** `bare install (no rich)` guards three optional dependencies, not one. `name:` is the check name GitHub reports and trunk's branch protection lists this job, so renaming it orphans a required check and blocks merges until the ruleset is edited to match — worth doing only alongside that settings change. The `coverage` job used to have the same problem under its old name `coverage-badge`; it was renamed freely because the ruleset does *not* list it.
 

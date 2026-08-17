@@ -22,3 +22,6 @@ build/
 # `--compare` refuses a baseline whose CPU fingerprint differs, so a committed
 # one would be useless to everyone but its author. Record your own.
 benchmarks/*.local.json
+# Recorded locally by scripts/record_demo.py; CI publishes the canonical one
+# to the demo-assets branch, so a checkout never carries the binary.
+docs/demo-*.gif
