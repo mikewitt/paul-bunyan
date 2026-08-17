@@ -1,25 +1,37 @@
 name: Demo GIF
 
-# Re-records docs/demo-pipeline.gif on every pull request that could change
-# what it shows, and uploads the result as a workflow artifact for a reviewer
-# to eyeball. Two jobs in one:
+# Re-records docs/demo-pipeline.gif whenever the display stack changes, and
+# does two different things with the result depending on where it ran:
 #
-# - It is the one check that runs the *whole* stack the way a user does —
-#   init(), four worker threads, the live display, teardown — under a real
-#   pty with a real terminal emulator reading the frames. A failure here with
-#   the test suite green is a flag that something untested broke.
-# - The artifact is the refreshed gif. It is deliberately NOT committed back:
-#   this workflow keeps CI's read-only token (see ci.yml's permissions
-#   comment — no job writes to the repository, and the coverage-badge
-#   history is why). When the README's gif is due a refresh, download the
-#   artifact from a run on trunk-bound work and commit it by hand.
+# - On a pull request: uploads it as a workflow artifact for a reviewer to
+#   eyeball, and nothing more. This is also the one check that runs the
+#   *whole* stack the way a user does — init(), four worker threads, the
+#   live display, teardown — under a real pty with a real terminal emulator
+#   reading the frames. A failure here with the test suite green is a flag
+#   that something untested broke.
+# - On a push to daddy (or a manual dispatch): additionally force-pushes the
+#   gif as a single orphan commit to the `demo-assets` branch, which the
+#   README's image URL points at. The same move as the coverage badge:
+#   trunk is never pushed to from CI — a direct push cannot satisfy required
+#   status checks, which is recorded history here — so the asset is served
+#   from a branch that carries no code, no protection and no checks, and
+#   the write permission exists only on the one job that does it.
 #
 # A gif is timing-dependent and never byte-stable, so no job compares it to
-# the committed one — the assertions are that the recording *completed* and
-# is not trivially small (a blank or instantly-exiting run collapses to a
-# few near-empty frames).
+# a previous one — the assertions are that the recording *completed* and is
+# not trivially small (a blank or instantly-exiting run collapses to a few
+# near-empty frames).
 on:
   pull_request:
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "scripts/record_demo.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/demo-gif.yml"
+  push:
+    branches: [daddy]
     paths:
       - "src/**"
       - "examples/**"
@@ -59,10 +71,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             fonts-dejavu-core fonts-freefont-ttf
+      # --all-extras is load-bearing: `rich` is the `recommended` extra, not
+      # a base dependency, and without it the demo degrades — correctly, per
+      # Principle 9 — to the plain scrolling renderer, which the recorder
+      # then films faithfully. That gif shipped once. --require '━' is the
+      # backstop: the run fails unless some frame actually drew a bar, so a
+      # future fallback (missing extra, broken TTY detection) reads as a red
+      # check instead of a wrong recording.
+      # The caption ties the pixels to their source: the published gif
+      # states in its own bottom row which commit it was recorded from, so
+      # provenance survives the camo cache, downloads and hotlinks. Compare
+      # it against `git log -1 demo-assets`, which stamps the same SHA.
       - name: Record the pipeline scenario
         run: >
-          uv run --with pillow --with pyte --with fonttools
-          python scripts/record_demo.py pipeline
+          uv run --all-extras --with pillow --with pyte --with fonttools
+          python scripts/record_demo.py pipeline --require '━'
+          --caption "recorded from ${GITHUB_SHA:0:9} · $(date -u +%F)"
       - name: Assert the recording is not trivially small
         # ~140 KiB is the healthy size; a run that captured a blank screen or
         # died after one frame still writes a gif, just a tiny one. The floor
@@ -76,3 +100,32 @@ jobs:
           name: demo-pipeline-gif
           path: docs/demo-pipeline.gif
           if-no-files-found: error
+
+  publish:
+    # Trunk and manual runs only: a PR must not be able to rewrite what the
+    # README shows. This is the one job in any workflow with write access,
+    # and the branch it writes carries a generated binary and nothing else.
+    if: github.event_name != 'pull_request'
+    needs: record
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: demo-pipeline-gif
+      - name: Publish the gif to the demo-assets branch
+        # An orphan single-file commit, force-pushed: the branch holds
+        # exactly one commit at all times, so re-recording never accretes
+        # history and a clone never downloads more than the current gif.
+        # Plumbing rather than a checkout dance — the working tree stays on
+        # the recorded ref throughout.
+        run: |
+          blob=$(git hash-object -w demo-pipeline.gif)
+          tree=$(printf '100644 blob %s\tdemo-pipeline.gif\n' "$blob" | git mktree)
+          commit=$(git -c user.name="github-actions[bot]" \
+                       -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                       commit-tree "$tree" -m "Re-record demo-pipeline.gif from ${GITHUB_SHA}")
+          git push --force origin "${commit}:refs/heads/demo-assets"
