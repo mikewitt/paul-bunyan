@@ -86,11 +86,13 @@ exclude_paths:
 # `subprocess.run([sys.executable, ...])` in tests/test_benchmark.py as a
 # non-static argv. The bandit block does not cover it.
 #
-# Both `semgrep` and `opengrep` are listed because the finding's origin is
-# only known from its wording, and Codacy moved from the one to the other —
-# so which key is live depends on when this runs. An unrecognised engine
-# name is inert, which makes listing both cheaper than guessing wrong and
-# spending another round trip to find out.
+# Engine keys are a closed list, so guessing one is a silent no-op rather than
+# an error. `opengrep` is the real name — `semgrep` is not on Codacy's list at
+# all and a stanza under it did nothing. `pylintpython3` likewise: `pylint` is
+# accepted as a deprecated alias, but the current name is the one to write.
+# The list is in codacy/docs, `repositories-configure/codacy-configuration-file`;
+# read it before adding a key rather than inferring the name from the finding's
+# wording, which is how a dead `semgrep` stanza sat here looking load-bearing.
 #
 # The test launches the benchmark as a real child process on purpose — that
 # is what proves the script still runs end to end as a script, which an
@@ -103,11 +105,11 @@ exclude_paths:
 # list because a benchmark is dev tooling either way, not because it still
 # has a finding.
 #
-# `pylint` is listed for one finding, and the engine is the whole lesson: the
-# same `exec` is reported by *both* bandit (B102) and pylint (W0122), so
-# excluding it from one engine and reading the remaining report as clean is a
-# mistake this file has now made once. Match on the finding, never on the tool
-# that happened to phrase it.
+# `pylintpython3` is listed for one finding, and the engine is the whole
+# lesson: the same `exec` is reported by *both* bandit (B102) and pylint
+# (W0122), so excluding it from one engine and reading the remaining report as
+# clean is a mistake this file has now made once. Match on the finding, never
+# on the tool that happened to phrase it.
 #
 #   W0122  exec-used            — `tests/test_static.py` compiles a module of
 #                                 deliberately awkward multi-line log calls and
@@ -118,13 +120,17 @@ exclude_paths:
 #                                 what pins that against CPython instead of
 #                                 against a remembered rule. Same category as
 #                                 B101 above: the `exec` is the test.
+#
+# **An edit here does not take effect on the branch that makes it.** Codacy
+# reads the configuration file from the *default branch*, and where the two
+# disagree the default branch wins — so a pull request adding an engine key
+# sees no change in its own analysis and clears the finding only once merged.
+# Four rounds of edits were spent here reading an unmoved count as evidence the
+# key was wrong. It is worth knowing before the fifth: if a new exclusion looks
+# inert on a PR, that is the expected behaviour and not a reason to go changing
+# the key.
 engines:
   bandit:
-    exclude_paths:
-      - "tests/**"
-      - "benchmarks/**"
-      - "scripts/**"
-  semgrep:
     exclude_paths:
       - "tests/**"
       - "benchmarks/**"
@@ -134,7 +140,7 @@ engines:
       - "tests/**"
       - "benchmarks/**"
       - "scripts/**"
-  pylint:
+  pylintpython3:
     exclude_paths:
       - "tests/**"
       - "benchmarks/**"
