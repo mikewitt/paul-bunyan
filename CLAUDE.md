@@ -18,6 +18,8 @@ Everything is pre-1.0 with no released version and no back-compat obligation, so
 
 ## Vision
 
+**The point, before anything else: see that your program is still working.** Everything below — inference, the display model, the linter, OTel, an eventual MCP surface — is in service of that one question, and when a scope argument cannot be settled any other way, this is what settles it. A feature that does not help someone watch their own long-running job is not obviously worth building. `logging` is the **transport layer**, not the product; it happens to be the one pipe that already exists in every Python program, already carries caller and thread attribution, and already survives concurrency.
+
 `lumberjack` is a drop-in UX layer for Python's stdlib `logging`. The premise: developers scatter `logger.debug(...)` calls through code while building it, then delete or bury them once things work — but a log line that recurs inside a loop is progress signal, not noise. Instead of deleting them, `lumberjack` intercepts them: it captures every record into a queryable store (full fidelity, never lost), while rendering a live progress bar in place of a thousand scrolling lines. Concurrency (threads, processes, asyncio tasks) falls out of the same mechanism — each source's ticks are attributed at write time, so multiple workers become multiple progress bars for free.
 
 **Log density is input quality, and that inverts the usual advice.** The signal lumberjack reads is the *shape of the event stream* — which source locations fire, in what order, how often — so more diagnostic ticks mean better cycle resolution, not more noise. The instinct to delete debug lines once the code works is removing exactly what the display is built from. The pitch is not "we tolerate your log spam"; it is "keep it, and add more."
@@ -60,6 +62,32 @@ Four observations, in the order they arrived. They are recorded because each one
 | `log.debug(f"batch {i}: validating")` | `'batch 5: validating'` | `()` |
 
 Lazy formatting keeps the **template** and the **data** in separate fields, and the store already writes both (`msg` and `message` are distinct columns). An f-string destroys the template at the call site, unrecoverably. So a G-compliant codebase hands lumberjack a stable human-readable name per source location for free — no parsing of rendered text, ever, which is the thing Principle 3 exists to prevent. `G` is in this repo's own `select` for that reason.
+
+### Static structure is the ground truth inference approximates
+
+The linter (#40) has to parse the code to advise on it. That AST pass produces, as a by-product, most of what the runtime analysis is trying to reconstruct from timing — and produces it exactly. Prototyped against `examples/demo.py`:
+
+```
+run_sequence():
+  loop@164, nesting depth 1 — 5 call site(s):
+     1/5  line 165  'batch %d: opening connection'
+     ...
+     5/5  line 173  'batch %d: committing'
+reconcile():
+  loop@132, nesting depth 1 — 1 call site   'reconciling batch %d'
+  loop@134, nesting depth 2 — 1 call site   'compared row %d against ledger'
+```
+
+That is: sibling grouping (#8), lexical containment (#38's ratio work), **ordinal position within the body** (#53), and the template (#56) — all four, statically, keyed on `file:lineno`, which is already the identity axis. Nothing has to line up; it is the same key.
+
+Two consequences worth spelling out:
+
+- **#53 gets much cheaper.** Interleaving analysis was dropped because it needed a per-record sequence read where everything else needed only an aggregate. If the body's order is known statically, there is no sequence to track at runtime: a record arrives from line 169, and position is a dict lookup — `3 of 5`. The expensive half of the feature evaporates.
+- **The `phases` false parent disappears by construction.** The AST does not claim the stage-announcement line encloses the stage functions, because lexically it does not. Period ordering says it does. Static analysis fails *silently* here (it cannot see cross-function containment without a call graph) rather than fabricating a relationship, which is the right failure mode.
+
+**What it does not give**, and why runtime analysis is not replaced: iteration counts, rate, which worker, and whether anything is still running are all runtime facts. Cross-function containment needs a call graph and dynamic dispatch defeats it. Code without source on disk — `exec`, generated modules — has no AST to read. So static structure **seeds** the model; it does not become the model, and everything must still work when it is absent.
+
+This also unifies three things that were separate: the linter advises, the hints config declares, and static analysis measures — but a linter that can already see the structure can **emit** the hints file, so Phase 5's config stops being something a human writes by hand and becomes something generated and then edited. Worth deciding before Phase 5 designs a config format for hand-authoring.
 
 ## Design principles
 
@@ -213,11 +241,30 @@ Full detail lives in the project plan; phase order is deliberate (simplest-first
    - **4a.** Named determinate bars from stored tracking data, no inference at all. `TaskProgressModel` folds `store.task_events_since()` into one bar per task; the renderer draws them above the source bars in one shared `Live`.
    - **4b** (issue #38): per-source rate and count, then containment from period ordering scoped to one worker, pulse→promote, idle retirement. Reuses 4a's display model rather than inventing one. Interleaving verification and 1:1 bar merging were designed and deliberately left out — see the analysis section above.
 5. Hints config.
-6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries).
+6. OpenTelemetry integration, inbound bridge (spans/metrics from other instrumented libraries). **Re-evaluate before starting — see below.**
 7. Polish & extensibility (renderer interface finalized, theming, performance pass, docs).
 8. (Post-1.0) Progress provider interception — monkeypatch `tqdm.tqdm` at `init()`.
 9. (Stretch) Web renderer & disk-backed persistence.
 10. (Stretch) Profiling & contingent Rust migration for a specific bottleneck, gated on profiling data — not scheduled work.
+
+### Where OTel actually sits, revisited
+
+Phase 2 was "tracking API, outbound OTel only", and in hindsight the OTel half was early. Worth separating the two, because they are not the same bet:
+
+- **The tracking API (`task`/`track`) was right and is load-bearing.** It is rung 3, and it is what settles a total or a parent/child relationship that inference cannot. Most of Phase 2 was this.
+- **Outbound spans deliver nothing to lumberjack's own display.** They emit *to* an OTel backend. Real interop value for someone already running OTel; zero value to the question at the top of this document. Being shipped and inert is fine — it is small and guarded — but it should not have been sequenced ahead of anything the display needed.
+- **The inbound bridge is the half with nesting information**, and that is the argument for keeping Phase 6: parent/child span relationships from an already-instrumented third-party library are ground truth about containment that nothing else can supply. If a library emits spans, we learn its structure without its source and without inference.
+
+But rank the sources of containment ground truth by coverage before scheduling it:
+
+| Source | Exact? | Coverage | Status |
+|---|---|---|---|
+| Period-ratio inference | no | any code that logs | built |
+| `task()` / `.subtask()` | yes | code you chose to instrument | built |
+| Static AST | yes (lexical only) | any code with source on disk | not designed |
+| Inbound OTel spans | yes | code already OTel-instrumented | Phase 6, unbuilt |
+
+Inbound OTel is exact but has the narrowest reach of the three exact sources, and it is the only one requiring a dependency and a running collector. Static analysis covers far more code for less. So the honest sequencing is that **Phase 6 is interop, not the nesting fix** — it should be justified by "lumberjack works in an OTel shop", which is a real reason, rather than by the structure it happens to carry.
 
 ### Phases are GitHub milestones
 
