@@ -40,6 +40,27 @@ The intended experience is a value ladder:
 
 The 90-hit source is a real loop and lumberjack bars it correctly — but it is font-cache *initialization*, a one-time startup cost. The 2.76 seconds of actual rendering is silent, and every call after the first is silent. So the honest claim is that libraries log at **setup boundaries** and at **per-item I/O**, not in proportion to work done. Some libraries will be much better (anything doing per-request or per-file work logs per item). The mechanism must not be assumed, and how far rung 1 actually carries on code you did not write is an empirical question nobody has answered — worth a survey of real libraries before any more design leans on it.
 
+### Where the idea came from
+
+Four observations, in the order they arrived. They are recorded because each one still constrains a decision, and because two of them are load-bearing in ways that are easy to undo by accident.
+
+**1. Debug logging is written to be deleted.** You add a line to confirm you hit a branch, or that a slow thing is still moving, and you take it out once it works. Leaving it in is nearly free — but only in the state where it is *filtered out*. Measured (`benchmarks/capture.py`): a `logger.debug` the level discards costs ~100ns against a ~11ns empty loop, which is noise. Once the record is actually built it is ~4.7µs, **roughly fifty times** the filtered call, and lumberjack's whole proposition is that you turn those lines on. So the honest claim is not "logging is free"; it is that leaving the lines in costs nothing until you ask for them, and asking for them costs single-digit microseconds per record — of which stdlib's own record construction is the larger half. The benchmark exists to keep that sentence true.
+
+**2. The cost of keeping them is a big file — and now, a big context.** A verbose log is merely large on disk. What changed is that a wall of log text is actively expensive to feed to an agent, which is the modern version of "nobody reads it". A queryable store answers that in a way a file cannot: ask for the last error, or the rate of one source, instead of pasting ten thousand lines. This is the argument for the MCP surface (#55's neighbour, deliberately unscheduled) and it is also why the store is lossless while the display is lossy — they serve different readers.
+
+**3. `logging` already captures the caller.** The starting idea was to find the calling line number with `sys._getframe` and key loop detection off it. `LogRecord` already carries `pathname`, `lineno` and `funcName`, captured by stdlib and then usually thrown away by every formatter. So identity costs nothing to obtain and is exact — no inference, no message parsing, no fingerprinting. **Everything else in the design rests on this**, and it is why Principle 3 forbids inferring attribution from message text: the accurate answer was already in the record.
+
+**4. Progress bars get hard under concurrency; logging does not.** A single-threaded progress bar is easy. Add threads, processes or asyncio and you are managing `position=`, locks, and which bar belongs to whom — `tqdm` makes the author declare depth at authoring time, which breaks on recursion and on a function that is sometimes nested. Logging does not get harder: it is already thread-safe, and `LogRecord` already carries `thread`, `threadName`, `process` and `processName`. So multi-worker progress falls out of the same mechanism rather than being a feature. This is the strongest form of the pitch and should not be traded away.
+
+**And the linter already exists.** `ruff`'s `G` rules enforce exactly the discipline this design wants, without knowing lumberjack exists. G001–G004 forbid building a log message with `%`, `.format()`, `+` or an f-string — i.e. they require `log.debug("row %d: parsed", i)` over `log.debug(f"row {i}: parsed")`. The consequence matters more than the style:
+
+| call | `record.msg` | `record.args` |
+|---|---|---|
+| `log.debug("batch %d: validating", i)` | `'batch %d: validating'` | `(5,)` |
+| `log.debug(f"batch {i}: validating")` | `'batch 5: validating'` | `()` |
+
+Lazy formatting keeps the **template** and the **data** in separate fields, and the store already writes both (`msg` and `message` are distinct columns). An f-string destroys the template at the call site, unrecoverably. So a G-compliant codebase hands lumberjack a stable human-readable name per source location for free — no parsing of rendered text, ever, which is the thing Principle 3 exists to prevent. `G` is in this repo's own `select` for that reason.
+
 ## Design principles
 
 1. **Zero-config first run.** `init()` visibly improves output with no other changes.

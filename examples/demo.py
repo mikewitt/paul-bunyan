@@ -397,8 +397,13 @@ SCENARIOS: tuple[Scenario, ...] = (
             "Beneath it a **determinate** bar for position within the current "
             "iteration, ticked by the body's call sites in order (#53). "
             "Optionally a third line showing the most recent message. The "
-            "stage *name* appears only where a hint or a parseable message "
-            "supplies it — never guessed from message text."
+            "stage *name* comes from `record.msg` — the template, which stdlib "
+            "keeps separate from the data whenever the call uses lazy "
+            "%-formatting (ruff's G001-G004 enforce exactly that). So "
+            "'batch %d: validating checksums' is a stable label per source "
+            "location with no parsing of rendered text and no hints config. "
+            "An f-string at the call site destroys the template, and then "
+            "there is only a position."
         ),
         run=run_sequence,
     ),
