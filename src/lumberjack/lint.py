@@ -161,7 +161,8 @@ class Report:
 # Every rule below asks some version of "what else does this function do?",
 # and `func_lineno` is what makes that exact. Grouping by `func_name` would
 # merge two same-named methods on different classes into one scope, which
-# this repository already has (`progress.py` holds two `_depth`s).
+# this repository already has (`progress/sources.py` and `progress/tasks.py`
+# each hold a `_depth`).
 # --------------------------------------------------------------------------
 
 
@@ -341,7 +342,8 @@ def _silent_loops(
                     f"{_where(loop).capitalize()} has no log line in its body, so "
                     f"the display cannot see it at all. Nothing else in "
                     f"{_subject(loop.func_name)} logs either, so the source gives no "
-                    f"of whether this is work worth watching or plumbing — which "
+                    f"sign of whether this is work worth watching or plumbing — "
+                    f"which "
                     f"is why it takes --all-loops to say so."
                 ),
                 fix=(

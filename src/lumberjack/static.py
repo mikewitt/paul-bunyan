@@ -126,8 +126,9 @@ class CallSite:
     #: The `def`/`class`/`lambda` line of the enclosing scope, or None at
     #: module scope. `func_name` alone does not identify a scope — one file
     #: can hold two methods of the same name on different classes, and
-    #: `src/lumberjack/renderers/progress.py` holds two `_depth`s today — so
-    #: anything grouping by scope needs this rather than the name.
+    #: this package holds two `_depth`s, one in `renderers/progress/sources.py`
+    #: and one in `renderers/progress/tasks.py` — so anything grouping by
+    #: scope needs this rather than the name.
     func_lineno: int | None
     #: The method called: `debug`, `info`, `log`, … . Not the level a record
     #: ends up with — `.log()` takes that as an argument.

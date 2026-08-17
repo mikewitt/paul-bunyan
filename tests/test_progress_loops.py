@@ -720,3 +720,81 @@ def test_a_source_that_never_turns_up_is_written_off(store, make_row, tmp_path):
     # The heartbeat reads the tail for its message; the template harvest must
     # not still be reading it too.
     assert reads <= 1, "a written-off source is still costing a store read"
+
+
+MIXED_BODY = """\
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def process():
+    for batch in range(8):
+        log.debug("batch %d", batch)
+        for row in range(9):
+            log.debug("row %d", row)
+            if row % 3 == 0:
+                log.debug("checkpoint %d", row)
+"""
+
+
+def test_a_total_measured_against_a_sibling_is_not_reused_for_the_parent(
+    store, make_row, tmp_path
+):
+    """The disagree-and-merge quadrant: static grouping and runtime containment
+    both correct, and the composition of them wrong.
+
+    Two lines share the inner body, so they merge into one row whose lexical
+    parent is the outer loop. But the runtime model freezes containment for the
+    busy line against the *conditional sibling* — the nearest slower same-worker
+    level — so its `total` is the ratio to a source that is now inside this very
+    row. Substituting the lexical parent and asking only whether that parent
+    encloses the child launders that number into a confident, wrong percentage.
+
+    It cannot self-correct either: `cycle_current` rebases on the sibling's
+    firings, so the count never overruns the total and the pulse-withdrawal
+    path that catches every other bad estimate never fires. A row that claims
+    less is always allowed; a row that claims wrong is not.
+    """
+    path = _module(tmp_path, "mixed.py", MIXED_BODY)
+    at = 100.0
+    model = LoopRowModel(store, min_repeats=3)
+    for _ in range(SETTLED_CYCLES):
+        rows = [
+            make_row(
+                pathname=path, lineno=8, func_name="process", msg="batch %d", created=at
+            )
+        ]
+        for i in range(9):
+            rows.append(
+                make_row(
+                    pathname=path,
+                    lineno=10,
+                    func_name="process",
+                    msg="row %d",
+                    created=at + i * 1.0,
+                )
+            )
+            if i % 3 == 0:
+                rows.append(
+                    make_row(
+                        pathname=path,
+                        lineno=12,
+                        func_name="process",
+                        msg="checkpoint %d",
+                        created=at + i * 1.0,
+                    )
+                )
+        store.append(rows)
+        at += 9.0
+        drawn = model.poll()
+
+    inner = next(row for row in drawn if row.depth == 1)
+    outer = next(row for row in drawn if row.depth == 0)
+
+    assert inner.parent == outer.key, "the lexical parent is still the right parent"
+    assert len(inner.members) == 2, "the two inner lines still merge into one row"
+    assert inner.total is None, (
+        "a total measured against a source inside this very row was reused as "
+        "the fraction of a different parent"
+    )

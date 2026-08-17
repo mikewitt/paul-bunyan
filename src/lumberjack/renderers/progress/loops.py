@@ -37,8 +37,9 @@ different function, the claimed parent cannot lexically enclose it, so the
 total is withheld and the row pulses. The indent stays — the stage function
 really is called from inside that loop — and only the fabricated number goes.
 Static analysis fails *silently* on cross-function containment rather than
-denying it, which is why the veto needs the child to be top-level in its own
-function before it fires.
+denying it, so the veto is written the conservative way round: it fires when
+the claimed parent's loop is simply absent from the child's static chain,
+whatever nesting depth the child sits at.
 """
 
 from __future__ import annotations
@@ -391,12 +392,27 @@ class LoopRowModel:
         # monotone, which is what eviction safety needs.
         clock = max(states, key=lambda state: (state.count, state.source))
         parent = self._parent_row(key, clock)
-        # No enclosing *row* means no cycle to be a fraction of, whatever the
-        # source-level ratio measured — which happens when the source the ratio
-        # was taken against merged into this very row.
+        # `clock.total` is a ratio against *one specific source* — whichever
+        # slower same-worker line the runtime model froze containment against.
+        # It only means "how many of me fit in one of my parent" if that source
+        # is in the row actually drawn as the parent, and three things here can
+        # make it a different row: the ratio source may have merged into this
+        # very row, `_parent_row` may substitute a lexical parent the ratio was
+        # never measured against, and `_corroborated` only asks whether the
+        # drawn parent lexically encloses the child — not whether it is the row
+        # the number came from.
+        #
+        # Getting this wrong is not a transient miss. `cycle_current` rebases
+        # on the ratio source's firings, so the count never overruns the wrong
+        # total and the pulse-withdrawal path that catches every other bad
+        # estimate never fires: a stable, confident, wrong percentage. That is
+        # the one thing Principle 10 does not license.
+        measured_against = self._row_of.get(clock.parent) if clock.parent else None
         total = (
             clock.total
-            if parent is not None and self._corroborated(clock, parent)
+            if parent is not None
+            and measured_against == parent
+            and self._corroborated(clock, parent)
             else None
         )
         return LoopRow(

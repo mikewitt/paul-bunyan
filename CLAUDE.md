@@ -161,7 +161,7 @@ Data flows one direction: **capture → buffer → store → (analysis) → rend
 
 ### What the display is for
 
-Everything above describes what can be *inferred*. This describes what the display is *for*, which is a separate question and was never written down — so display choices got made bottom-up, by whatever the inference happened to produce, rather than by what a person needs to see. Several of them were defaults nobody chose. **Mostly built now: the row model (#8, #43, #56) and #53's intra-iteration row shipped; #54 and #55 are what remain.** Paragraphs below say which is which.
+Everything above describes what can be *inferred*. This describes what the display is *for*, which is a separate question and was never written down — so display choices got made bottom-up, by whatever the inference happened to produce, rather than by what a person needs to see. Several of them were defaults nobody chose. **Mostly built now: the row model (#8, #43, #56) and #53's intra-iteration row shipped; the heartbeat shipped under #54, whose counter element and #55 are what remain.** Paragraphs below say which is which.
 
 **The criterion: a row earns its place by updating at a rate a human can read.** A loop that ticks once every three minutes is a *correct* bar and a *useless* one — it cannot distinguish a running program from a hung one, which is the first question the display exists to answer. When the best available row is too coarse to be legible, the display should find a finer signal inside it or say nothing. This is the principle underneath the bar-count, bar-placement and sequence questions, which have been circling each other as three separate display problems and are one.
 

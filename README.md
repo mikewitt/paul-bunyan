@@ -24,12 +24,14 @@ the worker functions** — that is `examples/demo.py`, unmodified, under
 SQLite storage, output-mode detection, plain/JSON/rich rendering, the explicit
 `track()` / `task()` API with outbound OpenTelemetry spans and the named bars
 it drives, structural inference over uninstrumented logging, one row per
-inferred loop with template labels, a session heartbeat, static analysis of a
-source file's loop structure, and an instrumentation linter that says which
-log line to add and where (`python -m lumberjack.lint`).
+inferred loop with template labels, a second row showing position within the
+current iteration when a loop is too slow to read otherwise, a session
+heartbeat, static analysis of a source file's loop structure, and an
+instrumentation linter that says which log line to add and where
+(`python -m lumberjack.lint`).
 
-Still to come: sub-iteration progress for a slow loop body, a hints config,
-the inbound OpenTelemetry bridge, and multiprocessing-aware capture.
+Still to come: a hints config, the inbound OpenTelemetry bridge, and
+multiprocessing-aware capture.
 `CLAUDE.md` has the design and the reasoning; `examples/demo.py` has it in
 runnable form, one scenario per shape of log stream.
 
