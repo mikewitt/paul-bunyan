@@ -1,39 +1,27 @@
-"""The bar models: what is inferred from log lines, and what was declared.
+"""Inferred bars: how fast a source repeats, what it runs inside, when it stopped.
 
-Three models, all reading the store and none importing `rich`, so the whole
-display layer is swappable and testable on a bare install:
+The inferred half, and all of Phase 4b. Identity is the *source location*: a
+`logger.debug(...)` inside a loop hits the same line every iteration, so
+`(pathname, lineno, func_name)` groups a loop's ticks with no template
+extraction, no masking and no clustering. On top of that grouping this module
+measures each source's period, sorts sources by period to recover which loop
+encloses which, takes the ratio between an enclosing loop and an enclosed one
+as the inner loop's iteration count, and retires a bar whose source has gone
+quiet.
 
-* `RepeatingSourceModel` — the inferred half. Identity is the *source
-  location*: a `logger.debug(...)` inside a loop hits the same line every
-  iteration, so `(pathname, lineno, func_name)` groups a loop's ticks with no
-  template extraction, no masking and no clustering. On top of that grouping
-  it measures each source's period, sorts sources by period to recover which
-  loop encloses which, takes the ratio between an enclosing loop and an
-  enclosed one as the inner loop's iteration count, and retires a bar whose
-  source has gone quiet.
-* `SessionHeartbeat` — one row for the whole session, and the only element
-  that says something about a program whose lines never repeat. It rides on
-  `RepeatingSourceModel`'s poll rather than fetching a delta of its own.
-* `TaskProgressModel` — the exact half. Every number came from a `task()` or
-  `track()` call that stated it outright, so nothing here guesses.
-
-Counts come from the store, never from tallying the handler's live callback,
-so every renderer reading that store sees the same numbers. The store is read
-forward from a watermark rather than re-tallied, so a redraw costs what
-arrived since the last one instead of what the store holds — and every
-inference below runs per *poll*, over sources rather than rows, so log volume
-never drives its cost either.
+The bar ceiling lives here too, because sources are what it counts.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import logging
 import os
 import time
 import warnings
 from typing import TYPE_CHECKING
 
+from lumberjack.renderers.progress.heartbeat import HeartbeatState, SessionHeartbeat
+from lumberjack.renderers.progress.smoothing import _smoothed
 from lumberjack.schema import SourceKey
 
 if TYPE_CHECKING:
@@ -96,11 +84,6 @@ def resolve_max_bars(override: int | None = None) -> int | None:
     return value
 
 
-#: Weight given to the newest period sample. Low, because the estimate feeds
-#: a number a human reads off a moving display: a rate that jitters every
-#: redraw is harder to read than one that lags slightly.
-PERIOD_SMOOTHING = 0.3
-
 #: How close two sources' periods must be to count as the same loop body.
 #: `logger.debug` on line 6 and line 12 of one loop fire once each per
 #: iteration, so their periods match to within scheduling noise.
@@ -141,218 +124,6 @@ IDLE_PERIODS = 10.0
 #: one refresh interval for the poll. Without the floor a fast loop would
 #: retire and resurrect on alternate frames.
 MIN_IDLE_SECONDS = 1.0
-
-#: How far back the heartbeat looks for a line it is willing to echo.
-#:
-#: More than one because the newest record is often not one to echo: a poll
-#: ending on a WARNING or a task event would otherwise fall back on whatever
-#: was said before it, which is stale mid-run and nothing at all if that poll
-#: is the first. Only a few, because each row is materialized as a dataclass
-#: to read one string off it. Measured against a 1M-row `:memory:` store, min
-#: of 300: `recent(n=1)` 16µs, `n=4` 51µs, `n=8` 97µs — about 12µs a row —
-#: against ~1ms for the delta query beside it. Four keeps this at a twentieth
-#: of a redraw's store cost.
-MESSAGE_LOOKBACK = 4
-
-#: The heartbeat's frames, advanced one per poll that brought records.
-#:
-#: Braille dots, the same shape as rich's default spinner and deliberately
-#: *not* rich's `Spinner`, which renders from `time.monotonic()` and produces
-#: four distinct frames from a stream that carried nothing. Turning on the
-#: clock claims liveness nobody observed, which is the one thing this row
-#: exists not to do — so the frame is an index into this string and the index
-#: only moves when a record does.
-HEARTBEAT_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-
-def _smoothed(known: float | None, sample: float) -> float:
-    """Fold a new interval sample into an existing estimate.
-
-    Low weight on the newest sample, because these estimates feed numbers a
-    human reads off a moving display: a rate that jitters every redraw is
-    harder to read than one that lags slightly.
-    """
-    if known is None:
-        return sample
-    return PERIOD_SMOOTHING * sample + (1 - PERIOD_SMOOTHING) * known
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class HeartbeatState:
-    """Whether this session is seeing anything at all, and what it last saw.
-
-    The element for a program whose log lines do not repeat. `oneshot` — six
-    startup lines, one each — draws no bar, because a source needs repetition
-    to have a period, and an empty display is indistinguishable from a hung
-    one. That is the first question the display exists to answer, so it gets
-    the row that is always available: a count, an arrival rate, and the last
-    line, none of which need a line to recur.
-
-    Everything here is a statement about records that arrived. `beat` is the
-    load-bearing one: it advances on a poll that brought records and on no
-    other, so a silence freezes the glyph rather than animating through it.
-    """
-
-    #: Records folded in since the session started. Cumulative and monotonic,
-    #: for the same reason a bar's count is: `evict()` trimming the store must
-    #: not make the session look less busy than it was.
-    events: int = 0
-    #: How many polls have brought records. Its one use is as the frame index,
-    #: which is why nothing else may move it.
-    beat: int = 0
-    #: Seconds between arrivals across all sources, smoothed. None until two
-    #: records have been seen — one record establishes no interval.
-    period: float | None = None
-    #: The newest *collapsed* record's message, first line only. See
-    #: `SessionHeartbeat._newest_message` for why a record loud enough to
-    #: print above the bars is not repeated here.
-    message: str | None = None
-
-    @property
-    def rate(self) -> float | None:
-        """Records per second, or None while the period is unknown."""
-        if self.period is None or self.period <= 0:
-            return None
-        return 1.0 / self.period
-
-    @property
-    def glyph(self) -> str:
-        """The current frame. Identical across polls that brought nothing."""
-        return HEARTBEAT_FRAMES[self.beat % len(HEARTBEAT_FRAMES)]
-
-
-class SessionHeartbeat:
-    """Session-wide liveness, folded out of the source model's own delta.
-
-    **It stops when the records stop, and says nothing else.** No idle label,
-    no elapsed counter, no frame that turns on wall-clock time. A slow silent
-    library therefore looks stopped — matplotlib spends 2.76 seconds rendering
-    without emitting a record, and a frozen heartbeat is the truthful frame for
-    that. It reads as "we cannot see anything", which is exactly right; the gap
-    is the developer's to close by logging inside the loop, and making it
-    visible is the value ladder working rather than a display failure to paper
-    over.
-
-    **No second poller.** `observe()` is handed the `SourceDelta`
-    `RepeatingSourceModel` already fetched, because the whole point of the
-    watermark is that a redraw costs what arrived rather than what the store
-    holds — and a second delta query against the same store would double that
-    cost to re-derive a number already in hand.
-
-    The one extra read is a short `recent()` for the message, and only on a
-    poll that brought records: a poll with nothing new cannot have a new last
-    line. Its cost does not grow with the store — measured at 16µs for one row
-    whether the store holds 10,000 or 1M, because `ORDER BY id DESC LIMIT n`
-    walks the rowid backwards and stops. See `MESSAGE_LOOKBACK` for why it
-    reads four rather than one, and for what that costs.
-
-    `passthrough_level` is the renderer's, handed over rather than guessed:
-    the heartbeat summarises the stream the display *collapsed*, and a record
-    the display prints in full is not part of that.
-    """
-
-    def __init__(
-        self, store: RecordStore, *, passthrough_level: int = logging.WARNING
-    ) -> None:
-        self._store = store
-        self._passthrough_level = passthrough_level
-        self._state = HeartbeatState()
-        self._last_at: float | None = None
-        self._period: float | None = None
-
-    @property
-    def state(self) -> HeartbeatState:
-        """The heartbeat as of the last poll that brought records."""
-        return self._state
-
-    def observe(self, delta: SourceDelta) -> HeartbeatState:
-        """Fold one poll's arrivals in. A poll that brought nothing is a no-op.
-
-        Deliberately a no-op rather than an update with a zero: the state
-        *is* the display, so leaving it untouched is what makes the row
-        freeze. Anything written here on an empty poll — a decaying rate, an
-        elapsed count, the next frame — would be the display moving on
-        evidence it did not have.
-
-        Task-event rows are not counted, because the store excludes them from
-        the delta's counts: they have exact bars of their own, and a session
-        running only instrumented tasks shows its liveness there rather than
-        here — where it draws no row at all, which is a silence rather than a
-        lie and is left as one. lumberjack: see issue #63
-
-        Everything that arrived is counted, including records the display
-        prints above the bars rather than collapsing. The count answers "is
-        anything arriving at all", which a WARNING answers as well as a DEBUG
-        does; only the *message* is restricted to what was collapsed.
-        """
-        arrived = sum(delta.counts.values())
-        if arrived == 0:
-            return self._state
-        self._observe_period(arrived, delta)
-        self._state = HeartbeatState(
-            events=self._state.events + arrived,
-            beat=self._state.beat + 1,
-            period=self._period,
-            message=self._newest_message(self._state.message),
-        )
-        return self._state
-
-    def _observe_period(self, arrived: int, delta: SourceDelta) -> None:
-        """Time the arrivals, exactly as `_update_period` times one source.
-
-        Same two cases: a window running from the newest record we already
-        knew about, or — on first sight, with nothing to measure back to — the
-        delta's own span, which holds one fewer interval than it does records.
-        """
-        newest = max(delta.last_at.values())
-        previous = self._last_at
-        # Never backwards: several workers land in one delta, so a later poll
-        # can carry a newest timestamp older than an earlier poll's. Moving
-        # the mark back would inflate the next span with time already counted.
-        self._last_at = newest if previous is None else max(newest, previous)
-        if previous is not None:
-            span, intervals = newest - previous, arrived
-        else:
-            if arrived < 2:
-                return
-            span, intervals = newest - min(delta.first_at.values()), arrived - 1
-        if span <= 0 or intervals <= 0:
-            # Records sharing a timestamp, or arriving out of order across
-            # polls. No interval to learn from, and dividing by the span would
-            # report an infinite rate.
-            return
-        self._period = _smoothed(self._period, span / intervals)
-
-    def _newest_message(self, previous: str | None) -> str | None:
-        """The last thing the display swallowed, or what it swallowed before.
-
-        Two kinds of record are skipped — the search walks back past them,
-        `MESSAGE_LOOKBACK` rows at most, and the previous message stands if
-        every one of them is skippable:
-
-        * **A task event.** Its text is the tracking API's own (`task
-          progress: reindex 40/100`), it is already on a named bar, and it is
-          not in `events` either — so echoing it would have the row narrate a
-          record it claims not to have seen.
-        * **Anything at `passthrough_level` or above.** A WARNING prints above
-          the bars in full, with its level and logger. Repeating it here says
-          the same thing twice, and leaves a one-off warning sitting in the
-          live row as though it were the program's current state.
-
-        First line only. A multi-line message — a formatted table, a dumped
-        payload — would otherwise push the bars down the screen and break the
-        frame.
-        """
-        # `recent()` returns oldest-first, so the newest is the last one.
-        for record in reversed(self._store.recent(n=MESSAGE_LOOKBACK)):
-            if record.task_event is not None:
-                continue
-            if record.level_no >= self._passthrough_level:
-                continue
-            first_line = record.message.partition("\n")[0].strip()
-            if first_line:
-                return first_line
-        return previous
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -777,101 +548,3 @@ class RepeatingSourceModel:
         if period is None or last_at is None:
             return False
         return now - last_at > max(IDLE_PERIODS * period, MIN_IDLE_SECONDS)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class TaskBarState:
-    """One named bar, built from what the tracking API actually reported.
-
-    Unlike `BarState` this has a `total` — sometimes. `task()` without one is
-    an indeterminate task, and the display says so by pulsing rather than by
-    inventing a denominator.
-    """
-
-    task_id: int
-    label: str
-    current: int
-    total: int | None
-    done: bool
-    depth: int
-
-    @property
-    def is_determinate(self) -> bool:
-        return self.total is not None
-
-
-class TaskProgressModel:
-    """Folds `store.task_events_since()` into one bar per task.
-
-    A task bar is the *latest state* of a task rather than a tally, which is
-    what makes it exact: `progress_current` is absolute, so the newest row for
-    a task is the whole truth about it and no accumulation is needed. That
-    also means a bar cannot drift — there is nothing to drift from.
-
-    No inference of any kind lives here. Every number came from a `task()` or
-    `track()` call that said so outright. Phase 4b's model is the one that
-    guesses; this one only reads.
-    """
-
-    def __init__(self, store: RecordStore) -> None:
-        self._store = store
-        # Unbounded, exactly as `RepeatingSourceModel._totals` is: a task that
-        # ended keeps its bar, because one that vanished mid-run would read as
-        # "this work stopped existing". A long-running process opening many
-        # short tasks therefore accumulates state. That is the exact-data
-        # analogue of the source-bar problem and belongs with it — retirement
-        # is 4b's, and what a ceiling should count once bars nest is the open
-        # question there. lumberjack: see issue #8
-        self._states: dict[int, TaskBarState] = {}
-        # Append-only display order, as for source bars: a bar that moves is
-        # unreadable. Children land after parents for free, because a parent
-        # must exist before `subtask()` can be called on it.
-        self._order: list[int] = []
-        self._parents: dict[int, int | None] = {}
-        self._watermark = 0
-
-    def poll(self) -> list[TaskBarState]:
-        """Fold in whatever arrived since the last call and return the bars."""
-        delta = self._store.task_events_since(self._watermark)
-        self._watermark = delta.last_id
-        for event in delta.events:
-            if event.task_id not in self._states:
-                self._order.append(event.task_id)
-                self._parents[event.task_id] = event.parent_task_id
-            self._states[event.task_id] = TaskBarState(
-                task_id=event.task_id,
-                label=event.label,
-                # A `start` row carries current=0; an `end` row carries the
-                # final count unsampled. Either way the newest row wins.
-                current=event.current or 0,
-                total=event.total,
-                done=event.event == "end",
-                depth=self._depth(event.task_id),
-            )
-        return self.bars()
-
-    def _depth(self, task_id: int) -> int:
-        """How deep this task sits in the parent chain.
-
-        Walked rather than stored because a child can be created before its
-        parent's first row is folded in — `subtask()` emits `start` for the
-        child, and the parent's own rows may already be behind the watermark.
-        The chain is shallow and the walk is a dict lookup per level.
-        """
-        depth = 0
-        seen = {task_id}
-        parent = self._parents.get(task_id)
-        # Only ancestors we can actually draw count. `evict()` can trim a
-        # parent's rows while a child's survive, and indenting that child
-        # under nothing reads as a rendering bug rather than as hierarchy.
-        # The `seen` guard is for a cycle, which the tracking API cannot
-        # produce but a hand-written store row could.
-        while parent is not None and parent in self._states and parent not in seen:
-            seen.add(parent)
-            depth += 1
-            parent = self._parents.get(parent)
-        return depth
-
-    def bars(self) -> list[TaskBarState]:
-        """The most recent poll's bars, in display order."""
-        return [self._states[task_id] for task_id in self._order]
