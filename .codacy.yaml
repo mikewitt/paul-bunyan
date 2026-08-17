@@ -33,11 +33,17 @@
 #                                  and the parity tests pin `_COLUMNS`
 #                                  against the real table.
 #
-# `examples/` is not excluded either. Its two B101s are real: `assert store
-# is not None` narrows a type for mypy, and `python -O` would strip it and
-# let a None reach `.recent()`. Nobody runs the examples under -O, but the
-# warning is not wrong, so it stays visible rather than being configured
-# away. Excluding more than the noise would defeat the point of the tool.
+# `examples/` is not excluded either, and its two B101s are now **fixed**
+# rather than kept. Both were `assert store is not None`, narrowing a type
+# for mypy before `.recent()`; `python -O` strips an assert, so the narrowing
+# vanished and a None reached the call. Nobody runs the examples under -O,
+# which is why this sat here as a documented acceptance — but the warning was
+# never wrong, the fix is two lines, and `if store is None: raise` narrows
+# for mypy exactly as well. Keeping the path in scope is what surfaced it.
+#
+# That is the intended use of leaving `src/` and `examples/` scanned:
+# excluding more than the noise would defeat the point of the tool, and the
+# findings that remain are meant to be re-read rather than inherited.
 #
 # Individual patterns can only be disabled in the Codacy web UI, so path
 # scoping is the whole of what this file can express. After this, bandit
