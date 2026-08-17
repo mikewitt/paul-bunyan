@@ -33,19 +33,26 @@ a person see here?". Several of them are shapes lumberjack currently handles
 badly or not at all, and they are here precisely for that: you cannot argue
 about how something should look without being able to run it.
 
-So every scenario states three things, and the third is deliberately unsettled:
+So every scenario states three things:
 
 - **the stream** — what gets logged, factually
 - **today** — what lumberjack does with it now, observed rather than hoped
-- **should be** — the open design question, marked `TBD` where it is open
+- **should be** — what it is supposed to do instead
 
-Filling in the `should be` lines is the work. See "What the display is for" in
-CLAUDE.md for the criterion they are being judged against, and issues #8, #43,
-#53, #54 and #55 for the ones already written down.
+All eight `should be` lines are now decided, which makes this file the
+readable form of the display spec: the prose lives in "What the display is
+for" in CLAUDE.md, and issues #8, #43, #53 and #54 carry the work. If a
+`today` line stops being true, this file has caught a change — update it.
 
 ## How to log so this works
 
-The shapes below are also the advice, which inverts the usual guidance:
+The shapes below are also the advice, and it is the **middle rung of the value
+ladder**: not "drop it in and accept what you have", not "learn our API", but
+*log idiomatically and the display gets much better for free*. Everything here
+is ordinary good practice that makes a log file worth reading even with
+lumberjack uninstalled, which is what makes it a reasonable thing to ask for.
+The instrumentation linter (#40) is meant to say which of these a given
+codebase is missing, so nobody has to read this list.
 
 - **Leave the `logger.debug` lines in, and add more.** Density is input
   quality. A loop that logs once per iteration is a bar; a loop that logs
@@ -55,6 +62,10 @@ The shapes below are also the advice, which inverts the usual guidance:
 - **A line per phase of a slow body is worth more than one line per body.**
   See `sequence`: five lines in a three-second iteration can say where you
   are within it; one line can only say it happened.
+- **Announce each stage of a multi-stage program.** One `log.info("stage 2:
+  parsing records")` per stage is what lets a finished stage collapse and the
+  current one be named. See `phases` — a program without those lines gets no
+  collapse signal, and that is deliberately not worked around.
 - **Do not build a logging wrapper without `stacklevel=`.** Identity is the
   source location, so a shim makes every call site in your program look like
   one line. See `wrapped`.
@@ -397,11 +408,13 @@ SCENARIOS: tuple[Scenario, ...] = (
         today="Four separate bars, all at the same rate, for one loop.",
         should=(
             "One row, labelled by the enclosing function, with the four source "
-            "locations as identity underneath (#8). It counts **400** — "
-            "iterations of the merged loop, not the 1600 records behind them. "
-            "No intra-iteration row here: at 121/s it would be unreadable, "
-            "which is the legibility criterion deciding correctly that the "
-            "extra row is not earned."
+            "locations as identity underneath (#8). It counts **400** — the "
+            "rows the code operated on. Every call site here says `row %d`, so "
+            "the row is the thing making progress; that four lines narrate "
+            "each one is the author's choice and not something anybody asked "
+            "about. 1600 is the accidental number. No intra-iteration row: at "
+            "121/s it would be unreadable, which is the legibility criterion "
+            "deciding correctly that the extra row is not earned."
         ),
         run=run_siblings,
     ),
@@ -465,9 +478,12 @@ SCENARIOS: tuple[Scenario, ...] = (
             "**spinner**, not a determinate bar: the 49 is fabricated and a "
             "spinner claims nothing. Previous stages collapse when the "
             "announcement line fires again, which is the signal that one "
-            "ended. Telling 'A encloses B' from 'A precedes B' is unlikely to "
-            "be solvable from logs alone — `track()` is the answer, not "
-            "cleverer inference."
+            "ended. A program with no announcement line gets no collapse "
+            "signal and is deliberately not handled — the linter (#40) should "
+            "point out the missing line, since adding it is idiomatic logging "
+            "rather than a lumberjack idiom. Telling 'A encloses B' from 'A "
+            "precedes B' is unlikely to be solvable from logs alone; "
+            "`track()` settles it, and cleverer inference will not."
         ),
         run=run_phases,
     ),
