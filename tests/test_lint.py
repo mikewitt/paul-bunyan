@@ -722,10 +722,25 @@ def test_the_agent_rules_name_this_codebases_own_gaps(
 ) -> None:
     # A generic rule list is easy to ignore; a specific one is not. That
     # specificity is #58's whole argument for the linter owning this.
+    #
+    # The line number comes from the report rather than being written in
+    # here. `examples/demo.py` is edited often — a scenario gains a comment
+    # and every line below it moves — and a hardcoded `demo.py:310` then
+    # fails for a reason that has nothing to do with the linter. That has
+    # already happened once, and `tests/test_static.py` opens by warning
+    # about exactly this.
     block = lint.format_agent_rules(demo_report)
+    wrapper = next(
+        finding
+        for finding in demo_report.findings
+        if finding.rule == "wrapper-no-stacklevel"
+    )
 
     assert "### What this codebase is missing right now" in block
-    assert f"`{DEMO}:310` — wrapper-no-stacklevel" in block
+    assert f"`{DEMO}:{wrapper.lineno}` — wrapper-no-stacklevel" in block
+    # And the line really is the wrapper, not merely whatever the report said.
+    source = DEMO.read_text(encoding="utf-8").splitlines()
+    assert "log.debug(" in source[wrapper.lineno - 1]
 
 
 def test_a_clean_codebase_gets_the_block_and_no_scolding(
