@@ -19,12 +19,12 @@ This is a package rather than one module because it held four separate jobs —
 the rule generators, report formatting, the agent-facing rules block, and the
 CLI — that had stopped sharing much beyond a name. `rules.py` holds the seven
 rules and the scope-grouping they share; `report.py` holds the formatting
-helpers and `AGENT_RULES`; `__main__.py` holds the argparse CLI, since a
-package (unlike a single module) needs one for `python -m lumberjack.lint` to
-keep working. `check()`, `_report_for()`, `Finding`, `Report` and
-`python_files()` stay here as the surface everything above reads from, and
-this module re-exports the rest, so `from lumberjack import lint;
-lint.check(...)`, `lint.Finding`, `lint.format_report(...)` and
+helpers and `AGENT_RULES`; `cli.py` holds the argparse CLI, with
+`__main__.py` as the entry shim a package (unlike a single module) needs for
+`python -m lumberjack.lint` to keep working. `check()`, `_report_for()`,
+`Finding`, `Report` and `python_files()` stay here as the surface everything
+above reads from, and this module re-exports the rest, so `from lumberjack
+import lint; lint.check(...)`, `lint.Finding`, `lint.format_report(...)` and
 `lint.main(...)` are exactly as they were when this was one file.
 """
 
@@ -33,7 +33,7 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections.abc import Iterable
-from typing import Any, Final
+from typing import Final
 
 from lumberjack import static
 from lumberjack.lint.report import (
@@ -244,27 +244,16 @@ def check(paths: Iterable[str], *, all_loops: bool = False) -> Report:
     )
 
 
-#: `main`, `EXIT_FINDINGS` and `EXIT_NO_FILES` live in `__main__.py` and are
-#: resolved lazily below, not imported here at module scope. An eager `from
-#: lumberjack.lint.__main__ import ...` would register `lumberjack.lint.__main__`
-#: in `sys.modules` as a side effect of `import lumberjack.lint` — and that is
-#: exactly what `python -m lumberjack.lint` cannot tolerate: `runpy` warns
-#: ("found in sys.modules ... prior to execution ... unpredictable behaviour")
-#: when the module it is about to run as `__main__` was already imported
-#: under its real name, since `__main__.py` would then run *twice*, as two
-#: distinct module objects. `__getattr__` below defers the import to whoever
-#: actually asks for one of these three names, so `python -m lumberjack.lint`
-#: on its own never touches `__main__.py` before `runpy` does.
-_MAIN_NAMES = frozenset({"main", "EXIT_FINDINGS", "EXIT_NO_FILES"})
-
-
-def __getattr__(name: str) -> Any:
-    if name in _MAIN_NAMES:
-        from lumberjack.lint import __main__ as _cli
-
-        return getattr(_cli, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
+# The CLI lives in `cli.py`, not `__main__.py`, precisely so this re-export
+# can be an ordinary import: importing `__main__.py` from here would register
+# it in sys.modules and make `python -m lumberjack.lint` warn about running a
+# module that was already imported. See `cli.py`'s docstring. Imported after
+# `check()` above because `cli.py` reads it back from this package.
+from lumberjack.lint.cli import (  # noqa: E402
+    EXIT_FINDINGS,
+    EXIT_NO_FILES,
+    main,
+)
 
 __all__ = [
     "AGENT_RULES",
