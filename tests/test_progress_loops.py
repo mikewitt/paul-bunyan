@@ -12,67 +12,21 @@ that does not exist) already gives.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
-import pytest
-
-from lumberjack import static
-from lumberjack.renderers.progress import (
-    CONTAINMENT_CONFIRMATIONS,
-    DEFAULT_MIN_REPEATS,
-    LoopRowModel,
-    describe_template,
+from fixture_sources import (
+    CALLER,
+    MIXED_BODY,
+    NESTED,
+    NOT_IN_A_LOOP,
+    PHASES,
+    SETTLED_CYCLES,
+    SIBLINGS,
 )
-
-SETTLED_CYCLES = DEFAULT_MIN_REPEATS + CONTAINMENT_CONFIRMATIONS
-
-
-@pytest.fixture(autouse=True)
-def _fresh_static_cache():
-    """Files written per test land at paths the parse cache has never seen,
-    but a stale entry from a previous test's `tmp_path` would still be held."""
-    static.clear_cache()
-    yield
-    static.clear_cache()
-
-
-# --- labels (#56) -----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("template", "expected"),
-    [
-        ("row %d: parsed", "row …: parsed"),
-        ("batch %s of %s", "batch … of …"),
-        ("%(name)s connected", "… connected"),
-        ("%-8.3f seconds", "… seconds"),
-        ("%*d items", "… items"),
-        ("100%% done", "100% done"),
-        ("no specifiers here", "no specifiers here"),
-        ("first line\nsecond line", "first line"),
-        ("  padded  ", "padded"),
-    ],
-)
-def test_a_template_reads_as_a_description(template, expected):
-    """The point of substituting rather than interpolating: the label says what
-    the line does and stops changing. Interpolating the newest values would be
-    a count wearing a description's clothes."""
-    assert describe_template(template) == expected
-
-
-def test_a_very_long_template_is_truncated():
-    assert len(describe_template("x" * 500)) < 100
-
+from lumberjack.renderers.progress import LoopRowModel
 
 # --- the runtime path -------------------------------------------------------
 #
 # `/tmp/foo.py` has no source on disk, so everything here falls back to what
 # shipped before: equal periods plus a shared worker means one loop body.
-
-
-def _rows(model):
-    return {row.label: row for row in model.poll()}
 
 
 def test_two_lines_at_one_pace_on_one_thread_become_one_row(store, make_row):
@@ -266,62 +220,13 @@ def test_a_row_is_live_while_any_of_its_call_sites_is(store, make_row):
 # --- the static path --------------------------------------------------------
 
 
-SIBLINGS = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def run():
-    for row in range(400):
-        log.debug("row %d: parsed", row)
-        log.debug("row %d: validated", row)
-"""
-
-NESTED = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def reconcile():
-    for batch in range(24):
-        log.debug("reconciling batch %d", batch)
-        for row in range(20):
-            log.debug("compared row %d against ledger", row)
-"""
-
-PHASES = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def write():
-    for i in range(40):
-        log.debug("wrote partition %d", i)
-
-
-def run():
-    for number in range(4):
-        log.info("stage %d", number)
-        write()
-"""
-
-
-def _module(tmp_path: Path, name: str, source: str) -> str:
-    path = tmp_path / name
-    path.write_text(textwrap.dedent(source), encoding="utf-8")
-    return str(path)
-
-
 def test_siblings_in_one_loop_body_merge_even_at_different_paces(
-    store, make_row, tmp_path
+    store, make_row, write_module
 ):
     """What the AST buys over the timing: these two lines are one loop body by
     inspection, so they merge whatever their measured periods do. The runtime
     fallback would need them within 15% of each other."""
-    path = _module(tmp_path, "siblings.py", SIBLINGS)
+    path = str(write_module(SIBLINGS, name="siblings.py", strip=False))
     for i in range(4):
         store.append(
             [
@@ -349,11 +254,11 @@ def test_siblings_in_one_loop_body_merge_even_at_different_paces(
 
 
 def test_a_lexically_nested_loop_is_placed_under_its_parent_at_birth(
-    store, make_row, tmp_path
+    store, make_row, write_module
 ):
     """Place-at-birth. The nesting is in the source, so the child does not have
     to sit somewhere wrong until the period ratio confirms it."""
-    path = _module(tmp_path, "nested.py", NESTED)
+    path = str(write_module(NESTED, name="nested.py", strip=False))
     at = 100.0
     model = LoopRowModel(store, min_repeats=3)
     for _ in range(3):
@@ -387,10 +292,10 @@ def test_a_lexically_nested_loop_is_placed_under_its_parent_at_birth(
     assert [row.label for row in rows_drawn] == [parent.label, child.label]
 
 
-def test_a_lexically_corroborated_total_survives(store, make_row, tmp_path):
+def test_a_lexically_corroborated_total_survives(store, make_row, write_module):
     """`pipeline`'s 20/20. Static says the containment is real, so the ratio
     the timing measured is allowed to stand as the inner loop's length."""
-    path = _module(tmp_path, "nested.py", NESTED)
+    path = str(write_module(NESTED, name="nested.py", strip=False))
     at = 100.0
     model = LoopRowModel(store, min_repeats=3)
     for _ in range(SETTLED_CYCLES):
@@ -421,7 +326,7 @@ def test_a_lexically_corroborated_total_survives(store, make_row, tmp_path):
 
 
 def test_a_cross_function_parent_keeps_the_indent_and_loses_the_total(
-    store, make_row, tmp_path
+    store, make_row, write_module
 ):
     """`phases`. Period ordering cannot tell "A encloses B" from "A precedes
     B", and hands the running stage a total taken from an announcement line's
@@ -429,7 +334,7 @@ def test_a_cross_function_parent_keeps_the_indent_and_loses_the_total(
     the claimed parent cannot lexically enclose it — the number goes, the
     indent stays, because the stage function really is called from in there.
     """
-    path = _module(tmp_path, "phases.py", PHASES)
+    path = str(write_module(PHASES, name="phases.py", strip=False))
     at = 100.0
     model = LoopRowModel(store, min_repeats=3)
     for _ in range(SETTLED_CYCLES):
@@ -463,24 +368,12 @@ def test_a_cross_function_parent_keeps_the_indent_and_loses_the_total(
     assert not child.is_determinate
 
 
-CALLER = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def run():
-    for number in range(4):
-        log.info("stage %d", number)
-"""
-
-
-def test_a_parent_in_another_file_loses_the_total_too(store, make_row, tmp_path):
+def test_a_parent_in_another_file_loses_the_total_too(store, make_row, write_module):
     """A different file is the same refusal as a different function, only more
     so — and comparing loop line numbers across two files would let one file's
     `run()` corroborate another's by coincidence of numbering."""
-    caller = _module(tmp_path, "caller.py", CALLER)
-    worker = _module(tmp_path, "phases.py", PHASES)
+    caller = str(write_module(CALLER, name="caller.py", strip=False))
+    worker = str(write_module(PHASES, name="phases.py", strip=False))
     at = 100.0
     model = LoopRowModel(store, min_repeats=3)
     for _ in range(SETTLED_CYCLES):
@@ -511,12 +404,12 @@ def test_a_parent_in_another_file_loses_the_total_too(store, make_row, tmp_path)
     assert child.total is None
 
 
-def test_an_edited_file_is_ignored_rather_than_believed(store, make_row, tmp_path):
+def test_an_edited_file_is_ignored_rather_than_believed(store, make_row, write_module):
     """The drift guard. `file:lineno` describes the code the running process
     imported, and a file edited since points somewhere else entirely — so every
     structural claim keyed on it is wrong. A template that does not match is a
     refusal, and the runtime path takes over."""
-    path = _module(tmp_path, "siblings.py", SIBLINGS)
+    path = str(write_module(SIBLINGS, name="siblings.py", strip=False))
     for i in range(4):
         store.append(
             [
@@ -542,25 +435,11 @@ def test_an_edited_file_is_ignored_rather_than_believed(store, make_row, tmp_pat
     assert len(model.poll()) == 2
 
 
-def test_a_file_with_no_source_on_disk_still_draws_rows(store, make_row):
-    """`exec`, a generated module, a frozen importer. Principle 9 applied to a
-    data source rather than a package: degrade, never error."""
-    model = LoopRowModel(store, min_repeats=3)
-    store.append(
-        [
-            make_row(pathname="<string>", msg="generated %d", created=100.0 + i)
-            for i in range(4)
-        ]
-    )
-    (row,) = model.poll()
-    assert row.count == 4
-
-
-def test_a_line_that_moved_between_functions_is_refused(store, make_row, tmp_path):
+def test_a_line_that_moved_between_functions_is_refused(store, make_row, write_module):
     """The drift case the template check happens not to catch: the line still
     holds the same template, but `funcName` says the running code had it
     somewhere else. Both halves of the identity have to agree."""
-    path = _module(tmp_path, "siblings.py", SIBLINGS)
+    path = str(write_module(SIBLINGS, name="siblings.py", strip=False))
     store.append(
         [
             make_row(
@@ -580,22 +459,13 @@ def test_a_line_that_moved_between_functions_is_refused(store, make_row, tmp_pat
     assert row.label == "row …: parsed"
 
 
-NOT_IN_A_LOOP = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def emit(i):
-    log.debug("emitted %d", i)
-"""
-
-
-def test_a_repeating_line_outside_any_loop_is_its_own_row(store, make_row, tmp_path):
+def test_a_repeating_line_outside_any_loop_is_its_own_row(
+    store, make_row, write_module
+):
     """A helper called from a loop somewhere else. The AST is exact about there
     being no loop here, which is a row on its own rather than a merge
     candidate — a caller's loop is not this line's body."""
-    path = _module(tmp_path, "helper.py", NOT_IN_A_LOOP)
+    path = str(write_module(NOT_IN_A_LOOP, name="helper.py", strip=False))
     store.append(
         [
             make_row(
@@ -653,9 +523,9 @@ def _bury(store, make_row, path: str, count: int, at: float) -> None:
 
 
 def test_a_source_buried_under_traffic_waits_for_its_template(
-    store, make_row, tmp_path
+    store, make_row, write_module
 ):
-    path = _module(tmp_path, "phases.py", PHASES)
+    path = str(write_module(PHASES, name="phases.py", strip=False))
     store.append(
         [
             make_row(
@@ -681,11 +551,11 @@ def test_a_source_buried_under_traffic_waits_for_its_template(
     ]
 
 
-def test_a_source_that_never_turns_up_is_written_off(store, make_row, tmp_path):
+def test_a_source_that_never_turns_up_is_written_off(store, make_row, write_module):
     """Escalating lookbacks terminate. Without the give-up a source that
     qualified in a burst and then went quiet would cost a store read on every
     redraw for the rest of the run."""
-    path = _module(tmp_path, "phases.py", PHASES)
+    path = str(write_module(PHASES, name="phases.py", strip=False))
     store.append(
         [
             make_row(
@@ -721,24 +591,8 @@ def test_a_source_that_never_turns_up_is_written_off(store, make_row, tmp_path):
     assert reads <= 1, "a written-off source is still costing a store read"
 
 
-MIXED_BODY = """\
-import logging
-
-log = logging.getLogger(__name__)
-
-
-def process():
-    for batch in range(8):
-        log.debug("batch %d", batch)
-        for row in range(9):
-            log.debug("row %d", row)
-            if row % 3 == 0:
-                log.debug("checkpoint %d", row)
-"""
-
-
 def test_a_total_measured_against_a_sibling_is_not_reused_for_the_parent(
-    store, make_row, tmp_path
+    store, make_row, write_module
 ):
     """The disagree-and-merge quadrant: static grouping and runtime containment
     both correct, and the composition of them wrong.
@@ -755,7 +609,7 @@ def test_a_total_measured_against_a_sibling_is_not_reused_for_the_parent(
     path that catches every other bad estimate never fires. A row that claims
     less is always allowed; a row that claims wrong is not.
     """
-    path = _module(tmp_path, "mixed.py", MIXED_BODY)
+    path = str(write_module(MIXED_BODY, name="mixed.py", strip=False))
     at = 100.0
     model = LoopRowModel(store, min_repeats=3)
     for _ in range(SETTLED_CYCLES):

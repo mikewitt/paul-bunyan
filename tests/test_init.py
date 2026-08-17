@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import sys
+import threading
 
 import pytest
 
@@ -22,7 +23,7 @@ import lumberjack
 from lumberjack import teardown
 from lumberjack.detect import OutputMode
 from lumberjack.handler import LumberjackHandler
-from lumberjack.store import SQLiteRecordStore
+from lumberjack.store import RecordStore, SQLiteRecordStore
 
 
 def _raise(exc: Exception):
@@ -253,6 +254,16 @@ def test_a_quieter_capture_is_still_one_argument(make_session):
         store = lumberjack.current_store()
         assert store is not None
         assert [r.message for r in store.recent()] == ["kept"]
+
+
+def test_shutdown_stops_the_live_display(store: RecordStore):
+    """`init()`'s wiring from `shutdown()` through to the renderer: the live
+    display's redraw timer must not outlive the session that started it."""
+    pytest.importorskip("rich")
+    lumberjack.init(output_mode="rich", store=store)
+    assert [t for t in threading.enumerate() if t.name == "lumberjack-progress"]
+    lumberjack.shutdown()
+    assert not [t for t in threading.enumerate() if t.name == "lumberjack-progress"]
 
 
 def test_a_store_init_created_is_closed_when_teardown_refuses(monkeypatch):

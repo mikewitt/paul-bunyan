@@ -33,18 +33,13 @@ from lumberjack.renderers.progress import (
 )
 
 
-def _loop_rows(make_row, n: int, **overrides):
-    """N records from one source location, the way a loop emits them."""
-    return [make_row(message=f"item {i}", **overrides) for i in range(n)]
-
-
-def test_the_glyph_is_frozen_across_empty_polls(store, make_row):
+def test_the_glyph_is_frozen_across_empty_polls(store, loop_rows):
     """The honesty test, and the reason rich's `Spinner` is not used here:
     `Spinner.render()` produces four distinct frames from wall-clock alone,
     with no data passed to it at all. This row's frame is an index that only
     a record moves."""
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 4))
+    store.append(loop_rows(4))
     model.poll()
     running = model.heartbeat.glyph()
 
@@ -53,34 +48,27 @@ def test_the_glyph_is_frozen_across_empty_polls(store, make_row):
         assert model.heartbeat.glyph() == running, "the heartbeat animated on its own"
 
 
-def test_the_beat_advances_only_when_records_arrived(store, make_row):
+def test_the_beat_advances_only_when_records_arrived(store, loop_rows):
     model = RepeatingSourceModel(store, min_repeats=3)
     beats = []
     for arriving in (True, False, False, True, False, True):
         if arriving:
-            store.append(_loop_rows(make_row, 2))
+            store.append(loop_rows(2))
         model.poll()
         beats.append(model.heartbeat.beat)
     assert beats == [1, 1, 1, 2, 2, 3]
 
 
-def test_consecutive_beats_show_different_glyphs(store, make_row):
+def test_the_frames_cycle_rather_than_running_out(store, loop_rows):
     """The other half of the freeze: a frame that never moves is as useless
-    as one that always does."""
+    as one that always does, and the cycle has to wrap rather than run out."""
     model = RepeatingSourceModel(store, min_repeats=3)
     seen = []
-    for _ in range(3):
-        store.append(_loop_rows(make_row, 1))
+    for _ in range(len(HEARTBEAT_FRAMES) + 1):
+        store.append(loop_rows(1))
         model.poll()
         seen.append(model.heartbeat.glyph())
-    assert len(set(seen)) == 3
-
-
-def test_the_frames_cycle_rather_than_running_out(store, make_row):
-    model = RepeatingSourceModel(store, min_repeats=3)
-    for _ in range(len(HEARTBEAT_FRAMES) + 1):
-        store.append(_loop_rows(make_row, 1))
-        model.poll()
+    assert len(set(seen[:3])) == 3, "consecutive beats showed the same glyph"
     assert model.heartbeat.glyph() == HEARTBEAT_FRAMES[1]
 
 
@@ -102,21 +90,21 @@ def test_the_heartbeat_counts_records_across_every_source(store, make_row):
     assert model.heartbeat.events == 6
 
 
-def test_the_count_accumulates_across_polls(store, make_row):
+def test_the_count_accumulates_across_polls(store, loop_rows):
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 4))
+    store.append(loop_rows(4))
     model.poll()
-    store.append(_loop_rows(make_row, 3))
+    store.append(loop_rows(3))
     model.poll()
     assert model.heartbeat.events == 7
 
 
-def test_the_count_never_goes_backwards_after_eviction(store, make_row):
+def test_the_heartbeat_count_never_goes_backwards_after_eviction(store, loop_rows):
     """Monotonic by construction, as a bar's count is: the store is a window
     on the last N records, and trimming it must not make the session look
     less busy than it was."""
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 10))
+    store.append(loop_rows(10))
     model.poll()
     store.evict(keep_last=2)
     model.poll()
@@ -266,7 +254,7 @@ def test_what_counts_as_printed_above_is_the_displays_call(store, make_row):
     assert model.heartbeat.message == "something looked odd"
 
 
-def test_the_heartbeat_adds_no_second_store_poller(store, make_row, monkeypatch):
+def test_the_heartbeat_adds_no_second_store_poller(store, loop_rows, monkeypatch):
     """The watermark exists so a redraw costs what arrived rather than what
     the store holds. A second delta query per poll would double that to
     re-derive a number the first one already carries."""
@@ -280,17 +268,17 @@ def test_the_heartbeat_adds_no_second_store_poller(store, make_row, monkeypatch)
 
     monkeypatch.setattr(store, "count_by_source_since", counting)
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 4))
+    store.append(loop_rows(4))
     model.poll()
     assert model.heartbeat.events == 4
     assert deltas == 1
 
 
-def test_a_quiet_poll_reads_nothing_at_all(store, make_row, monkeypatch):
+def test_a_quiet_poll_reads_nothing_at_all(store, loop_rows, monkeypatch):
     """Not just the delta: the message costs a `recent()` too, and a poll
     that brought no records cannot have a new last line."""
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 2))
+    store.append(loop_rows(2))
     model.poll()
 
     reads = 0
@@ -368,13 +356,13 @@ def test_the_frames_degrade_to_what_the_encoding_carries(encoding, expected):
     assert heartbeat_frames(encoding) == expected
 
 
-def test_the_fallback_frames_survive_a_windows_console(store, make_row):
+def test_the_fallback_frames_survive_a_windows_console(store, loop_rows):
     """The whole set, not just the first frame: a cycle that runs off the end
     of an encodable prefix would fail on the fourth beat rather than the
     first, which is worse than failing immediately."""
     frames = heartbeat_frames("cp1252")
     model = RepeatingSourceModel(store, min_repeats=3)
     for _ in range(len(frames) * 2 + 1):
-        store.append(_loop_rows(make_row, 1))
+        store.append(loop_rows(1))
         model.poll()
         model.heartbeat.glyph(frames).encode("cp1252")

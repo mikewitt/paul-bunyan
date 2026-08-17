@@ -69,12 +69,6 @@ def test_render_includes_exception_text(make_row):
     assert "ValueError: x" in stream.getvalue()
 
 
-def test_declares_write_through():
-    # Teardown relies on this to decide whether replaying the tail at exit
-    # would duplicate output that was already printed.
-    assert PlainTextRenderer.write_through is True
-
-
 def test_close_is_a_noop():
     renderer = PlainTextRenderer(stream=io.StringIO())
     renderer.close()

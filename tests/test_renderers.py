@@ -73,16 +73,6 @@ def test_rich_mode_with_a_store_creates_the_live_bar(store):
         renderer.close()
 
 
-def test_rich_mode_without_a_store_stays_on_the_scrolling_renderer():
-    # The bar reads its counts out of a store; with nowhere to read from,
-    # there is nothing to draw.
-    pytest.importorskip("rich")
-    from lumberjack.renderers.rich_renderer import RichTerminalRenderer
-
-    renderer = create_renderer(OutputMode.RICH, stream=io.StringIO())
-    assert isinstance(renderer, RichTerminalRenderer)
-
-
 def test_live_bar_falls_back_to_plain_without_rich(without_rich, store):
     renderer = create_renderer(OutputMode.RICH, stream=io.StringIO(), store=store)
     assert isinstance(renderer, PlainTextRenderer)

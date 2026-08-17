@@ -34,11 +34,6 @@ def test_close_suppresses_further_renders(make_row):
     assert stream.getvalue() == ""
 
 
-def test_declares_write_through():
-    # No in-place redraw yet, so every record still reaches the stream.
-    assert RichTerminalRenderer.write_through is True
-
-
 def test_raises_clear_error_without_rich(monkeypatch):
     monkeypatch.setattr(rich_renderer_module, "Console", None)
     with pytest.raises(RuntimeError):

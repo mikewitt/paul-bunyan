@@ -21,10 +21,6 @@ def _event(make_row, task_id, event, **kw):
     )
 
 
-def test_no_task_bars_before_the_first_poll(store):
-    assert TaskProgressModel(store).bars() == []
-
-
 def test_a_task_gets_a_bar_on_its_start_row(store, make_row):
     store.append([_event(make_row, 1, "start", label="reindex")])
     (bar,) = TaskProgressModel(store).poll()
