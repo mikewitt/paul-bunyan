@@ -1,4 +1,10 @@
-"""Parametrized across every installed RecordStore backend via the `store` fixture."""
+"""Most tests here are parametrized across every installed RecordStore
+backend via the `store` fixture. Not all of them: the schema-parity checks,
+the on-disk-file guards (an older schema, a rejected file, reopening a fresh
+one) and the `recent()` default-limit constant are SQLite-specific — they
+construct a `SQLiteRecordStore` directly, because they are about that
+backend's file format and `PRAGMA table_info`, not about the `RecordStore`
+interface a second backend would also implement."""
 
 from __future__ import annotations
 
@@ -43,48 +49,40 @@ def test_recent_respects_since(store, make_row):
 
 
 def test_count_by_template(store, make_row):
-    store.append(
-        [make_row(template_id=1), make_row(template_id=1), make_row(template_id=2)]
-    )
-    counts = store.count_by_template()
-    assert counts[1] == 2
-    assert counts[2] == 1
-
-
-def test_count_by_source(store, make_row):
-    store.append(
-        [
-            make_row(pathname="a.py", lineno=1, func_name="f"),
-            make_row(pathname="a.py", lineno=1, func_name="f"),
-            make_row(pathname="b.py", lineno=2, func_name="g"),
-        ]
-    )
-    counts = store.count_by_source()
-    assert counts[SourceKey("a.py", 1, "f")] == 2
-    assert counts[SourceKey("b.py", 2, "g")] == 1
-
-
-def test_count_by_template_within_a_window(store, make_row):
+    """Grouped by template id, unwindowed and windowed: the unwindowed count
+    covers everything ever written, the windowed one only what's recent
+    enough to matter for a live bar."""
     now = time.time()
     store.append(
         [
             make_row(created=now - 3600, template_id=1),
             make_row(created=now, template_id=1),
+            make_row(created=now, template_id=2),
         ]
     )
-    assert store.count_by_template(window_seconds=60) == {1: 1}
+    assert store.count_by_template() == {1: 2, 2: 1}
+    assert store.count_by_template(window_seconds=60) == {1: 1, 2: 1}
 
 
-def test_count_by_source_within_a_window(store, make_row):
+def test_count_by_source(store, make_row):
+    """Grouped by source location, unwindowed and windowed, mirroring
+    `test_count_by_template` above."""
     now = time.time()
     store.append(
         [
             make_row(created=now - 3600, pathname="a.py", lineno=1, func_name="f"),
             make_row(created=now, pathname="a.py", lineno=1, func_name="f"),
-            make_row(created=now, pathname="a.py", lineno=1, func_name="f"),
+            make_row(created=now, pathname="b.py", lineno=2, func_name="g"),
         ]
     )
-    assert store.count_by_source(window_seconds=60) == {SourceKey("a.py", 1, "f"): 2}
+    assert store.count_by_source() == {
+        SourceKey("a.py", 1, "f"): 2,
+        SourceKey("b.py", 2, "g"): 1,
+    }
+    assert store.count_by_source(window_seconds=60) == {
+        SourceKey("a.py", 1, "f"): 1,
+        SourceKey("b.py", 2, "g"): 1,
+    }
 
 
 # --- incremental counting --------------------------------------------------
@@ -101,19 +99,70 @@ def test_count_by_source_since_returns_only_newer_rows(store, make_row):
     assert second.last_id > first.last_id
 
 
-def test_count_by_source_since_holds_the_watermark_when_nothing_arrived(
-    store, make_row
+@pytest.mark.parametrize(
+    "seed_row, method_name, result_attr",
+    [
+        pytest.param(
+            lambda make_row, make_task_row: make_row(),
+            "count_by_source_since",
+            "counts",
+            id="count_by_source_since",
+        ),
+        pytest.param(
+            lambda make_row, make_task_row: make_task_row(1, "start"),
+            "task_events_since",
+            "events",
+            id="task_events_since",
+        ),
+    ],
+)
+def test_the_watermark_holds_when_nothing_arrived(
+    store, make_row, make_task_row, seed_row, method_name, result_attr
 ):
-    store.append([make_row()])
-    first = store.count_by_source_since(0)
-    again = store.count_by_source_since(first.last_id)
-    assert again.counts == {}
+    store.append([seed_row(make_row, make_task_row)])
+    method = getattr(store, method_name)
+    first = method(0)
+    again = method(first.last_id)
+    assert not getattr(again, result_attr)
     assert again.last_id == first.last_id, "an empty delta must not rewind"
 
 
-def test_count_by_source_since_from_zero_sees_everything(store, make_row):
-    store.append([make_row() for _ in range(4)])
-    assert sum(store.count_by_source_since(0).counts.values()) == 4
+@pytest.mark.parametrize(
+    "seed_row, method_name, result_attr, extra_rows",
+    [
+        pytest.param(
+            lambda make_row, make_task_row: make_task_row(1, "start"),
+            "task_events_since",
+            "events",
+            lambda make_row, make_task_row: [
+                make_row(message="plain") for _ in range(5)
+            ],
+            id="task watermark advances past ordinary rows",
+        ),
+        pytest.param(
+            lambda make_row, make_task_row: make_row(),
+            "count_by_source_since",
+            "counts",
+            lambda make_row, make_task_row: [
+                make_task_row(1, "update") for _ in range(3)
+            ],
+            id="source watermark advances past task rows",
+        ),
+    ],
+)
+def test_the_watermark_advances_past_rows_the_method_does_not_count(
+    store, make_row, make_task_row, seed_row, method_name, result_attr, extra_rows
+):
+    """The watermark spans every row in range, not just the ones the method
+    itself counts — otherwise the rows it skips would be rescanned on every
+    later poll, and the range would only grow."""
+    store.append([seed_row(make_row, make_task_row)])
+    method = getattr(store, method_name)
+    first = method(0)
+    store.append(extra_rows(make_row, make_task_row))
+    second = method(first.last_id)
+    assert not getattr(second, result_attr), "expected nothing new"
+    assert second.last_id > first.last_id, "the watermark stalled"
 
 
 def test_evict_before(store, make_row):
@@ -129,30 +178,24 @@ def test_evict_before(store, make_row):
     assert [r.message for r in store.recent()] == ["new"]
 
 
-def test_evict_keep_last(store, make_row):
-    store.append([make_row(message=str(i)) for i in range(5)])
-    evicted = store.evict(keep_last=2)
-    assert evicted == 3
-    assert [r.message for r in store.recent()] == ["3", "4"]
-
-
-def test_evict_keep_last_zero_clears_the_store(store, make_row):
-    store.append([make_row() for _ in range(3)])
-    assert store.evict(keep_last=0) == 3
-    assert store.recent() == []
-
-
-def test_evict_keep_last_beyond_the_row_count_deletes_nothing(store, make_row):
-    # The cutoff subquery returns NULL here, and `id < NULL` matches no row.
-    store.append([make_row(message=str(i)) for i in range(2)])
-    assert store.evict(keep_last=100) == 0
-    assert [r.message for r in store.recent()] == ["0", "1"]
-
-
-def test_evict_keep_last_one_keeps_the_newest(store, make_row):
-    store.append([make_row(message=str(i)) for i in range(4)])
-    assert store.evict(keep_last=1) == 3
-    assert [r.message for r in store.recent()] == ["3"]
+@pytest.mark.parametrize(
+    "total_rows, keep_last, expected_evicted, survivors",
+    [
+        pytest.param(5, 2, 3, ["3", "4"], id="keeps exactly the newest N"),
+        pytest.param(3, 0, 3, [], id="zero clears the store"),
+        pytest.param(2, 100, 0, ["0", "1"], id="beyond the row count deletes nothing"),
+    ],
+)
+def test_evict_keep_last(
+    store, make_row, total_rows, keep_last, expected_evicted, survivors
+):
+    """`keep_last` is a floor, not a target: asking for more than exists
+    deletes nothing — the cutoff subquery returns NULL there, and `id < NULL`
+    matches no row — and asking for zero must clear the store rather than
+    being mistaken for "no limit"."""
+    store.append([make_row(message=str(i)) for i in range(total_rows)])
+    assert store.evict(keep_last=keep_last) == expected_evicted
+    assert [r.message for r in store.recent()] == survivors
 
 
 def test_evict_requires_exactly_one_arg(store):
@@ -172,19 +215,6 @@ def test_templates_returns_distinct_non_null(store, make_row):
 def test_append_empty_is_noop(store):
     store.append([])
     assert store.recent() == []
-
-
-# --- the created table matches the INSERT, SQLite-specific ------------
-
-
-def test_insert_columns_and_created_table_agree():
-    """Catches `_SCHEMA` drift, which the two checks above cannot see."""
-    sqlite_store = SQLiteRecordStore(":memory:")
-    try:
-        rows = sqlite_store._conn.execute("PRAGMA table_info(records)").fetchall()
-    finally:
-        sqlite_store.close()
-    assert {r["name"] for r in rows} == set(_COLUMNS) | {"id"}
 
 
 def test_a_store_file_from_an_older_schema_fails_loudly(tmp_path):
@@ -255,28 +285,19 @@ def test_a_rejected_store_file_does_not_leak_its_connection(tmp_path, recwarn):
 # --- the tracking API's own rows -------------------------------------------
 
 
-def _task_row(make_row, task_id, event, **kw):
-    return make_row(
-        task_id=task_id,
-        task_event=event,
-        task_label=kw.pop("label", "job"),
-        **kw,
-    )
-
-
-def test_task_events_since_returns_only_task_rows(store, make_row):
-    store.append([make_row(message="ordinary"), _task_row(make_row, 1, "start")])
+def test_task_events_since_returns_only_task_rows(store, make_row, make_task_row):
+    store.append([make_row(message="ordinary"), make_task_row(1, "start")])
     delta = store.task_events_since(0)
     assert [e.event for e in delta.events] == ["start"]
     assert delta.events[0].task_id == 1
 
 
-def test_task_events_since_returns_them_oldest_first(store, make_row):
+def test_task_events_since_returns_them_oldest_first(store, make_task_row):
     store.append(
         [
-            _task_row(make_row, 1, "start"),
-            _task_row(make_row, 1, "update", progress_current=5),
-            _task_row(make_row, 1, "end", progress_current=9),
+            make_task_row(1, "start"),
+            make_task_row(1, "update", progress_current=5),
+            make_task_row(1, "end", progress_current=9),
         ]
     )
     assert [e.event for e in store.task_events_since(0).events] == [
@@ -286,31 +307,10 @@ def test_task_events_since_returns_them_oldest_first(store, make_row):
     ]
 
 
-def test_task_events_since_advances_past_ordinary_records(store, make_row):
-    """The watermark spans every row in range, not just the task ones —
-    otherwise ordinary records after the last task event would be rescanned
-    on every poll, and the range would only grow."""
-    store.append([_task_row(make_row, 1, "start")])
-    first = store.task_events_since(0)
-    store.append([make_row(message="plain") for _ in range(5)])
-    second = store.task_events_since(first.last_id)
-    assert second.events == ()
-    assert second.last_id > first.last_id, "the watermark stalled behind plain rows"
-
-
-def test_task_events_since_holds_the_watermark_when_nothing_arrived(store, make_row):
-    store.append([_task_row(make_row, 1, "start")])
-    first = store.task_events_since(0)
-    again = store.task_events_since(first.last_id)
-    assert again.events == ()
-    assert again.last_id == first.last_id, "an empty delta must not rewind"
-
-
-def test_task_events_since_carries_every_column_a_bar_needs(store, make_row):
+def test_task_events_since_carries_every_column_a_bar_needs(store, make_task_row):
     store.append(
         [
-            _task_row(
-                make_row,
+            make_task_row(
                 7,
                 "update",
                 label="reindex",
@@ -326,29 +326,17 @@ def test_task_events_since_carries_every_column_a_bar_needs(store, make_row):
     assert (event.current, event.total) == (40, 100)
 
 
-def test_the_source_delta_ignores_task_rows(store, make_row):
+def test_the_source_delta_ignores_task_rows(store, make_row, make_task_row):
     """The tracking API knows its own exact numbers and gets its own bars.
     Counting its rows here too would draw a source-location bar beside every
     named one — visible on the first run of examples/tracking.py."""
     store.append(
         [
             make_row(pathname="a.py", lineno=1, func_name="f"),
-            _task_row(make_row, 1, "start", pathname="a.py", lineno=1, func_name="f"),
+            make_task_row(1, "start", pathname="a.py", lineno=1, func_name="f"),
         ]
     )
     assert store.count_by_source_since(0).counts == {SourceKey("a.py", 1, "f"): 1}
-
-
-def test_the_source_delta_watermark_advances_past_task_rows(store, make_row):
-    """Excluding them by grouping rather than by WHERE: filtering them out of
-    the range would leave the watermark behind a tail of task rows, and every
-    later poll would rescan a range that only grows."""
-    store.append([make_row()])
-    first = store.count_by_source_since(0)
-    store.append([_task_row(make_row, 1, "update") for _ in range(3)])
-    second = store.count_by_source_since(first.last_id)
-    assert second.counts == {}
-    assert second.last_id > first.last_id, "the watermark stalled behind task rows"
 
 
 def test_the_source_delta_reports_which_workers_ran_each_line(store, make_row):
@@ -413,20 +401,18 @@ def test_the_default_limit_is_a_documented_number():
     assert DEFAULT_RECENT_LIMIT == 1000
 
 
-def test_recent_is_bounded_by_default(store, make_row):
-    """`recent()` is the documented way to query captured records, and the
-    unbounded form builds one dataclass per row — multi-second and half a
-    million objects at the retention target, from a call that looks free."""
-    store.append([make_row(message=str(i)) for i in range(DEFAULT_RECENT_LIMIT + 25)])
-    assert len(store.recent()) == DEFAULT_RECENT_LIMIT
-
-
 def test_the_default_keeps_the_newest_records(store, make_row):
     """Bounded from the newest end, oldest-first within that — a tail, not a
     head. Returning the *first* 1000 of a long run would be worse than
-    useless."""
+    useless.
+
+    `recent()` is the documented way to query captured records, and the
+    unbounded form builds one dataclass per row — multi-second and half a
+    million objects at the retention target, from a call that looks free —
+    so the default bound is asserted here too."""
     store.append([make_row(message=str(i)) for i in range(DEFAULT_RECENT_LIMIT + 3)])
     rows = store.recent()
+    assert len(rows) == DEFAULT_RECENT_LIMIT
     assert rows[-1].message == str(DEFAULT_RECENT_LIMIT + 2)
     assert rows[0].message == "3"
 

@@ -30,10 +30,6 @@ class TaskBarState:
     done: bool
     depth: int
 
-    @property
-    def is_determinate(self) -> bool:
-        return self.total is not None
-
 
 class TaskProgressModel:
     """Folds `store.task_events_since()` into one bar per task.

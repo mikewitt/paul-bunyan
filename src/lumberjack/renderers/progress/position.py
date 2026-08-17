@@ -162,7 +162,7 @@ class CyclePositionModel:
         None for a row grouped by the runtime fallback — which has no body
         order to read and therefore never draws one of these.
         """
-        width = self._width_of(key, loop)
+        width = self._body_width(key, loop)
         if key not in self._earned:
             if not self._admits(width, period, states, sites):
                 return None
@@ -184,17 +184,63 @@ class CyclePositionModel:
         # would promise a row that might never have a number in it.
         return next(_stages(states, sites), None) is not None
 
-    def _width_of(self, key: SourceKey, loop: SourceKey | None) -> int | None:
+    def _body_width(self, key: SourceKey, loop: SourceKey | None) -> int | None:
         """This body's widest stage name, or None if it has no order to draw.
+
+        Cached on `self._body`, keyed by row rather than by `loop`: the answer
+        is a property of one file at one moment, asked once, and re-reading it
+        every poll would mean an `os.stat` per row per redraw to re-ask a
+        question whose inputs cannot move. `self._body` stores `int | None`
+        and None is a meaningful *result* here (a body with no order to draw),
+        not just an absent one — so the cache is read with `in` rather than
+        `.get(key, sentinel)`, to keep "not cached yet" and "cached as no
+        width" distinguishable.
 
         None for a row the runtime fallback grouped, which has no `for`
         statement to point at and therefore no body to read.
+
+        Reads the same `Loop` the grouping was taken from, so the file has
+        already passed `template_matches()` for the member that founded the
+        row — the drift guard is upstream of here, not repeated in it.
+
+        The width covers *every* call site the AST found, including ones that
+        have not fired yet and one that never will. Sizing it to what has been
+        seen would widen the column the first time a long stage came round,
+        dragging the bars sideways at exactly the moment a reader is watching
+        them move.
+
+        A site with no template — an f-string, or a message passed by
+        variable — contributes nothing, and cannot make the column too narrow
+        by being skipped: `record.msg` for such a line is rendered text, which
+        fails `template_matches()`, so `LoopRowModel` files it as unplaceable,
+        `_stages` skips it and it is never a label. The stage it *does* land
+        on is measured here. `default` covers a body of nothing but those,
+        which is admitted by nothing downstream and would otherwise be an
+        empty `max()`.
         """
         if loop is None:
             return None
-        if key not in self._body:
-            self._body[key] = _body_width(loop)
-        return self._body[key]
+        if key in self._body:
+            return self._body[key]
+        self._body[key] = None
+        structure = static.analyze_file(loop.pathname)
+        if structure is None:  # pragma: no cover - the group came from this file
+            return None
+        found = structure.loops.get(loop.lineno)
+        if found is None:  # pragma: no cover - likewise
+            return None
+        if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
+            return None
+        width = max(
+            (
+                len(describe_template(site.template))
+                for site in found.call_sites
+                if site.template is not None
+            ),
+            default=0,
+        )
+        self._body[key] = width
+        return width
 
     def _where(
         self,
@@ -249,41 +295,3 @@ def _stages(
         ):
             continue
         yield state.last_at, state.source, site.position, site.body_size
-
-
-def _body_width(loop: SourceKey) -> int | None:
-    """The widest stage name this body can show, or None if it has no order.
-
-    Reads the same `Loop` the grouping was taken from, so the file has already
-    passed `template_matches()` for the member that founded the row — the drift
-    guard is upstream of here, not repeated in it.
-
-    The width covers *every* call site the AST found, including ones that have
-    not fired yet and one that never will. Sizing it to what has been seen
-    would widen the column the first time a long stage came round, dragging the
-    bars sideways at exactly the moment a reader is watching them move.
-
-    A site with no template — an f-string, or a message passed by variable —
-    contributes nothing, and cannot make the column too narrow by being
-    skipped: `record.msg` for such a line is rendered text, which fails
-    `template_matches()`, so `LoopRowModel` files it as unplaceable, `_stages`
-    skips it and it is never a label. The stage it *does* land on is measured
-    here. `default` covers a body of nothing but those, which is admitted by
-    nothing downstream and would otherwise be an empty `max()`.
-    """
-    structure = static.analyze_file(loop.pathname)
-    if structure is None:  # pragma: no cover - the group came from this file
-        return None
-    found = structure.loops.get(loop.lineno)
-    if found is None:  # pragma: no cover - likewise
-        return None
-    if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
-        return None
-    return max(
-        (
-            len(describe_template(site.template))
-            for site in found.call_sites
-            if site.template is not None
-        ),
-        default=0,
-    )

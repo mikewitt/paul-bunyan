@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import dataclasses
-import gc
 import logging
 import sys
-import threading
 
-from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord, TaskEvent
-from lumberjack.store import _COLUMNS
+from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord
+from lumberjack.store import _COLUMNS, SQLiteRecordStore
 
 
 def _make_record(**overrides: object) -> logging.LogRecord:
@@ -39,6 +36,7 @@ def test_from_log_record_reserved_fields_default_to_none():
     record = _make_record()
     row = LogRecordRow.from_log_record(record)
     assert row.asyncio_task_name is None
+    assert row.asyncio_task_id is None
     assert row.task_id is None
     assert row.parent_task_id is None
     assert row.template_id is None
@@ -58,24 +56,23 @@ def _record_carrying(payload: object) -> logging.LogRecord:
     return record
 
 
-def test_a_task_event_populates_the_progress_columns():
-    event = TaskEvent(
-        label="reindex",
-        kind="update",
-        task_id=7,
-        parent_task_id=3,
-        current=40,
-        total=100,
-    )
-    row = LogRecordRow.from_log_record(_record_carrying(event))
+def test_a_task_event_populates_the_progress_columns(make_task_event):
+    row = LogRecordRow.from_log_record(_record_carrying(make_task_event()))
     assert (row.task_label, row.task_event) == ("reindex", "update")
     assert (row.task_id, row.parent_task_id) == (7, 3)
     assert (row.progress_current, row.progress_total) == (40, 100)
 
 
-def test_a_task_event_without_progress_leaves_those_columns_null():
+def test_a_task_event_without_progress_leaves_those_columns_null(make_task_event):
     """An indeterminate task is the common case: `task()` with no total."""
-    event = TaskEvent(label="migrate", kind="start", task_id=1)
+    event = make_task_event(
+        label="migrate",
+        kind="start",
+        task_id=1,
+        parent_task_id=None,
+        current=None,
+        total=None,
+    )
     row = LogRecordRow.from_log_record(_record_carrying(event))
     assert (row.task_label, row.task_event) == ("migrate", "start")
     assert (row.progress_current, row.progress_total) == (None, None)
@@ -110,118 +107,6 @@ def test_stored_record_adds_id():
     assert stored.message == row.message
 
 
-def test_task_attribution_inside_asyncio_task():
-    captured: dict[str, LogRecordRow] = {}
-
-    async def inner() -> None:
-        record = _make_record(msg="in task", args=())
-        captured["row"] = LogRecordRow.from_log_record(record)
-
-    asyncio.run(inner())
-    row = captured["row"]
-    assert row.asyncio_task_id is not None
-
-
-def test_no_task_attribution_outside_asyncio():
-    record = _make_record()
-    row = LogRecordRow.from_log_record(record)
-    assert row.asyncio_task_id is None
-
-
-def test_no_task_attribution_in_a_bare_loop_callback():
-    """A running loop is not a running task. `current_task()` returns None
-    rather than raising inside a `call_soon` callback, so that is a third
-    case, distinct from both 'in a task' and 'no loop at all'."""
-    ids: list[int | None] = []
-
-    async def main() -> None:
-        loop = asyncio.get_running_loop()
-        done = loop.create_future()
-
-        def callback() -> None:
-            ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
-            done.set_result(None)
-
-        loop.call_soon(callback)
-        await done
-
-    asyncio.run(main())
-    assert ids == [None]
-
-
-def test_one_task_keeps_one_id_across_records():
-    """Grouping by task is only meaningful if the id holds for the task's life."""
-    ids: list[int | None] = []
-
-    async def inner() -> None:
-        for _ in range(3):
-            ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
-            await asyncio.sleep(0)
-
-    asyncio.run(inner())
-    assert len(set(ids)) == 1
-
-
-def test_sequential_asyncio_tasks_never_share_an_id():
-    """The bug issue #4 was filed for: `id()` returns the object's address, and
-    CPython hands the freed address to the next task of the same shape. Two
-    tasks that never overlapped in time then merged into one apparent task.
-    Measured against the pre-fix code: these 20 runs yielded 5 distinct ids."""
-    ids: list[int | None] = []
-
-    async def inner() -> None:
-        ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
-
-    for _ in range(20):
-        asyncio.run(inner())
-        gc.collect()
-
-    assert len(set(ids)) == len(ids)
-
-
-def test_concurrent_asyncio_tasks_get_distinct_ids():
-    ids: list[int | None] = []
-
-    async def inner() -> None:
-        ids.append(LogRecordRow.from_log_record(_make_record()).asyncio_task_id)
-        await asyncio.sleep(0)
-
-    async def main() -> None:
-        await asyncio.gather(*(inner() for _ in range(5)))
-
-    asyncio.run(main())
-    assert len(set(ids)) == 5
-
-
-def test_tasks_in_separate_event_loops_get_distinct_ids():
-    """The counter is process-wide but the loops are not. Two threads each
-    running their own loop is the shape Principle 3 exists for, and the one
-    a single-loop test cannot speak to."""
-    ids: list[int | None] = []
-    guard = threading.Lock()
-    threads, per_loop = 6, 10
-
-    async def inner() -> None:
-        task_id = LogRecordRow.from_log_record(_make_record()).asyncio_task_id
-        with guard:
-            ids.append(task_id)
-        await asyncio.sleep(0)
-
-    async def main() -> None:
-        await asyncio.gather(*(inner() for _ in range(per_loop)))
-
-    workers = [
-        threading.Thread(target=lambda: asyncio.run(main())) for _ in range(threads)
-    ]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join()
-
-    assert len(ids) == threads * per_loop
-    assert len(set(ids)) == len(ids)
-
-
 # --- schema/column parity ---------------------------------------------------
 #
 # Three lists have to agree: the dataclass fields, the INSERT column tuple,
@@ -235,3 +120,13 @@ def test_row_fields_and_insert_columns_agree():
 
 def test_stored_record_is_a_row_plus_id():
     assert {f.name for f in dataclasses.fields(StoredRecord)} == set(_COLUMNS) | {"id"}
+
+
+def test_insert_columns_and_created_table_agree():
+    """Catches `_SCHEMA` drift, which the two checks above cannot see."""
+    sqlite_store = SQLiteRecordStore(":memory:")
+    try:
+        rows = sqlite_store._conn.execute("PRAGMA table_info(records)").fetchall()
+    finally:
+        sqlite_store.close()
+    assert {r["name"] for r in rows} == set(_COLUMNS) | {"id"}

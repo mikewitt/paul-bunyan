@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import itertools
 import logging
+import os
 from typing import Literal, NamedTuple
 
 #: The single `extra=` key the tracking API attaches its payload under.
@@ -30,7 +31,7 @@ def _current_asyncio_task_id() -> int | None:
     address of a collected task to the next one of the same shape, so two
     tasks that never overlapped in time merge into one apparent task. The id
     comes from a counter instead, cached on the task object so it stays stable
-    for that task's life. lumberjack: closes issue #4.
+    for that task's life.
 
     No lock: `itertools.count.__next__` is a single C call, and
     `asyncio.current_task()` only ever returns a task owned by the calling
@@ -164,3 +165,13 @@ class SourceKey(NamedTuple):
     pathname: str
     lineno: int
     func_name: str
+
+    def format(self) -> str:
+        """`worker.py:42 process()` — the source location a human reads.
+
+        The one label every identity-layer fallback shares: a bar or a row
+        with no template to name it by falls back to this. `os.path.basename`
+        rather than the full path, because a bar column is not where a reader
+        wants to see where the checkout lives.
+        """
+        return f"{os.path.basename(self.pathname)}:{self.lineno} {self.func_name}()"

@@ -70,7 +70,7 @@ filterwarnings = ["error"]
 source = ["lumberjack"]
 branch = true
 # The excepthook, atexit and file-backed-store paths only run in the
-# subprocesses test_integration.py spawns. Without this their coverage is
+# subprocesses test_exit_paths.py spawns. Without this their coverage is
 # invisible, and "uncovered" stops meaning "untested".
 parallel = true
 concurrency = ["thread", "multiprocessing"]

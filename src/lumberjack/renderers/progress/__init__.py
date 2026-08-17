@@ -57,8 +57,10 @@ from lumberjack.renderers.progress.heartbeat import (
     HEARTBEAT_FRAMES,
     HEARTBEAT_FRAMES_ASCII,
     MESSAGE_LOOKBACK,
+    PASSTHROUGH_LEVEL,
     HeartbeatState,
     SessionHeartbeat,
+    ascii_fallback,
     heartbeat_frames,
 )
 from lumberjack.renderers.progress.layout import depth_first_order
@@ -75,14 +77,12 @@ from lumberjack.renderers.progress.sources import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     IDLE_PERIODS,
-    MAX_BARS_ENV_VAR,
     MIN_IDLE_SECONDS,
     MIN_NESTING_RATIO,
     RATIO_TOLERANCE,
     SAME_LOOP_TOLERANCE,
     BarState,
     RepeatingSourceModel,
-    resolve_max_bars,
 )
 from lumberjack.renderers.progress.tasks import TaskBarState, TaskProgressModel
 from lumberjack.renderers.progress.templates import (
@@ -98,16 +98,17 @@ __all__ = [
     "DEFAULT_REFRESH_INTERVAL",
     "HEARTBEAT_FRAMES",
     "HEARTBEAT_FRAMES_ASCII",
+    "ascii_fallback",
     "heartbeat_frames",
     "IDLE_PERIODS",
     "LOOKBACKS",
-    "MAX_BARS_ENV_VAR",
     "MAX_LABEL",
     "MESSAGE_LOOKBACK",
     "MIN_BODY_SITES",
     "MIN_IDLE_SECONDS",
     "MIN_LEGIBLE_PERIOD",
     "MIN_NESTING_RATIO",
+    "PASSTHROUGH_LEVEL",
     "PERIOD_SMOOTHING",
     "RATIO_TOLERANCE",
     "SAME_LOOP_TOLERANCE",
@@ -124,5 +125,4 @@ __all__ = [
     "TemplateIndex",
     "depth_first_order",
     "describe_template",
-    "resolve_max_bars",
 ]

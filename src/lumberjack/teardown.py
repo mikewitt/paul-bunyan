@@ -24,8 +24,8 @@ import sys
 from types import TracebackType
 from typing import TYPE_CHECKING
 
+from lumberjack.detect import MAX_BARS_ENV_VAR
 from lumberjack.renderers.plain import PlainTextRenderer
-from lumberjack.renderers.progress import MAX_BARS_ENV_VAR
 
 if TYPE_CHECKING:
     from lumberjack.session import Session
@@ -178,6 +178,14 @@ def _dump_diagnostics() -> None:
 
 
 def _flush_buffer() -> None:
+    # Deliberately a duplicate of `lumberjack.flush()`, not a call to it:
+    # `flush()` takes `session.registry_lock()` around the same read-then-write
+    # so a concurrent `shutdown()` cannot close the store between them, but
+    # this module keeps its own `_session` reference on its own lifecycle (see
+    # session.py's module docstring) rather than going through that registry —
+    # by the time an atexit hook or excepthook runs, `shutdown()` racing it is
+    # not the failure mode this guards against. Do not "simplify" this into a
+    # call to `flush()`.
     if _session is None:
         return
     try:

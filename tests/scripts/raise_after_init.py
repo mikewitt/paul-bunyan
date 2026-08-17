@@ -1,6 +1,6 @@
 """Standalone script: init lumberjack in plain mode, log a few records, raise.
 
-Run via subprocess (see test_integration.py) so sys.excepthook is exercised
+Run via subprocess (see test_exit_paths.py) so sys.excepthook is exercised
 for real — pytest owns exception handling for in-process test functions, so
 this can't be tested any other way.
 """

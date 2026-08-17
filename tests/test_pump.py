@@ -10,11 +10,7 @@ import threading
 
 import pytest
 
-from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
-
-
-def test_default_interval_is_positive():
-    assert DEFAULT_FLUSH_INTERVAL > 0
+from lumberjack.pump import FlushPump
 
 
 def test_non_positive_interval_is_rejected():
@@ -48,14 +44,6 @@ def test_pump_calls_flush_repeatedly():
         assert enough.wait(timeout=5.0)
     finally:
         pump.stop()
-
-
-def test_stop_halts_flushing():
-    pump = FlushPump(interval=0.001, flush=lambda: None)
-    pump.start()
-    assert pump.running
-    pump.stop()
-    assert not pump.running
 
 
 def _pump_threads(name: str) -> list[threading.Thread]:

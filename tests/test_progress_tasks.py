@@ -21,10 +21,6 @@ def _event(make_row, task_id, event, **kw):
     )
 
 
-def test_no_task_bars_before_the_first_poll(store):
-    assert TaskProgressModel(store).bars() == []
-
-
 def test_a_task_gets_a_bar_on_its_start_row(store, make_row):
     store.append([_event(make_row, 1, "start", label="reindex")])
     (bar,) = TaskProgressModel(store).poll()
@@ -55,13 +51,13 @@ def test_polling_twice_without_new_rows_changes_nothing(store, make_row):
 def test_a_task_without_a_total_is_indeterminate(store, make_row):
     store.append([_event(make_row, 1, "update", progress_current=7)])
     (bar,) = TaskProgressModel(store).poll()
-    assert bar.total is None and not bar.is_determinate
+    assert bar.total is None
 
 
 def test_a_task_with_a_total_is_determinate(store, make_row):
     store.append([_event(make_row, 1, "update", progress_current=7, progress_total=10)])
     (bar,) = TaskProgressModel(store).poll()
-    assert bar.is_determinate
+    assert bar.total is not None
 
 
 def test_the_end_row_finishes_the_bar(store, make_row):

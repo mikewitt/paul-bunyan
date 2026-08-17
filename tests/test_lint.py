@@ -18,13 +18,11 @@ usable on a real codebase, so it is asserted directly too.
 from __future__ import annotations
 
 import ast
-import itertools
 import os
 import re
 import subprocess
 import sys
-import textwrap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,34 +33,15 @@ REPO = Path(__file__).resolve().parent.parent
 DEMO = REPO / "examples" / "demo.py"
 
 
-@pytest.fixture(autouse=True)
-def _clear_static_cache() -> Iterator[None]:
-    static.clear_cache()
-    yield
-    static.clear_cache()
-
-
-@pytest.fixture
-def write_module(tmp_path: Path) -> Callable[..., Path]:
-    counter = itertools.count()
-
-    def _write(source: str, *, name: str | None = None) -> Path:
-        path = tmp_path / (name or f"mod{next(counter)}.py")
-        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
-        return path
-
-    return _write
-
-
 @pytest.fixture
 def rules(write_module: Callable[..., Path]) -> Callable[..., list[str]]:
     """The rule slugs a snippet produces, in the order they are reported."""
 
     def _rules(source: str, *, all_loops: bool = False) -> list[str]:
         path = write_module(source)
-        findings = lint.check_file(str(path), all_loops=all_loops)
-        assert findings is not None, "the fixture source should parse"
-        return [finding.rule for finding in findings]
+        report = lint.check([str(path)], all_loops=all_loops)
+        assert report.files == 1, "the fixture source should parse"
+        return [finding.rule for finding in report.findings]
 
     return _rules
 
@@ -73,8 +52,9 @@ def one(write_module: Callable[..., Path]) -> Callable[..., lint.Finding]:
 
     def _one(source: str, *, all_loops: bool = False) -> lint.Finding:
         path = write_module(source)
-        findings = lint.check_file(str(path), all_loops=all_loops)
-        assert findings is not None
+        report = lint.check([str(path)], all_loops=all_loops)
+        assert report.files == 1, "the fixture source should parse"
+        findings = report.findings
         assert len(findings) == 1, f"expected one finding, got {findings}"
         return findings[0]
 
@@ -484,8 +464,8 @@ def test_no_fix_ever_leads_with_the_expensive_advice(
     quiet = write_module(IDIOMATIC, name="a.py")
     loud = write_module(ALL_SHAPES, name="b.py")
     findings = [
-        *(lint.check_file(str(quiet), all_loops=True) or ()),
-        *(lint.check_file(str(loud)) or ()),
+        *lint.check([str(quiet)], all_loops=True).findings,
+        *lint.check([str(loud)]).findings,
     ]
     assert findings
 
@@ -498,8 +478,7 @@ def test_no_fix_ever_leads_with_the_expensive_advice(
 def test_findings_are_reported_in_order_of_value(
     write_module: Callable[..., Path],
 ) -> None:
-    findings = lint.check_file(str(write_module(ALL_SHAPES)))
-    assert findings is not None
+    findings = lint.check([str(write_module(ALL_SHAPES))]).findings
 
     ranks = [lint.RULE_ORDER.index(finding.rule) for finding in findings]
     assert ranks == sorted(ranks)
@@ -513,7 +492,7 @@ def test_every_finding_names_a_file_a_line_and_a_change(
     write_module: Callable[..., Path],
 ) -> None:
     path = write_module(ALL_SHAPES)
-    findings = lint.check_file(str(path)) or ()
+    findings = lint.check([str(path)]).findings
     assert findings
 
     for finding in findings:
@@ -796,7 +775,6 @@ def test_an_unreadable_file_is_skipped_rather_than_crashing(tmp_path: Path) -> N
     broken = tmp_path / "broken.py"
     broken.write_text("def f(:\n    pass\n", encoding="utf-8")
 
-    assert lint.check_file(str(broken)) is None
     report = lint.check([str(tmp_path)])
     assert report.files == 0
     assert report.findings == ()

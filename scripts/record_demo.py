@@ -1,6 +1,12 @@
 """Record a demo scenario as an animated GIF.
 
-    uv run --with pillow --with pyte python scripts/record_demo.py pipeline
+    uv run --with pillow --with pyte --with fonttools \
+        python scripts/record_demo.py pipeline
+
+(`fonttools` is real: `_load_faces` reads each font's cmap to know which
+face covers which codepoint, and it is not a Pillow dependency — the CI
+recording failed the first time precisely because this line used to omit
+it.)
 
 The README's sample output is ASCII pasted from a run, which cannot show the
 thing that matters: bars advancing, the heartbeat ticking, a nested bar

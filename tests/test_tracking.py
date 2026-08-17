@@ -12,45 +12,12 @@ import contextlib
 import logging
 import sys
 import threading
-from collections.abc import Iterator
 
 import pytest
 
 import lumberjack
 from lumberjack import tracking
-from lumberjack.schema import StoredRecord
-from lumberjack.store import SQLiteRecordStore
 from lumberjack.tracking import TASK_LOGGER_NAME, TICK_INTERVAL
-
-
-class _Session:
-    """A live `init()` plus a way to read back what it stored.
-
-    The pump is off and `read()` flushes explicitly, so nothing here waits on
-    a timer. The store is caller-supplied, so `shutdown()` leaves it open.
-    """
-
-    def __init__(self, store: SQLiteRecordStore) -> None:
-        self._store = store
-
-    def read(self) -> list[StoredRecord]:
-        lumberjack.flush()
-        return [r for r in self._store.recent() if r.task_event]
-
-    def events(self) -> list[tuple[str | None, str | None]]:
-        return [(r.task_event, r.task_label) for r in self.read()]
-
-
-@pytest.fixture
-def session() -> Iterator[_Session]:
-    store = SQLiteRecordStore(":memory:")
-    lumberjack.init(store=store, output_mode="plain", flush_interval=0)
-    try:
-        yield _Session(store)
-    finally:
-        lumberjack.shutdown()
-        store.close()
-
 
 # --- the inert case: no init() ---------------------------------------------
 
@@ -120,6 +87,19 @@ def test_progress_columns_carry_the_absolute_count(session):
         (40, 100),
         (40, 100),
     ]
+
+
+def test_advance_takes_a_step_size(session):
+    with lumberjack.task("batched", total=100) as t:
+        t.advance(25)
+    assert session.read()[-1].progress_current == 25
+
+
+def test_set_progress_can_revise_the_total(session):
+    with lumberjack.task("resized") as t:
+        t.set_progress(3, total=30)
+    end = session.read()[-1]
+    assert (end.progress_current, end.progress_total) == (3, 30)
 
 
 def test_the_end_row_carries_the_final_count(session):
@@ -198,15 +178,15 @@ def test_a_failing_task_records_the_exception_at_error(session):
     assert "boom" in end.message
 
 
-def test_a_level_the_logger_filters_out_emits_nothing(session):
-    """`isEnabledFor` gates the record, as it would for any other log call."""
-    logging.getLogger(TASK_LOGGER_NAME).setLevel(logging.CRITICAL)
-    try:
-        with lumberjack.task("quiet"):
-            pass
-        assert session.events() == []
-    finally:
-        logging.getLogger(TASK_LOGGER_NAME).setLevel(logging.NOTSET)
+def test_the_failure_row_carries_a_traceback(session):
+    """The one record type with an exception in hand should fill the column
+    the schema keeps for one."""
+    with pytest.raises(ValueError):
+        with lumberjack.task("doomed"):
+            raise ValueError("boom")
+    end = session.read()[-1]
+    assert end.exc_text is not None
+    assert "ValueError: boom" in end.exc_text
 
 
 def test_ticks_are_sampled_rather_than_one_row_per_call(session):
@@ -225,28 +205,19 @@ def test_ticks_are_sampled_rather_than_one_row_per_call(session):
     assert handler is not None and handler.dropped == 0
 
 
-def test_layering_sends_task_events_to_the_application_too(capsys):
+def test_layering_sends_task_events_to_the_application_too(capsys, make_session):
     """Documented, and a surprise worth pinning: under `replace_handlers=False`
     the application asked to layer, so it sees task events as well."""
     root = logging.getLogger()
     handler = logging.StreamHandler()
     root.addHandler(handler)
-    store = SQLiteRecordStore(":memory:")
-    lumberjack.init(
-        store=store,
-        output_mode="plain",
-        flush_interval=0,
-        replace_handlers=False,
-    )
     try:
-        with lumberjack.task("shared"):
-            pass
-        lumberjack.flush()
-        assert [r.task_event for r in store.recent()] == ["start", "end"]
+        with make_session(replace_handlers=False) as live:
+            with lumberjack.task("shared"):
+                pass
+            assert [event for event, _ in live.events()] == ["start", "end"]
     finally:
-        lumberjack.shutdown()
         root.removeHandler(handler)
-        store.close()
     assert "task start: shared" in capsys.readouterr().err
 
 
@@ -321,6 +292,14 @@ def test_nesting_unwinds_in_order():
         assert d.parent_task_id is None
 
 
+def test_a_subtask_takes_its_own_total(session):
+    with lumberjack.task("parent") as parent:
+        with parent.subtask("child", total=5) as child:
+            child.advance()
+    rows = [r for r in session.read() if r.task_label == "child"]
+    assert rows[-1].progress_total == 5
+
+
 # --- lifecycle --------------------------------------------------------------
 
 
@@ -385,6 +364,17 @@ def test_exiting_in_a_different_context_does_not_mask_the_real_exception():
     asyncio.run(main())
 
 
+def test_exiting_without_entering_is_harmless(session):
+    """Reachable for real: `contextlib.ExitStack.push()` registers a handle's
+    `__exit__` without ever calling `__enter__`."""
+    handle = lumberjack.task("pushed")
+    with contextlib.ExitStack() as stack:
+        stack.push(handle)
+    assert session.events() == [("start", "pushed"), ("end", "pushed")]
+    with lumberjack.task("after") as after:
+        assert after.parent_task_id is None
+
+
 # --- track() ----------------------------------------------------------------
 
 
@@ -439,6 +429,28 @@ def test_track_ends_the_task_on_an_early_break(session):
     assert session.events()[-1] == ("end", "aborted")
 
 
+def test_closing_a_generator_early_is_not_a_task_failure(session):
+    """`GeneratorExit` is control flow, not an error: it is what a user's
+    generator receives when the consumer stops early. `track()`'s own early
+    `break` already records a clean end, and a bare `with` inside a generator
+    must agree — otherwise an ordinary `break` puts a traceback on the ERROR
+    channel, which is the one place a user's attention is guaranteed."""
+
+    def stage():
+        with lumberjack.task("stage"):
+            yield from range(100)
+
+    for item in stage():
+        if item == 2:
+            break
+
+    end = session.read()[-1]
+    assert end.task_event == "end"
+    assert end.level_name == "INFO"
+    assert end.exc_text is None
+    assert "failed" not in end.message
+
+
 def test_track_ends_the_task_when_the_body_raises(session):
     with pytest.raises(ValueError):
         for _ in lumberjack.track(range(100), name="doomed"):
@@ -474,11 +486,13 @@ def test_track_without_init_emits_nothing(capsys):
     root = logging.getLogger()
     handler = logging.StreamHandler()
     root.addHandler(handler)
+    prev_level = root.level
     root.setLevel(logging.DEBUG)
     try:
         assert list(lumberjack.track([1, 2], name="quiet")) == [1, 2]
     finally:
         root.removeHandler(handler)
+        root.setLevel(prev_level)
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
 
@@ -563,6 +577,32 @@ def test_a_cross_context_exit_does_not_orphan_an_enclosing_task(session):
     assert seen and seen[0] is not None, "the enclosing task was orphaned"
 
 
+def test_a_handle_entered_inside_another_task_walks_back_to_it(session):
+    """The ambient walk follows where a handle was *entered*, not where it was
+    created. A handle built before the enclosing task has no creation-time
+    link to it, so walking `_parent` would step straight past a `with` block
+    that is still open and orphan the next task."""
+
+    def entering(handle):
+        with handle:
+            yield
+
+    def running(name):
+        with lumberjack.task(name):
+            yield
+
+    outside = lumberjack.task("built outside")
+    with lumberjack.task("enclosing") as enclosing:
+        first = entering(outside)
+        second = running("inner")
+        next(first)  # enters `outside` while `enclosing` is ambient
+        next(second)  # enters `inner`, whose parent is `outside`
+        first.close()  # out of order: reset skipped, `outside` ends
+        second.close()  # restores the ended `outside` as ambient
+        with lumberjack.task("after") as after:
+            assert after.parent_task_id == enclosing.task_id
+
+
 # --- concurrency ------------------------------------------------------------
 
 
@@ -631,129 +671,6 @@ def test_the_end_row_is_last_when_end_races_in_flight_advances(session, monkeypa
         assert events.count("end") == 1
 
 
-# --- level filtering --------------------------------------------------------
-
-
-def test_a_task_filtered_out_at_start_emits_no_rows_at_all():
-    """Filtering is per record and `end()` promotes to ERROR on failure, so
-    without an all-or-nothing gate a failing task under `init(level=WARNING)`
-    would write a lone `end` row with no `start` to anchor it."""
-    store = SQLiteRecordStore(":memory:")
-    lumberjack.init(
-        store=store, output_mode="plain", flush_interval=0, level=logging.WARNING
-    )
-    try:
-        with pytest.raises(ValueError):
-            with lumberjack.task("filtered"):
-                raise ValueError("boom")
-        lumberjack.flush()
-        assert [r for r in store.recent() if r.task_event] == []
-    finally:
-        lumberjack.shutdown()
-        store.close()
-
-
-# --- the remaining public surface -------------------------------------------
-
-
-def test_advance_takes_a_step_size(session):
-    with lumberjack.task("batched", total=100) as t:
-        t.advance(25)
-    assert session.read()[-1].progress_current == 25
-
-
-def test_set_progress_can_revise_the_total(session):
-    with lumberjack.task("resized") as t:
-        t.set_progress(3, total=30)
-    end = session.read()[-1]
-    assert (end.progress_current, end.progress_total) == (3, 30)
-
-
-def test_task_honours_an_explicit_level(session):
-    with lumberjack.task("chatty", level=logging.WARNING):
-        pass
-    assert {r.level_name for r in session.read()} == {"WARNING"}
-
-
-def test_a_subtask_inherits_its_parents_level(session):
-    with lumberjack.task("parent", level=logging.WARNING) as parent:
-        parent.subtask("child").end()
-    child = [r for r in session.read() if r.task_label == "child"]
-    assert child and {r.level_name for r in child} == {"WARNING"}
-
-
-def test_a_subtask_takes_its_own_total(session):
-    with lumberjack.task("parent") as parent:
-        with parent.subtask("child", total=5) as child:
-            child.advance()
-    rows = [r for r in session.read() if r.task_label == "child"]
-    assert rows[-1].progress_total == 5
-
-
-def test_the_failure_row_carries_a_traceback(session):
-    """The one record type with an exception in hand should fill the column
-    the schema keeps for one."""
-    with pytest.raises(ValueError):
-        with lumberjack.task("doomed"):
-            raise ValueError("boom")
-    end = session.read()[-1]
-    assert end.exc_text is not None
-    assert "ValueError: boom" in end.exc_text
-
-
-def test_exiting_without_entering_is_harmless(session):
-    """Reachable for real: `contextlib.ExitStack.push()` registers a handle's
-    `__exit__` without ever calling `__enter__`."""
-    handle = lumberjack.task("pushed")
-    with contextlib.ExitStack() as stack:
-        stack.push(handle)
-    assert session.events() == [("start", "pushed"), ("end", "pushed")]
-    with lumberjack.task("after") as after:
-        assert after.parent_task_id is None
-
-
-def test_a_level_raised_mid_task_still_leaves_the_start_row_anchored(session):
-    """The other side of the all-or-nothing gate: once a `start` row exists,
-    silencing the logger drops the later rows but cannot un-write it. A
-    reader sees a task that started and never finished — which is true —
-    rather than a contradiction."""
-    logger = logging.getLogger(TASK_LOGGER_NAME)
-    with lumberjack.task("interrupted") as t:
-        logger.setLevel(logging.CRITICAL)
-        try:
-            t.advance()
-        finally:
-            pass
-    logger.setLevel(logging.NOTSET)
-    assert session.events() == [("start", "interrupted")]
-
-
-def test_a_handle_entered_inside_another_task_walks_back_to_it(session):
-    """The ambient walk follows where a handle was *entered*, not where it was
-    created. A handle built before the enclosing task has no creation-time
-    link to it, so walking `_parent` would step straight past a `with` block
-    that is still open and orphan the next task."""
-
-    def entering(handle):
-        with handle:
-            yield
-
-    def running(name):
-        with lumberjack.task(name):
-            yield
-
-    outside = lumberjack.task("built outside")
-    with lumberjack.task("enclosing") as enclosing:
-        first = entering(outside)
-        second = running("inner")
-        next(first)  # enters `outside` while `enclosing` is ambient
-        next(second)  # enters `inner`, whose parent is `outside`
-        first.close()  # out of order: reset skipped, `outside` ends
-        second.close()  # restores the ended `outside` as ambient
-        with lumberjack.task("after") as after:
-            assert after.parent_task_id == enclosing.task_id
-
-
 def test_two_threads_cannot_both_enter_one_handle(session):
     """`__enter__` claims under the lock. Unsynchronized it is a
     check-then-act, and both threads passed — measured at 3 double-entries
@@ -790,23 +707,55 @@ def test_two_threads_cannot_both_enter_one_handle(session):
     assert len(rejected) == attempts
 
 
-def test_closing_a_generator_early_is_not_a_task_failure(session):
-    """`GeneratorExit` is control flow, not an error: it is what a user's
-    generator receives when the consumer stops early. `track()`'s own early
-    `break` already records a clean end, and a bare `with` inside a generator
-    must agree — otherwise an ordinary `break` puts a traceback on the ERROR
-    channel, which is the one place a user's attention is guaranteed."""
+# --- level filtering --------------------------------------------------------
 
-    def stage():
-        with lumberjack.task("stage"):
-            yield from range(100)
 
-    for item in stage():
-        if item == 2:
-            break
+def test_a_level_the_logger_filters_out_emits_nothing(session):
+    """`isEnabledFor` gates the record, as it would for any other log call."""
+    logging.getLogger(TASK_LOGGER_NAME).setLevel(logging.CRITICAL)
+    try:
+        with lumberjack.task("quiet"):
+            pass
+        assert session.events() == []
+    finally:
+        logging.getLogger(TASK_LOGGER_NAME).setLevel(logging.NOTSET)
 
-    end = session.read()[-1]
-    assert end.task_event == "end"
-    assert end.level_name == "INFO"
-    assert end.exc_text is None
-    assert "failed" not in end.message
+
+def test_a_task_filtered_out_at_start_emits_no_rows_at_all(make_session):
+    """Filtering is per record and `end()` promotes to ERROR on failure, so
+    without an all-or-nothing gate a failing task under `init(level=WARNING)`
+    would write a lone `end` row with no `start` to anchor it."""
+    with make_session(level=logging.WARNING) as live:
+        with pytest.raises(ValueError):
+            with lumberjack.task("filtered"):
+                raise ValueError("boom")
+        assert live.events() == []
+
+
+def test_task_honours_an_explicit_level(session):
+    with lumberjack.task("chatty", level=logging.WARNING):
+        pass
+    assert {r.level_name for r in session.read()} == {"WARNING"}
+
+
+def test_a_subtask_inherits_its_parents_level(session):
+    with lumberjack.task("parent", level=logging.WARNING) as parent:
+        parent.subtask("child").end()
+    child = [r for r in session.read() if r.task_label == "child"]
+    assert child and {r.level_name for r in child} == {"WARNING"}
+
+
+def test_a_level_raised_mid_task_still_leaves_the_start_row_anchored(session):
+    """The other side of the all-or-nothing gate: once a `start` row exists,
+    silencing the logger drops the later rows but cannot un-write it. A
+    reader sees a task that started and never finished — which is true —
+    rather than a contradiction."""
+    logger = logging.getLogger(TASK_LOGGER_NAME)
+    with lumberjack.task("interrupted") as t:
+        logger.setLevel(logging.CRITICAL)
+        try:
+            t.advance()
+        finally:
+            pass
+    logger.setLevel(logging.NOTSET)
+    assert session.events() == [("start", "interrupted")]

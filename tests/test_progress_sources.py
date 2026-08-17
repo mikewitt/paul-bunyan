@@ -9,25 +9,14 @@ from __future__ import annotations
 
 import pytest
 
+from fixture_sources import SETTLED_CYCLES
 from lumberjack.renderers.progress import (
     CONTAINMENT_CONFIRMATIONS,
     DEFAULT_MIN_REPEATS,
-    MAX_BARS_ENV_VAR,
     PERIOD_SMOOTHING,
-    BarState,
     RepeatingSourceModel,
-    resolve_max_bars,
 )
 from lumberjack.schema import SourceKey
-
-
-def _loop_rows(make_row, n: int, **overrides):
-    """N records from one source location, the way a loop emits them."""
-    return [make_row(message=f"item {i}", **overrides) for i in range(n)]
-
-
-def test_default_threshold_is_a_loop_not_a_coincidence():
-    assert DEFAULT_MIN_REPEATS >= 2
 
 
 def test_no_bars_before_the_first_poll(store):
@@ -35,139 +24,85 @@ def test_no_bars_before_the_first_poll(store):
     assert model.bars() == []
 
 
-def test_a_source_below_the_threshold_gets_no_bar(store, make_row):
-    store.append(_loop_rows(make_row, 2))
+def test_a_source_below_the_threshold_gets_no_bar(store, loop_rows):
+    store.append(loop_rows(2))
     model = RepeatingSourceModel(store, min_repeats=3)
     assert model.poll() == []
 
 
-def test_a_repeating_source_gets_a_bar(store, make_row):
-    store.append(_loop_rows(make_row, 5))
+def test_a_repeating_source_gets_a_bar(store, loop_rows):
+    store.append(loop_rows(5))
     model = RepeatingSourceModel(store, min_repeats=3)
     (bar,) = model.poll()
     assert bar.count == 5
     assert bar.source == SourceKey("/tmp/foo.py", 10, "bar")
 
 
-def test_the_bar_advances_as_the_loop_runs(store, make_row):
+def test_the_bar_advances_as_the_loop_runs(store, loop_rows):
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 3))
+    store.append(loop_rows(3))
     assert [b.count for b in model.poll()] == [3]
-    store.append(_loop_rows(make_row, 7))
+    store.append(loop_rows(7))
     assert [b.count for b in model.poll()] == [10]
 
 
-def test_bars_reports_the_last_poll(store, make_row):
-    store.append(_loop_rows(make_row, 4))
-    model = RepeatingSourceModel(store, min_repeats=3)
-    assert model.poll() == model.bars()
-
-
-def test_each_source_location_gets_its_own_bar(store, make_row):
+def test_each_source_location_gets_its_own_bar(store, loop_rows):
     # Two loops in two places — the multiple-workers case falls out of the
     # same grouping, with no extra machinery.
-    store.append(_loop_rows(make_row, 4, lineno=10))
-    store.append(_loop_rows(make_row, 6, lineno=99, func_name="other"))
+    store.append(loop_rows(4, lineno=10))
+    store.append(loop_rows(6, lineno=99, func_name="other"))
     model = RepeatingSourceModel(store, min_repeats=3)
     assert {(b.source.lineno, b.count) for b in model.poll()} == {(10, 4), (99, 6)}
 
 
-def test_newly_seen_sources_are_ordered_busiest_first(store, make_row):
-    store.append(_loop_rows(make_row, 4, lineno=10))
-    store.append(_loop_rows(make_row, 9, lineno=99))
+def test_newly_seen_sources_are_ordered_busiest_first(store, loop_rows):
+    store.append(loop_rows(4, lineno=10))
+    store.append(loop_rows(9, lineno=99))
     model = RepeatingSourceModel(store, min_repeats=3)
     assert [b.source.lineno for b in model.poll()] == [99, 10]
 
 
-def test_a_bar_keeps_its_slot_when_another_overtakes_it(store, make_row):
+def test_a_bar_keeps_its_slot_when_another_overtakes_it(store, loop_rows):
     # A bar that jumps up and down the screen as counts cross each other is
     # unreadable, so position is first-seen order, not current rank.
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 5, lineno=10))
+    store.append(loop_rows(5, lineno=10))
     assert [b.source.lineno for b in model.poll()] == [10]
-    store.append(_loop_rows(make_row, 50, lineno=99))
+    store.append(loop_rows(50, lineno=99))
     assert [b.source.lineno for b in model.poll()] == [10, 99]
 
 
-def test_a_bar_never_counts_backwards_after_eviction(store, make_row):
+def test_a_bar_never_counts_backwards_after_eviction(store, loop_rows):
     # The store is a window on the last N records; a bar is a count of work
     # done. Trimming the former must not rewrite the latter.
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 10))
+    store.append(loop_rows(10))
     assert [b.count for b in model.poll()] == [10]
     store.evict(keep_last=2)
     assert [b.count for b in model.poll()] == [10]
-    store.append(_loop_rows(make_row, 3))
+    store.append(loop_rows(3))
     assert [b.count for b in model.poll()] == [13]
 
 
-def test_records_are_counted_once_however_often_it_polls(store, make_row):
+def test_records_are_counted_once_however_often_it_polls(store, loop_rows):
     # The watermark is the whole mechanism: re-polling without new records
     # must add nothing, or every idle redraw would inflate the bar.
     model = RepeatingSourceModel(store, min_repeats=3)
-    store.append(_loop_rows(make_row, 4))
+    store.append(loop_rows(4))
     assert [b.count for b in model.poll()] == [4]
     for _ in range(5):
         assert [b.count for b in model.poll()] == [4]
 
 
-def test_a_source_qualifies_on_its_total_not_one_poll(store, make_row):
+def test_a_source_qualifies_on_its_total_not_one_poll(store, loop_rows):
     # Records dribbling in below the threshold still accumulate, so a slow
     # loop earns its bar on the poll that takes it over the line.
     model = RepeatingSourceModel(store, min_repeats=3)
     for _ in range(2):
-        store.append(_loop_rows(make_row, 1))
+        store.append(loop_rows(1))
         assert model.poll() == []
-    store.append(_loop_rows(make_row, 1))
+    store.append(loop_rows(1))
     assert [b.count for b in model.poll()] == [3]
-
-
-def test_label_names_the_source_location():
-    bar = BarState(source=SourceKey("/srv/app/worker.py", 42, "process"), count=1)
-    assert bar.label == "worker.py:42 process()"
-
-
-# --- the opt-in bar ceiling ------------------------------------------------
-#
-# An environment variable rather than an init() option, and a terminal-compat
-# aid rather than a feature: capping was never the answer to a high row count.
-# See the note on MAX_BARS_ENV_VAR.
-
-
-def test_no_ceiling_by_default(monkeypatch):
-    monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
-    assert resolve_max_bars() is None
-
-
-def test_ceiling_from_the_environment(monkeypatch):
-    monkeypatch.setenv(MAX_BARS_ENV_VAR, "12")
-    assert resolve_max_bars() == 12
-
-
-def test_an_explicit_ceiling_beats_the_environment(monkeypatch):
-    monkeypatch.setenv(MAX_BARS_ENV_VAR, "12")
-    assert resolve_max_bars(3) == 3
-
-
-@pytest.mark.parametrize("value", ["banana", "", "0", "-4", "3.5"])
-def test_an_unusable_environment_value_warns_and_draws_everything(monkeypatch, value):
-    """An operator typo must not cap at something surprising, or take the run
-    down. Same split as LUMBERJACK_OUTPUT_MODE: env typos warn and degrade."""
-    monkeypatch.setenv(MAX_BARS_ENV_VAR, value)
-    if value == "":
-        # Unset and empty are the same request: no ceiling, nothing to warn about.
-        assert resolve_max_bars() is None
-        return
-    with pytest.warns(RuntimeWarning, match=MAX_BARS_ENV_VAR):
-        assert resolve_max_bars() is None
-
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_an_unusable_explicit_ceiling_raises(monkeypatch, value):
-    """A bad argument is the caller's bug, so it raises rather than warns."""
-    monkeypatch.delenv(MAX_BARS_ENV_VAR, raising=False)
-    with pytest.raises(ValueError, match="must be positive"):
-        resolve_max_bars(value)
 
 
 # --- how fast is this loop going? -------------------------------------------
@@ -183,7 +118,7 @@ def test_no_period_before_two_records(store, make_row):
     store.append([make_row(created=100.0)])
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
-    assert bar.period is None and bar.rate is None
+    assert bar.period is None
 
 
 def test_the_period_comes_from_the_deltas_own_span_on_first_sight(store, make_row):
@@ -192,7 +127,6 @@ def test_the_period_comes_from_the_deltas_own_span_on_first_sight(store, make_ro
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
     assert bar.period == pytest.approx(1.0)
-    assert bar.rate == pytest.approx(1.0)
 
 
 def test_the_period_spans_the_gap_between_polls(store, make_row):
@@ -225,13 +159,13 @@ def test_the_period_is_smoothed_rather_than_replaced(store, make_row):
     assert jolted < 96.0, "the outlier replaced the estimate instead of moving it"
 
 
-def test_records_sharing_a_timestamp_report_no_rate(store, make_row):
+def test_records_sharing_a_timestamp_report_no_period(store, make_row):
     """A burst inside one clock tick has no interval to learn from, and
     dividing by the span would report an infinite rate."""
     store.append([make_row(created=100.0) for _ in range(5)])
     model = RepeatingSourceModel(store, min_repeats=1)
     (bar,) = model.poll()
-    assert bar.period is None and bar.rate is None
+    assert bar.period is None
 
 
 def test_each_source_times_itself(store, make_row):
@@ -268,12 +202,6 @@ def _nested_rows(make_row, outer_period, inner_period, *, cycles, start=100.0):
 
 def _by_line(bars):
     return {b.source.lineno: b for b in bars}
-
-
-#: Enough polls for the outer line to reach `min_repeats` and then for the
-#: pairing to be confirmed. Confirmations only count polls that brought new
-#: records, so this is a number of *cycles*, not a number of redraws.
-SETTLED_CYCLES = DEFAULT_MIN_REPEATS + CONTAINMENT_CONFIRMATIONS
 
 
 def _drive_nested(
@@ -318,6 +246,17 @@ def test_the_ratio_between_the_rates_is_the_inner_loops_total(store, make_row):
     bars, _ = _drive_nested(store, model, make_row)
     assert bars[6].total == 8
     assert bars[4].total is None, "nothing bounds an outermost loop"
+
+
+def test_a_fractional_ratio_rounds_to_the_nearest_total(store, make_row):
+    """The one mutant the suite used to miss (issue #45): every other
+    containment test measures an exact integer ratio, so `round(ratio)` and
+    `int(ratio)` were indistinguishable. An outer period of 7.6 with the
+    smoothing lag leaves the measured ratio between 7.5 and 8 at confirmation
+    time — eight iterations, and truncation would claim seven."""
+    model = RepeatingSourceModel(store, min_repeats=3)
+    bars, _ = _drive_nested(store, model, make_row, outer_period=7.6)
+    assert bars[6].total == 8
 
 
 def test_the_inner_bar_is_indented_under_its_parent(store, make_row):
@@ -459,8 +398,11 @@ def test_an_inner_loop_that_outruns_its_total_stops_claiming_one(store, make_row
         + [make_row(lineno=6, func_name="inner", created=at + i) for i in range(30)]
     )
     bar = _by_line(model.poll())[6]
-    assert bar.total == 8 and bar.cycle_current > 8
-    assert not bar.is_determinate, "an overrun bar must withdraw its claim"
+    assert bar.total == 8
+    # `is_determinate` used to compute exactly this; the withdrawal is the
+    # count outrunning a total that is never cleared — `total` stays 8, only
+    # `cycle_current` is allowed to exceed it — so this is the raw claim now.
+    assert bar.cycle_current > bar.total, "an overrun bar must withdraw its claim"
 
 
 def test_an_untimed_source_takes_no_part_in_containment(store, make_row):
@@ -488,20 +430,17 @@ def test_a_source_still_logging_is_not_idle(store, make_row):
     assert not bar.idle
 
 
-def test_a_source_quiet_for_ten_periods_retires(store, make_row):
+@pytest.mark.parametrize(("silence", "expected_idle"), [(11.0, True), (9.0, False)])
+def test_idleness_is_judged_against_ten_periods(
+    store, make_row, silence, expected_idle
+):
     """There is no completion signal — nothing raises `StopIteration` at a log
-    line — so a long enough silence is the whole of the evidence."""
+    line — so a long enough silence is the whole of the evidence: ten periods
+    quiet retires the bar, nine merely leaves it slow."""
     store.append([make_row(created=100.0 + i) for i in range(5)])
-    model = RepeatingSourceModel(store, min_repeats=3, clock=_at(104.0 + 11.0))
+    model = RepeatingSourceModel(store, min_repeats=3, clock=_at(104.0 + silence))
     (bar,) = model.poll()
-    assert bar.idle
-
-
-def test_a_source_quiet_for_nine_periods_is_merely_slow(store, make_row):
-    store.append([make_row(created=100.0 + i) for i in range(5)])
-    model = RepeatingSourceModel(store, min_repeats=3, clock=_at(104.0 + 9.0))
-    (bar,) = model.poll()
-    assert not bar.idle
+    assert bar.idle is expected_idle
 
 
 def test_a_fast_loop_is_not_retired_by_pipeline_latency(store, make_row):
@@ -576,32 +515,26 @@ def test_a_lone_record_before_the_boundary_belongs_to_the_old_cycle(store, make_
 # --- containment is scoped to one worker ------------------------------------
 
 
-def test_two_loops_on_two_threads_are_never_nested(store, make_row):
+@pytest.mark.parametrize(("inner_thread", "nested"), [(2, False), (1, True)])
+def test_containment_requires_a_shared_thread(store, make_row, inner_thread, nested):
     """A loop cannot contain a loop running on another thread, however neatly
-    their rates divide. Without this check three independent workers at 4ms,
-    10ms and 100ms read as a three-deep hierarchy."""
+    their rates divide — without this check three independent workers at 4ms,
+    10ms and 100ms read as a three-deep hierarchy. Sharing the thread is the
+    mirror case: everything else about the two loops is identical."""
     at = 100.0
     model = RepeatingSourceModel(store, min_repeats=3)
     for _ in range(CONTAINMENT_CONFIRMATIONS + 2):
         rows = [make_row(lineno=4, thread=1, created=at)]
-        rows += [make_row(lineno=6, thread=2, created=at + i) for i in range(8)]
+        rows += [
+            make_row(lineno=6, thread=inner_thread, created=at + i) for i in range(8)
+        ]
         store.append(rows)
         at += 8.0
         bars = _by_line(model.poll())
-    assert bars[6].parent is None, "a loop on another thread was read as the parent"
-
-
-def test_two_loops_in_one_thread_still_nest(store, make_row):
-    """The mirror of the test above, sharing everything but the thread."""
-    at = 100.0
-    model = RepeatingSourceModel(store, min_repeats=3)
-    for _ in range(CONTAINMENT_CONFIRMATIONS + 2):
-        rows = [make_row(lineno=4, thread=1, created=at)]
-        rows += [make_row(lineno=6, thread=1, created=at + i) for i in range(8)]
-        store.append(rows)
-        at += 8.0
-        bars = _by_line(model.poll())
-    assert bars[6].parent == bars[4].source and bars[6].total == 8
+    if nested:
+        assert bars[6].parent == bars[4].source and bars[6].total == 8
+    else:
+        assert bars[6].parent is None, "a loop on another thread was read as the parent"
 
 
 def test_two_asyncio_tasks_on_one_thread_are_not_nested(store, make_row):

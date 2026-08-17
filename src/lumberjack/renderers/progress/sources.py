@@ -8,20 +8,20 @@ measures each source's period, sorts sources by period to recover which loop
 encloses which, takes the ratio between an enclosing loop and an enclosed one
 as the inner loop's iteration count, and retires a bar whose source has gone
 quiet.
-
-The bar ceiling lives here too, because sources are what it counts.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import os
 import time
-import warnings
 from typing import TYPE_CHECKING
 
 from lumberjack.renderers.progress.heartbeat import HeartbeatState, SessionHeartbeat
-from lumberjack.renderers.progress.smoothing import _smoothed
+from lumberjack.renderers.progress.smoothing import (
+    _smoothed,
+    advance_watermark,
+    fold_interval,
+)
 from lumberjack.schema import SourceKey
 from lumberjack.store import WorkerKey
 
@@ -39,54 +39,24 @@ DEFAULT_MIN_REPEATS = 3
 #: must still cost five redraws a second.
 DEFAULT_REFRESH_INTERVAL = 0.2
 
-#: Opt-in ceiling on how many rows the display draws. Unset means no ceiling.
-#:
-#: Deliberately an environment variable rather than an `init()` option, and
-#: deliberately absent from the README: it is a debug and terminal-compat aid,
-#: not something to reach for in production. Capping was always the wrong
-#: answer to a high row count, because a high row count was a *symptom* — the
-#: display had inherited its unit from the grouping key and was drawing one row
-#: per call site. `loops.LoopRowModel` treats that instead, by merging sibling
-#: call sites into the loop they narrate; what remains is allocated by
-#: relevance rather than truncated. This stays for the terminal that cannot
-#: cope regardless.
-MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
-
-
-def resolve_max_bars(override: int | None = None) -> int | None:
-    """The bar ceiling: `override`, else the environment, else None.
-
-    Follows the same split as `OutputModeDetector`: an out-of-range argument
-    is a caller's bug and raises, while a bad environment variable is a typo
-    by whoever launched the process, so it warns and carries on uncapped.
-    """
-    if override is not None:
-        if override <= 0:
-            raise ValueError(f"max_bars must be positive, got {override!r}")
-        return override
-
-    raw = os.environ.get(MAX_BARS_ENV_VAR)
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        value = 0  # falls into the warning below
-    if value <= 0:
-        warnings.warn(
-            f"{MAX_BARS_ENV_VAR}={raw!r} is not a positive integer; "
-            f"drawing every bar.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
-    return value
-
-
 #: How close two sources' periods must be to count as the same loop body.
 #: `logger.debug` on line 6 and line 12 of one loop fire once each per
 #: iteration, so their periods match to within scheduling noise.
 SAME_LOOP_TOLERANCE = 0.15
+
+
+def _same_loop_period(one: float, other: float) -> bool:
+    """Whether two periods are close enough to be two lines in one body.
+
+    The same tolerance `_levels()` cuts levels on below, and for the same
+    reason: `logger.debug` on line 6 and line 12 of one loop fire once each
+    per iteration, so their periods match to within scheduling noise. Shared
+    with `loops.LoopRowModel`'s runtime-fallback grouping, which asks the
+    identical question about two sources it cannot place with the AST.
+    """
+    slower, faster = max(one, other), min(one, other)
+    return slower > 0 and faster >= slower * (1 - SAME_LOOP_TOLERANCE)
+
 
 #: The smallest period ratio that means nesting rather than noise. Below 2 an
 #: "inner loop" would run fewer than two iterations per outer one, which no
@@ -164,29 +134,6 @@ class BarState:
     #: containment scoping needs and the same fact display-side grouping needs
     #: — two sources cannot be one loop body if no worker ever ran both.
     workers: frozenset[WorkerKey] = frozenset()
-
-    @property
-    def rate(self) -> float | None:
-        """Records per second, or None while the period is unknown."""
-        if self.period is None or self.period <= 0:
-            return None
-        return 1.0 / self.period
-
-    @property
-    def is_determinate(self) -> bool:
-        """Whether the bar may claim a percentage.
-
-        A total the count has already blown past is withdrawn rather than
-        clamped — see CLAUDE.md's "Pulse means no claim" decision for why
-        that is the one exception to confidence only increasing.
-        """
-        return self.total is not None and self.cycle_current <= self.total
-
-    @property
-    def label(self) -> str:
-        """Human-readable source location, e.g. `worker.py:42 process()`."""
-        name = os.path.basename(self.source.pathname)
-        return f"{name}:{self.source.lineno} {self.source.func_name}()"
 
 
 class RepeatingSourceModel:
@@ -305,34 +252,25 @@ class RepeatingSourceModel:
     def _update_period(self, source: SourceKey, count: int, delta: SourceDelta) -> None:
         """Fold this delta's timing into the source's interval estimate.
 
-        Two cases, both exact rather than approximate:
-
-        * We have seen this source before, so the window runs from the last
-          record we knew about to the newest in this delta, and `count`
-          records fell inside it — one interval each.
-        * First sighting, so the only window available is the delta's own
-          span, which contains `count - 1` intervals between its `count`
-          records. A delta of one record establishes nothing and is skipped.
+        See `smoothing.fold_interval` for the two cases (seen before / first
+        sighting) and `smoothing.advance_watermark` for why the stored
+        timestamp only ever moves forward: several workers can land in one
+        delta, so a later poll's newest record for this source can be older
+        than an earlier poll's, and writing it unguarded would inflate the
+        next span with time already counted.
 
         Smoothed rather than replaced, because a single slow iteration should
         not make the displayed rate lurch.
         """
-        # `last_at` carries the same keys as `counts` by construction, so a
-        # source in the delta always has a timestamp here.
+        # `last_at` and `first_at` carry the same keys as `counts` by
+        # construction, so a source in the delta always has timestamps here.
         last_at = delta.last_at[source]
         previous = self._last_at.get(source)
-        self._last_at[source] = last_at
-        if previous is not None:
-            span, intervals = last_at - previous, count
-        else:
-            if count < 2:
-                return
-            span, intervals = last_at - delta.first_at[source], count - 1
-        if span <= 0 or intervals <= 0:
-            # Records sharing a timestamp — a burst inside one clock tick, or
-            # a coarse clock. No interval to learn from, and dividing by the
-            # span would report an infinite rate.
+        self._last_at[source] = advance_watermark(previous, last_at)
+        folded = fold_interval(previous, last_at, delta.first_at[source], count)
+        if folded is None:
             return
+        span, intervals = folded
         self._period[source] = _smoothed(self._period.get(source), span / intervals)
 
     def _levels(self) -> list[list[SourceKey]]:
@@ -374,7 +312,7 @@ class RepeatingSourceModel:
         levels: list[list[SourceKey]] = []
         representative = 0.0
         for period, source in timed:
-            if levels and period >= representative * (1 - SAME_LOOP_TOLERANCE):
+            if levels and _same_loop_period(representative, period):
                 levels[-1].append(source)
             else:
                 levels.append([source])

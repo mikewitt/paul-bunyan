@@ -380,6 +380,16 @@ Jobs are independent — knowing *which* is broken beats making one wait on anot
 
 CodeQL and Codacy also run, both configured outside this workflow.
 
+A separate workflow, `demo-gif.yml`, re-records `docs/demo-pipeline.gif` on
+every PR that touches `src/`, `examples/` or the recorder, and uploads it as
+an artifact. It is a smoke test as much as a regeneration: it is the one
+check that runs the whole stack — `init()`, worker threads, the live
+display, teardown — under a real pty, so it failing while the suite is green
+flags something untested. The gif is deliberately *not* committed back
+(the read-only-token rule below applies to it too); refreshing the README's
+copy means downloading the artifact and committing it by hand. It is not a
+required check.
+
 ### Releasing
 
 `.github/workflows/release.yml`, separate from CI because it runs on different events and needs a permission CI must never have.

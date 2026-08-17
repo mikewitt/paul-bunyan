@@ -54,9 +54,9 @@ from lumberjack.renderers.progress.layout import depth_first_order
 from lumberjack.renderers.progress.position import CyclePosition, CyclePositionModel
 from lumberjack.renderers.progress.sources import (
     DEFAULT_MIN_REPEATS,
-    SAME_LOOP_TOLERANCE,
     BarState,
     RepeatingSourceModel,
+    _same_loop_period,
 )
 from lumberjack.renderers.progress.templates import TemplateIndex, describe_template
 from lumberjack.schema import SourceKey
@@ -134,28 +134,6 @@ class LoopRow:
     def is_determinate(self) -> bool:
         """Whether the bar may claim a percentage. See `BarState`."""
         return self.total is not None and self.cycle_current <= self.total
-
-    @property
-    def location(self) -> str:
-        """`worker.py:42 process()` for the row's canonical member.
-
-        The identity underneath the label, kept reachable because it is what
-        the label falls back to and what a reader cross-references against the
-        store.
-        """
-        name = os.path.basename(self.key.pathname)
-        return f"{name}:{self.key.lineno} {self.key.func_name}()"
-
-
-def _same_loop_period(one: float, other: float) -> bool:
-    """Whether two periods are close enough to be two lines in one body.
-
-    The same tolerance `RepeatingSourceModel._levels()` cuts levels on, and for
-    the same reason: `logger.debug` on line 6 and line 12 of one loop fire once
-    each per iteration, so their periods match to within scheduling noise.
-    """
-    slower, faster = max(one, other), min(one, other)
-    return slower > 0 and faster >= slower * (1 - SAME_LOOP_TOLERANCE)
 
 
 class LoopRowModel:
@@ -281,7 +259,7 @@ class LoopRowModel:
     def _group_for(
         self, bar: BarState, by_source: Mapping[SourceKey, BarState]
     ) -> _GroupId:
-        site = self._resolve_site(bar.source)
+        site = self._read_site(bar.source)
         if site is not None:
             loop_lineno = site.loop_lineno
             if loop_lineno is None:
@@ -331,23 +309,19 @@ class LoopRowModel:
             return False
         return static.analyze_file(source.pathname) is not None
 
-    def _resolve_site(self, source: SourceKey) -> static.CallSite | None:
+    def _read_site(self, source: SourceKey) -> static.CallSite | None:
         """The AST's view of this call site, or None if it is untrustworthy.
 
-        Stored rather than merely returned, because the veto in
-        `_corroborated()` needs it again for every row on every poll, and it
-        must get the same answer: the site is frozen with the grouping it
-        decided.
+        Cached on `self._sites` as it is resolved, because the veto in
+        `_corroborated()` needs the same answer again for every row on every
+        poll: the site is frozen with the grouping it decided.
 
         None covers every uncertain case at once — no source on disk, an
         unrecognised line, a template that did not survive to runtime, and
         genuine drift — because the caller does the same thing with all of
         them: fall back to what the timing says.
         """
-        self._sites[source] = site = self._read_site(source)
-        return site
-
-    def _read_site(self, source: SourceKey) -> static.CallSite | None:
+        self._sites[source] = None
         stored_msg = self._templates.template(source)
         if stored_msg is None:
             return None
@@ -362,6 +336,7 @@ class LoopRowModel:
         # happened not to catch.
         if site is None or site.func_name != source.func_name:
             return None
+        self._sites[source] = site
         return site
 
     # -- rows --------------------------------------------------------------
@@ -418,7 +393,7 @@ class LoopRowModel:
         return LoopRow(
             key=key,
             members=tuple(members),
-            label=self._label_for(key, members),
+            label=self._build_label(key, members),
             clock=clock.source,
             count=clock.count,
             period=clock.period,
@@ -473,35 +448,34 @@ class LoopRowModel:
         is exact, where the runtime answer is a guess that happens to be right
         most of the time.
         """
-        static_parent = self._static_parent(key)
-        if static_parent is not None:
+        enclosing = self._read_enclosing(key)
+        static_parent = (
+            self._group_key.get(enclosing) if enclosing is not None else None
+        )
+        if static_parent is not None and static_parent != key:
             return static_parent
         if clock.parent is None:
             return None
         parent = self._row_of.get(clock.parent)
         return None if parent == key else parent
 
-    def _static_parent(self, key: SourceKey) -> SourceKey | None:
-        enclosing = self._enclosing_group(key)
-        if enclosing is None:
-            return None
-        parent = self._group_key.get(enclosing)
-        return None if parent == key else parent
-
-    def _enclosing_group(self, key: SourceKey) -> _GroupId | None:
+    def _read_enclosing(self, key: SourceKey) -> _GroupId | None:
         """Which group would hold the loop lexically enclosing this row's.
 
-        Cached, and safe to cache, because the group it is derived from is
-        frozen: the answer is a property of one file at one moment, asked once.
-        Resolving it per poll instead would mean an `os.stat` per row per
-        redraw to re-ask a question whose inputs cannot move.
+        Cached on `self._enclosing`, and safe to cache, because the group it
+        is derived from is frozen: the answer is a property of one file at
+        one moment, asked once. Resolving it per poll instead would mean an
+        `os.stat` per row per redraw to re-ask a question whose inputs cannot
+        move.
+
+        `self._group_key` — which row that group became, if any — is
+        deliberately *not* folded in here and stays a fresh lookup at every
+        call site: unlike this answer, it grows as new rows qualify, so
+        caching it would freeze a row's parent at whichever poll first asked.
         """
         if key in self._enclosing:
             return self._enclosing[key]
-        self._enclosing[key] = enclosing = self._read_enclosing(key)
-        return enclosing
-
-    def _read_enclosing(self, key: SourceKey) -> _GroupId | None:
+        self._enclosing[key] = None
         group = self._group_of.get(key)
         if group is None or group.kind != "loop":
             return None
@@ -511,9 +485,11 @@ class LoopRowModel:
         loop = structure.loops.get(group.at.lineno)
         if loop is None or loop.parent is None:
             return None
-        return _GroupId(
+        enclosing = _GroupId(
             "loop", SourceKey(group.at.pathname, loop.parent, loop.func_name)
         )
+        self._enclosing[key] = enclosing
+        return enclosing
 
     def _corroborated(self, clock: BarState, parent: SourceKey) -> bool:
         """Whether the AST agrees the parent can lexically enclose the child.
@@ -552,16 +528,12 @@ class LoopRowModel:
         )
         return same_scope and parent_site.loop_lineno in child_site.loop_chain[:-1]
 
-    def _label_for(self, key: SourceKey, members: Sequence[SourceKey]) -> str:
-        cached = self._labels.get(key)
-        if cached is not None and cached[0] == len(members):
-            return cached[1]
-        label = self._build_label(key, members)
-        self._labels[key] = (len(members), label)
-        return label
-
     def _build_label(self, key: SourceKey, members: Sequence[SourceKey]) -> str:
         """The template for a single call site; the function for a merged loop.
+
+        Cached by membership size — a merge is the only thing that can change
+        the answer, so a cache hit costs one dict lookup and a comparison
+        rather than re-describing a template every poll.
 
         A merged row has several templates and no reason to prefer one, so it
         is named for the loop instead — `demo.py:188 run_siblings()`, the loop
@@ -574,15 +546,21 @@ class LoopRowModel:
         `foo.py bar()`. The absent number is the honest part — the row covers
         several lines and nothing here knows which one the `for` is on.
         """
-        name = os.path.basename(key.pathname)
+        cached = self._labels.get(key)
+        if cached is not None and cached[0] == len(members):
+            return cached[1]
         if len(members) > 1:
             group = self._group_of.get(key)
             if group is not None and group.kind == "loop":
-                return f"{name}:{group.at.lineno} {group.at.func_name}()"
-            return f"{name} {key.func_name}()"
-        template = self._templates.template(key)
-        described = describe_template(template) if template else ""
-        return described or f"{name}:{key.lineno} {key.func_name}()"
+                label = group.at.format()
+            else:
+                label = f"{os.path.basename(key.pathname)} {key.func_name}()"
+        else:
+            template = self._templates.template(key)
+            described = describe_template(template) if template else ""
+            label = described or key.format()
+        self._labels[key] = (len(members), label)
+        return label
 
     # -- order -------------------------------------------------------------
 

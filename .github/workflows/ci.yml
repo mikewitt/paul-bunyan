@@ -92,7 +92,8 @@ jobs:
     # Design principle 8: `pip install lumberjack` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
     # `test` installs every extra, so without this job no `except ImportError`
-    # guard in the package — rich_renderer.py's or otel.py's — ever runs in CI.
+    # guard in the package — rich_renderer.py's, rich_compat.py's or
+    # otel.py's — ever runs in CI.
     #
     # The job name is stale (it now guards three optional dependencies, not
     # one) but deliberately unchanged: `name:` is the check name GitHub
