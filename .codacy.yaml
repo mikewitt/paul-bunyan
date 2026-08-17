@@ -102,6 +102,22 @@ exclude_paths:
 # directly rather than shelling out to `git rev-parse`. It is kept in the
 # list because a benchmark is dev tooling either way, not because it still
 # has a finding.
+#
+# `pylint` is listed for one finding, and the engine is the whole lesson: the
+# same `exec` is reported by *both* bandit (B102) and pylint (W0122), so
+# excluding it from one engine and reading the remaining report as clean is a
+# mistake this file has now made once. Match on the finding, never on the tool
+# that happened to phrase it.
+#
+#   W0122  exec-used            — `tests/test_static.py` compiles a module of
+#                                 deliberately awkward multi-line log calls and
+#                                 runs it, so the assertion is against real
+#                                 `LogRecord`s. The AST keys a call site on the
+#                                 line the *attribute* ends on rather than on
+#                                 `Call.lineno`, and executing the source is
+#                                 what pins that against CPython instead of
+#                                 against a remembered rule. Same category as
+#                                 B101 above: the `exec` is the test.
 engines:
   bandit:
     exclude_paths:
@@ -114,6 +130,11 @@ engines:
       - "benchmarks/**"
       - "scripts/**"
   opengrep:
+    exclude_paths:
+      - "tests/**"
+      - "benchmarks/**"
+      - "scripts/**"
+  pylint:
     exclude_paths:
       - "tests/**"
       - "benchmarks/**"
