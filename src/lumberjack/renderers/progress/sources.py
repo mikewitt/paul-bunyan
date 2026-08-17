@@ -23,11 +23,12 @@ from typing import TYPE_CHECKING
 from lumberjack.renderers.progress.heartbeat import HeartbeatState, SessionHeartbeat
 from lumberjack.renderers.progress.smoothing import _smoothed
 from lumberjack.schema import SourceKey
+from lumberjack.store import WorkerKey
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from lumberjack.store import RecordStore, SourceDelta, WorkerKey
+    from lumberjack.store import RecordStore, SourceDelta
 
 #: How many times a source location must have logged before it earns a bar.
 #: Low on purpose: two hits is a coincidence, three is a loop.
@@ -154,6 +155,11 @@ class BarState:
     depth: int = 0
     #: Nothing has arrived for `IDLE_PERIODS` of this source's own period.
     idle: bool = False
+    #: Every concurrent worker this line has been seen on, accumulated over
+    #: the run. Reported rather than kept private because it is the same fact
+    #: containment scoping needs and the same fact display-side grouping needs
+    #: — two sources cannot be one loop body if no worker ever ran both.
+    workers: frozenset[WorkerKey] = frozenset()
 
     @property
     def rate(self) -> float | None:
@@ -484,14 +490,15 @@ class RepeatingSourceModel:
             self._cycle_base[source] = self._totals[source] - carried
 
     def bars(self) -> list[BarState]:
-        """The most recent poll's bars, in display order. Empty before `poll()`.
+        """The most recent poll's bars, in arrival order. Empty before `poll()`.
 
-        Display order stays first-qualified even once containment is known, so
-        an inner loop is drawn wherever it first earned a bar rather than
-        under the parent it is indented beneath. An inner loop always
-        qualifies first — it logs N times per outer iteration — so this is the
-        common case, not an edge one, and the indent can read as a rendering
-        bug. lumberjack: see issue #43
+        Arrival order — first-qualified — and not display order. The two used
+        to be the same thing, which is what made a nested row indent under
+        whichever unrelated loop happened to precede it. Laying rows out by
+        containment is `layout.depth_first_order()`'s job, and grouping call
+        sites into the loops a person actually wants to see is
+        `loops.LoopRowModel`'s; this list is one entry per *source location*,
+        which is the identity layer and stays exactly that.
         """
         now = self._clock()
         return [
@@ -506,6 +513,7 @@ class RepeatingSourceModel:
                 ),
                 depth=self._depth(source),
                 idle=self._is_idle(source, now),
+                workers=frozenset(self._workers.get(source, ())),
             )
             for source in self._shown
         ]

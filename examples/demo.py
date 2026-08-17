@@ -39,10 +39,13 @@ So every scenario states three things:
 - **today** — what lumberjack does with it now, observed rather than hoped
 - **should be** — what it is supposed to do instead
 
-All eight `should be` lines are now decided, which makes this file the
-readable form of the display spec: the prose lives in "What the display is
-for" in CLAUDE.md, and issues #8, #43, #53 and #54 carry the work. If a
-`today` line stops being true, this file has caught a change — update it.
+All eight `should be` lines are decided, which makes this file the readable
+form of the display spec: the prose lives in "What the display is for" in
+CLAUDE.md. Most of it is now built — one row per inferred loop, counting
+iterations, labelled by template, laid out by containment and collapsing when
+quiet (#8, #43, #56) — and what remains is #53's intra-iteration row and
+#54's polish. If a `today` line stops being true, this file has caught a
+change: update it, because those lines are observations rather than hopes.
 
 ## How to log so this works
 
@@ -370,11 +373,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="pipeline",
         stream="Four threads. Three flat loops and one genuinely nested pair.",
         today=(
-            "Five bars. The nested inner line infers its own total (20/20) from "
-            "the ratio to its parent, and is drawn indented directly beneath "
-            "that parent — the row moves there on the poll the containment is "
-            "confirmed (#43). The other four pulse: nothing in the stream says "
-            "how long they are."
+            "Five rows, each labelled with its message template — `fetched row "
+            "… from source table`. The nested inner line infers its own total "
+            "(20/20) from the ratio to its parent, is lexically corroborated by "
+            "the source, and is drawn indented directly beneath that parent "
+            "(#43). The other four pulse: nothing in the stream says how long "
+            "they are."
         ),
         should=(
             "This, and it is the reason this is still the demo to show someone. "
@@ -388,9 +392,10 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="sequence",
         stream="A slow loop; its body logs five distinct stages, once each.",
         today=(
-            "Five sibling bars, each ticking once per outer iteration (~1.5s). "
-            "No sub-iteration progress: equal periods mean no ratio, so no "
-            "total."
+            "One row for the loop — `demo.py:163 run_sequence()` — pulsing, "
+            "counting iterations (6, not the 30 records), ticking once per "
+            "~1.5s. The five call sites merged (#8). No sub-iteration progress "
+            "yet: that is the second row, and it is #53."
         ),
         should=(
             "Three rows. A **pulsing** bar for the outer loop — its total is "
@@ -412,16 +417,19 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         name="siblings",
         stream="One fast loop with four call sites in its body.",
-        today="Four separate bars, all at the same rate, for one loop.",
+        today=(
+            "One row, `demo.py:188 run_siblings()`, reading **400 iterations** "
+            "— the rows the code operated on, not the 1600 log calls that "
+            "described them. The four call sites are the identity underneath "
+            "it, and the store and the exit summary still report all 1600."
+        ),
         should=(
-            "One row, labelled by the enclosing function, with the four source "
-            "locations as identity underneath (#8). It counts **400** — the "
-            "rows the code operated on. Every call site here says `row %d`, so "
-            "the row is the thing making progress; that four lines narrate "
-            "each one is the author's choice and not something anybody asked "
-            "about. 1600 is the accidental number. No intra-iteration row: at "
-            "121/s it would be unreadable, which is the legibility criterion "
-            "deciding correctly that the extra row is not earned."
+            "This (#8). Every call site here says `row %d`, so the row is the "
+            "thing making progress; that four lines narrate each one is the "
+            "author's choice and not something anybody asked about. 1600 was "
+            "the accidental number. No intra-iteration row: at 120/s it would "
+            "be unreadable, which is the legibility criterion deciding "
+            "correctly that the extra row is not earned."
         ),
         run=run_siblings,
     ),
@@ -469,8 +477,8 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="bursty",
         stream="One loop, 80% fast iterations and 20% multi-second stalls.",
         today=(
-            "A bar that retires as idle during a stall and resurrects on the "
-            "next burst, with a rate that swings by an order of magnitude."
+            "A row that collapses to a mark during a stall and comes back on "
+            "the next burst, with a rate that swings by an order of magnitude."
         ),
         should=(
             "Annotate the rate as erratic when variance is high — `~3/s "
@@ -484,25 +492,25 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="phases",
         stream="Four loops in sequence, each finishing before the next starts.",
         today=(
-            "Four rows accumulate and finished ones read `idle`, which is the "
-            "intended behaviour. But the once-per-stage announcement line is "
-            "itself a slow repeating source, so containment reads it as an "
-            "enclosing loop: the live stage indents under it and is given a "
-            "total from that ratio — 49 for a stage that runs 40 times."
+            "A pulsing `stage …: …` row for the sequence, with the running "
+            "stage indented beneath it — also pulsing. The announcement line "
+            "is a slow repeating source and period ordering still reads it as "
+            "an enclosing loop, but the AST says the stage's loop is top-level "
+            "in another function, so the ratio's total (49 for a loop that runs "
+            "40 times) is withheld and the row claims nothing. Finished stages "
+            "collapse: no bar, a mark, their iteration count and `idle`, sorted "
+            "below the live rows most-recent-first."
         ),
         should=(
-            "A **pulsing** bar for the stage sequence, keyed on the 'stage N' "
-            "line, showing iterations and elapsed — with 'Stage' as the label "
-            "where it is parseable. Progress *within* the running stage is a "
-            "**spinner**, not a determinate bar: the 49 is fabricated and a "
-            "spinner claims nothing. Previous stages collapse when the "
-            "announcement line fires again, which is the signal that one "
-            "ended. A program with no announcement line gets no collapse "
-            "signal and is deliberately not handled — the linter (#40) should "
-            "point out the missing line, since adding it is idiomatic logging "
-            "rather than a lumberjack idiom. Telling 'A encloses B' from 'A "
-            "precedes B' is unlikely to be solvable from logs alone; "
-            "`track()` settles it, and cleverer inference will not."
+            "This. The remaining piece is the *label*: 'stage …: …' is the "
+            "template with its specifiers substituted, where 'Stage 4 of 4' "
+            "would need the data back. Telling 'A encloses B' from 'A precedes "
+            "B' is not solvable from logs alone and is not solved here — it is "
+            "*refused*, which is the honest form. A program with no "
+            "announcement line gets no sequence row at all and is deliberately "
+            "not worked around; the linter (#40) should point out the missing "
+            "line, since adding it is idiomatic logging rather than a "
+            "lumberjack idiom."
         ),
         run=run_phases,
     ),
@@ -510,8 +518,9 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="wrapped",
         stream="Three unrelated loops, all routed through one logging helper.",
         today=(
-            "One bar. Every call site collapses onto the wrapper's `log.debug` "
-            "line, and its period is the interleaving of three loops."
+            "One row, labelled `…: item …` after the wrapper's own template. "
+            "Every call site collapses onto the wrapper's `log.debug` line, and "
+            "its period is the interleaving of three loops."
         ),
         should=(
             "Nothing, for now. It is bad practice, it is documented as such, "

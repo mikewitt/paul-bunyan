@@ -36,6 +36,7 @@ from lumberjack import (
 )
 from lumberjack.detect import OutputMode  # noqa: E402
 from lumberjack.handler import LumberjackHandler  # noqa: E402
+from lumberjack.renderers.progress import LoopRowModel  # noqa: E402
 from lumberjack.renderers.rich_renderer import (  # noqa: E402
     RichProgressRenderer,
     _relayout,
@@ -130,6 +131,30 @@ def test_the_loop_lines_never_scroll(rig: _Rig):
     assert "processing item" not in rig.output()
 
 
+def test_four_call_sites_in_one_loop_body_draw_one_row(rig: _Rig):
+    """`examples/demo.py siblings` in miniature, and the whole of #8.
+
+    Four lines narrating one loop are one loop. Source location is the right
+    *identity* for them and the wrong *display unit*, and the number a person
+    wants is the 40 rows the code worked through rather than the 160 log calls
+    that described them.
+    """
+    for row in range(40):
+        rig.logger.info("row %d: parsed", row)
+        rig.logger.info("row %d: schema validated", row)
+        rig.logger.info("row %d: enriched from cache", row)
+        rig.logger.info("row %d: emitted downstream", row)
+    rig.tick()
+
+    (loop,) = rig.renderer.rows()
+    assert loop.count == 40, "the row counted records rather than iterations"
+    assert len(loop.members) == 4
+    # And the identity layer is untouched by any of it: four call sites, 160
+    # records, which is what the store and the exit summary report.
+    assert len(rig.renderer.bars()) == 4
+    assert sum(bar.count for bar in rig.renderer.bars()) == 160
+
+
 def test_two_loops_get_two_bars(rig: _Rig):
     for i in range(5):
         rig.logger.info("reading %d", i)
@@ -179,11 +204,26 @@ def _capped_renderer(store: RecordStore, max_bars: int) -> RichProgressRenderer:
     )
 
 
+def _unrelated_loops(store: RecordStore, make_row, count: int, *, records: int = 3):
+    """`count` separate loops, each pacing itself differently.
+
+    Distinct periods are load-bearing here, not decoration. `/tmp/foo.py` has
+    no source on disk, so the row model falls back to the runtime signal —
+    equal periods plus a shared worker means one loop body — and sources that
+    all fire within the same microsecond satisfy that and merge into one row.
+    Correctly, and not what a test about the ceiling is asking.
+    """
+    for lineno in range(count):
+        step = lineno + 1
+        store.append(
+            [make_row(lineno=lineno, created=100.0 + i * step) for i in range(records)]
+        )
+
+
 def test_the_ceiling_bounds_what_is_drawn(store: RecordStore, make_row):
     renderer = _capped_renderer(store, max_bars=2)
     try:
-        for lineno in range(5):
-            store.append([make_row(lineno=lineno) for _ in range(3)])
+        _unrelated_loops(store, make_row, 5)
         renderer.refresh()
         assert len(renderer._tasks) == 2, "drew more bars than the ceiling allows"
     finally:
@@ -195,8 +235,7 @@ def test_the_ceiling_does_not_touch_the_counts(store: RecordStore, make_row):
     # the display. A capped run must not misreport what it captured.
     renderer = _capped_renderer(store, max_bars=2)
     try:
-        for lineno in range(5):
-            store.append([make_row(lineno=lineno) for _ in range(3)])
+        _unrelated_loops(store, make_row, 5)
         renderer.refresh()
         assert len(renderer.bars()) == 5
         assert sum(b.count for b in renderer.bars()) == 15
@@ -208,8 +247,7 @@ def test_the_ceiling_counts_what_it_hid(store: RecordStore, make_row):
     renderer = _capped_renderer(store, max_bars=2)
     try:
         assert renderer.suppressed_bars == 0
-        for lineno in range(5):
-            store.append([make_row(lineno=lineno) for _ in range(3)])
+        _unrelated_loops(store, make_row, 5)
         renderer.refresh()
         assert renderer.suppressed_bars == 3
     finally:
@@ -222,8 +260,7 @@ def test_no_ceiling_draws_everything(store: RecordStore, make_row, monkeypatch):
         store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
     )
     try:
-        for lineno in range(5):
-            store.append([make_row(lineno=lineno) for _ in range(3)])
+        _unrelated_loops(store, make_row, 5)
         renderer.refresh()
         assert len(renderer._tasks) == 5
         assert renderer.suppressed_bars == 0
@@ -238,8 +275,7 @@ def test_the_environment_sets_the_ceiling(store: RecordStore, make_row, monkeypa
         store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
     )
     try:
-        for lineno in range(4):
-            store.append([make_row(lineno=lineno) for _ in range(3)])
+        _unrelated_loops(store, make_row, 4)
         renderer.refresh()
         assert len(renderer._tasks) == 1
         assert renderer.suppressed_bars == 3
@@ -438,10 +474,33 @@ def test_the_bar_is_actually_drawn_on_a_terminal(
         store, stream=stream, min_repeats=3, refresh_interval=0
     )
     try:
-        store.append([make_row() for _ in range(5)])
+        store.append([make_row(msg="fetched row %d") for _ in range(5)])
         renderer.refresh()
-        assert "foo.py:10 bar()" in stream.getvalue()
-        assert "5 records" in stream.getvalue()
+        frame = _strip_ansi(stream.getvalue())
+        # The label is the stored template with its format specifiers
+        # substituted — a description of what the line does, rather than the
+        # file and line number it lives at (#56).
+        assert "fetched row …" in frame
+        # Iterations of the loop, not records captured (#8).
+        assert "5 iterations" in frame
+    finally:
+        renderer.close()
+
+
+def test_a_row_with_no_usable_template_falls_back_to_the_source_location(
+    as_terminal, store: RecordStore, make_row
+):
+    """`file:line func()` is what shipped before and is still the answer where
+    a template is missing — an empty `msg`, or one that survives to runtime as
+    a rendered f-string and so matches nothing. Nothing regresses."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(msg="") for _ in range(5)])
+        renderer.refresh()
+        assert "foo.py:10 bar()" in _strip_ansi(stream.getvalue())
     finally:
         renderer.close()
 
@@ -619,8 +678,8 @@ def test_named_bars_are_drawn_above_source_bars(task_rig):
     task_rig.stream.truncate(0)
     task_rig.tick()
     frame = _strip_ansi(task_rig.output())
-    assert "zzexact" in frame and "records" in frame
-    assert frame.index("zzexact") < frame.index("records"), "source bars drew first"
+    assert "zzexact" in frame and "iterations" in frame
+    assert frame.index("zzexact") < frame.index("iterations"), "source bars drew first"
 
 
 def test_a_task_that_overshoots_its_total_goes_back_to_pulsing(task_rig):
@@ -643,6 +702,11 @@ def test_a_task_that_overshoots_its_total_goes_back_to_pulsing(task_rig):
 # the model concluded, and says nothing it did not conclude.
 
 
+#: What the two rows in `_nested_frame` are labelled, which is their message
+#: template with the format specifier substituted (#56).
+_OUTER, _INNER = "outer batch …", "inner row …"
+
+
 def _nested_frame(store: RecordStore, make_row, *, polls: int) -> str:
     """Draw an outer loop on line 4 with an inner loop of eight on line 6."""
     stream = io.StringIO()
@@ -654,9 +718,17 @@ def _nested_frame(store: RecordStore, make_row, *, polls: int) -> str:
     at = time.time() - ((polls - 1) * 8.0 + 7.0)
     try:
         for _ in range(polls):
-            rows = [make_row(lineno=4, func_name="outer", created=at)]
+            rows = [
+                make_row(lineno=4, func_name="outer", msg="outer batch %d", created=at)
+            ]
             rows += [
-                make_row(lineno=6, func_name="inner", created=at + i) for i in range(8)
+                make_row(
+                    lineno=6,
+                    func_name="inner",
+                    msg="inner row %d",
+                    created=at + i,
+                )
+                for i in range(8)
             ]
             store.append(rows)
             at += 8.0
@@ -680,8 +752,8 @@ def test_an_inferred_inner_loop_is_indented_under_its_parent(
     as_terminal, store: RecordStore, make_row
 ):
     frame = _nested_frame(store, make_row, polls=5)
-    outer, inner = _line(frame, "foo.py:4"), _line(frame, "foo.py:6")
-    assert inner.index("foo.py:6") > outer.index("foo.py:4"), "the inner bar sits flush"
+    outer, inner = _line(frame, _OUTER), _line(frame, _INNER)
+    assert inner.index(_INNER) > outer.index(_OUTER), "the inner bar sits flush"
 
 
 # --- where a row is drawn (#43) --------------------------------------------
@@ -755,12 +827,32 @@ def test_a_nested_bar_moves_under_its_parent_when_containment_settles(
             # An unrelated loop on thread 2, fast enough to qualify on the
             # first poll and so to be registered before either of the others.
             rows = [
-                make_row(lineno=9, func_name="other", thread=2, created=at + i * 0.5)
+                make_row(
+                    lineno=9,
+                    func_name="other",
+                    msg="elsewhere %d",
+                    thread=2,
+                    created=at + i * 0.5,
+                )
                 for i in range(16)
             ]
-            rows.append(make_row(lineno=4, func_name="outer", thread=1, created=at))
+            rows.append(
+                make_row(
+                    lineno=4,
+                    func_name="outer",
+                    msg="outer batch %d",
+                    thread=1,
+                    created=at,
+                )
+            )
             rows += [
-                make_row(lineno=6, func_name="inner", thread=1, created=at + i)
+                make_row(
+                    lineno=6,
+                    func_name="inner",
+                    msg="inner row %d",
+                    thread=1,
+                    created=at + i,
+                )
                 for i in range(8)
             ]
             store.append(rows)
@@ -770,13 +862,78 @@ def test_a_nested_bar_moves_under_its_parent_when_containment_settles(
     finally:
         renderer.close()
 
-    rows_drawn = [ln for ln in re.split(r"[\r\n]", frame) if "foo.py:" in ln]
-    last = rows_drawn[-3:]
-    assert [ln.strip().split()[0] for ln in last] == [
-        "foo.py:9",
-        "foo.py:4",
-        "foo.py:6",
-    ], f"the child did not move under its parent: {last}"
+    labels = ("elsewhere …", _OUTER, _INNER)
+    drawn = [ln for ln in re.split(r"[\r\n]", frame) if any(x in ln for x in labels)]
+    last = [next(x for x in labels if x in ln) for ln in drawn[-3:]]
+    assert last == list(
+        labels
+    ), f"the child did not move under its parent: {drawn[-3:]}"
+
+
+def test_a_rows_clock_survives_growth_a_move_and_a_collapse(
+    as_terminal, store: RecordStore, make_row
+):
+    """Every way a row can change, in one sequence, against one `Task`.
+
+    A row's key is frozen at its first sighting and never migrates, because
+    the key is what the rich `Task` is filed under — and a recreated `Task`
+    silently restarts the elapsed clock of a loop that has been running for
+    ten minutes. Three things could have forced a recreation and none may:
+    a sibling call site joining the row, the row moving on screen, and the row
+    collapsing when it goes quiet.
+    """
+    clock = [1_000.0]
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    # The renderer's own model, rebuilt against a clock this test drives:
+    # retirement is measured against wall time and the sequence has to cross
+    # it. Nothing else about the renderer changes.
+    renderer._model = LoopRowModel(store, min_repeats=3, clock=lambda: clock[0])
+    try:
+        store.append(
+            [make_row(lineno=6, msg="parsed %d", created=990.0 + i) for i in range(4)]
+        )
+        renderer.refresh()
+        (task_id,) = renderer._tasks.values()
+        task = renderer._source_progress._tasks[task_id]
+        started = task.start_time
+
+        # A sibling call site at the same pace joins the row.
+        store.append(
+            [
+                make_row(lineno=7, msg="validated %d", created=994.0 + i)
+                for i in range(4)
+            ]
+        )
+        renderer.refresh()
+        (row,) = renderer.rows()
+        assert len(row.members) == 2, "the sibling did not merge"
+        assert len(renderer._tasks) == 1
+        assert renderer._tasks[row.key] == task_id, "the row's key migrated"
+
+        # An unrelated loop on another thread appears, and the first row goes
+        # quiet: a live subtree sorts above a collapsed one, so the row moves.
+        clock[0] = 1_050.0
+        store.append(
+            [
+                make_row(lineno=9, thread=2, msg="elsewhere %d", created=1_046.5 + i)
+                for i in range(4)
+            ]
+        )
+        renderer.refresh()
+        assert [r.idle for r in renderer.rows()] == [False, True]
+        assert renderer._source_progress.tasks[-1].id == task_id, "the row did not move"
+
+        assert renderer._source_progress._tasks[task_id] is task, "the Task was rebuilt"
+        assert task.start_time == started, "the elapsed clock restarted"
+        # Relabelled by the merge — a row covering two call sites is named for
+        # the loop, not for either template — and now collapsed.
+        line = _line(_strip_ansi(stream.getvalue()), "foo.py bar()")
+        assert "━" not in line and "idle" in line
+    finally:
+        renderer.close()
 
 
 def test_an_inferred_inner_loop_shows_its_position_in_the_cycle(
@@ -786,7 +943,7 @@ def test_an_inferred_inner_loop_shows_its_position_in_the_cycle(
     certain one, so both are shown — a reader can see the guess beside the
     fact it was made from."""
     frame = _nested_frame(store, make_row, polls=5)
-    assert "/8 · " in _line(frame, "foo.py:6")
+    assert "/8 · " in _line(frame, _INNER)
 
 
 def test_an_outermost_loop_never_claims_a_cycle(
@@ -795,8 +952,8 @@ def test_an_outermost_loop_never_claims_a_cycle(
     """Nothing encloses it, so nothing says how long it is. Pulsing forever is
     the correct rendering rather than a missing feature."""
     frame = _nested_frame(store, make_row, polls=5)
-    line = _line(frame, "foo.py:4")
-    assert "·" not in line and "records" in line
+    line = _line(frame, _OUTER)
+    assert "·" not in line and "iterations" in line
 
 
 def test_nothing_is_claimed_before_the_inference_settles(
@@ -806,7 +963,7 @@ def test_nothing_is_claimed_before_the_inference_settles(
     # its rate with the same "·", and it is not what this is about. One poll
     # in, only the inner line has repeated often enough to have a bar at all.
     frame = _nested_frame(store, make_row, polls=1)
-    assert "·" not in _line(frame, "foo.py:6"), "a total was drawn on first sight"
+    assert "·" not in _line(frame, _INNER), "a total was drawn on first sight"
 
 
 def test_a_loop_that_went_quiet_says_so(as_terminal, store: RecordStore, make_row):
@@ -817,9 +974,28 @@ def test_a_loop_that_went_quiet_says_so(as_terminal, store: RecordStore, make_ro
         store, stream=stream, min_repeats=3, refresh_interval=0
     )
     try:
-        store.append([make_row(created=100.0 + i) for i in range(5)])
+        store.append([make_row(msg="working %d", created=100.0 + i) for i in range(5)])
         renderer.refresh()
-        assert "idle" in _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "idle" in _line(_strip_ansi(stream.getvalue()), "working …")
+    finally:
+        renderer.close()
+
+
+def test_a_collapsed_row_draws_no_bar(as_terminal, store: RecordStore, make_row):
+    """A retired row stays — deleting it would empty the final frame — but it
+    stops holding forty columns of finished bar for work that ended. Once
+    every row has gone quiet the whole column is one character wide, which is
+    the frame a finished run leaves behind."""
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    try:
+        store.append([make_row(msg="working %d", created=100.0 + i) for i in range(5)])
+        renderer.refresh()
+        line = _line(_strip_ansi(stream.getvalue()), "working …")
+        assert "━" not in line, "a collapsed row still drew a full-width bar"
+        assert "5 iterations" in line, "collapsing must not hide what it counted"
     finally:
         renderer.close()
 
@@ -833,9 +1009,11 @@ def test_a_loop_still_running_shows_its_rate_instead(
     )
     now = time.time()
     try:
-        store.append([make_row(created=now - 0.4 + i * 0.1) for i in range(5)])
+        store.append(
+            [make_row(msg="working %d", created=now - 0.4 + i * 0.1) for i in range(5)]
+        )
         renderer.refresh()
-        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        line = _line(_strip_ansi(stream.getvalue()), "working …")
         assert "10/s" in line and "idle" not in line
     finally:
         renderer.close()
@@ -851,11 +1029,11 @@ def test_an_untimed_loop_shows_no_rate_at_all(
         store, stream=stream, min_repeats=3, refresh_interval=0
     )
     try:
-        store.append([make_row(created=100.0) for _ in range(5)])
+        store.append([make_row(msg="working %d", created=100.0) for _ in range(5)])
         renderer.refresh()
-        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        line = _line(_strip_ansi(stream.getvalue()), "working …")
         assert "/s" not in line and "idle" not in line
-        assert "5 records" in line
+        assert "5 iterations" in line
     finally:
         renderer.close()
 
@@ -936,14 +1114,16 @@ def test_a_retired_source_bar_that_resumes_stops_claiming_completion(
         store, stream=stream, min_repeats=3, refresh_interval=0
     )
     try:
-        store.append([make_row(created=100.0 + i) for i in range(5)])
+        store.append([make_row(msg="working %d", created=100.0 + i) for i in range(5)])
         renderer.refresh()
-        assert "idle" in _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        assert "idle" in _line(_strip_ansi(stream.getvalue()), "working …")
 
         now = time.time()
-        store.append([make_row(created=now - 0.4 + i * 0.1) for i in range(5)])
+        store.append(
+            [make_row(msg="working %d", created=now - 0.4 + i * 0.1) for i in range(5)]
+        )
         renderer.refresh()
-        line = _line(_strip_ansi(stream.getvalue()), "foo.py:10")
+        line = _line(_strip_ansi(stream.getvalue()), "working …")
         assert "idle" not in line
         assert "%" not in line, "a resumed bar kept the total that retiring gave it"
     finally:
@@ -1055,14 +1235,19 @@ def test_the_heartbeat_is_drawn_above_every_bar(live: _Rig, make_row):
     live.renderer.refresh()
 
     frame = _strip_ansi(live.output())
-    assert "records" in frame, "no source bar was drawn to sit under"
-    assert frame.index("events") < frame.index("records")
+    assert "iterations" in frame, "no source bar was drawn to sit under"
+    assert frame.index("events") < frame.index("iterations")
 
 
 def test_the_newest_line_is_echoed_once_rather_than_scrolled(live: _Rig):
     """The premise, restated for the row that carries a message: fifty log
     lines still produce one row, and it holds the newest of them rather than
-    all fifty."""
+    all fifty.
+
+    Counted on the *rendered* lines rather than on the template, because the
+    loop's bar is now labelled with the template itself (#56) — which is a
+    string none of the fifty records carries.
+    """
     for i in range(50):
         live.logger.info("processing item %d", i)
     live.tick()
@@ -1070,7 +1255,7 @@ def test_the_newest_line_is_echoed_once_rather_than_scrolled(live: _Rig):
     echoed = [
         line
         for line in re.split(r"[\r\n]", _strip_ansi(live.output()))
-        if "processing item" in line
+        if re.search(r"processing item \d", line)
     ]
     assert echoed, "the newest line is not shown anywhere"
     assert all(" event" in line for line in echoed), "the loop's lines scrolled"

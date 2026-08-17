@@ -113,7 +113,7 @@ def _store_count(db_path: Path) -> int:
 @_needs_rich
 def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
     # The Phase 1 premise, end to end in its own interpreter: 200 log lines in,
-    # no scrolling out, one bar naming the source location that produced them.
+    # no scrolling out, one bar for the loop that produced them.
     db_path = tmp_path / "records.db"
     result = _run_script(
         scripts_dir,
@@ -125,15 +125,21 @@ def test_a_logging_loop_becomes_a_bar_in_a_real_process(scripts_dir, tmp_path):
         },
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
-    stderr = result.stderr
+    stderr = result.stderr.decode(errors="replace")
     # Not "never appears": the session heartbeat echoes the newest line beside
     # its arrival count (#54), which is a row rewritten in place rather than
-    # 200 lines scrolling past. So the premise is that exactly one of them is
-    # on screen, and it is the last.
-    assert stderr.count(b"processing item") == 1, stderr
-    assert b"processing item 199" in stderr, stderr
-    assert b"loop_then_exit.py:" in stderr, stderr
-    assert b"200 records" in stderr, stderr
+    # 200 lines scrolling past. So the premise is that exactly one *rendered*
+    # line is on screen, and it is the last. The bar's own label is the
+    # message template, which is a different string and not one of the 200.
+    rendered = re.findall(r"processing item \d+", stderr)
+    assert rendered == ["processing item 199"], stderr
+    # The label is `record.msg` with its format specifiers substituted — the
+    # template stdlib kept separate from the data, needing no parsing of
+    # rendered text (#56).
+    assert "processing item …" in stderr, stderr
+    # Iterations of the loop, not records captured; the store below is where
+    # the record count is asked for.
+    assert "200 iterations" in stderr, stderr
     # Lossy display, lossless store.
     assert _store_count(db_path) == 201  # 200 loop records + the warning
 

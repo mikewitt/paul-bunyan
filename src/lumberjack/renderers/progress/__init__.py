@@ -1,7 +1,10 @@
 """The bar models: what is inferred from log lines, and what was declared.
 
-Three models, all reading the store and none importing `rich`, so the whole
-display layer is swappable and testable on a bare install:
+Every model here reads the store and none imports `rich`, so the whole display
+layer is swappable and testable on a bare install.
+
+The **identity** layer — one entry per source location, which is what was
+captured and what the store would corroborate:
 
 * `RepeatingSourceModel` (`sources.py`) — the inferred half. Identity is the
   *source location*: a `logger.debug(...)` inside a loop hits the same line
@@ -11,12 +14,23 @@ display layer is swappable and testable on a bare install:
   recover which loop encloses which, takes the ratio between an enclosing loop
   and an enclosed one as the inner loop's iteration count, and retires a bar
   whose source has gone quiet.
+* `TaskProgressModel` (`tasks.py`) — the exact half. Every number came from a
+  `task()` or `track()` call that stated it outright, so nothing here guesses.
+
+The **display** layer, which is a different question and used to be answered by
+accident, because grouping by source location already produced something a
+renderer could draw:
+
+* `LoopRowModel` (`loops.py`) — one row per *loop* rather than per call site,
+  static structure first and period-and-worker second, counting iterations
+  rather than records. It groups what `RepeatingSourceModel` computed and
+  reaches into none of it.
 * `SessionHeartbeat` (`heartbeat.py`) — one row for the whole session, and the
   only element that says something about a program whose lines never repeat.
   It rides on `RepeatingSourceModel`'s poll rather than fetching a delta of
   its own.
-* `TaskProgressModel` (`tasks.py`) — the exact half. Every number came from a
-  `task()` or `track()` call that stated it outright, so nothing here guesses.
+* `layout.py` — the structural order rows are drawn in, and `templates.py` the
+  labels they are drawn with.
 
 Counts come from the store, never from tallying the handler's live callback,
 so every renderer reading that store sees the same numbers. The store is read
@@ -25,13 +39,12 @@ arrived since the last one instead of what the store holds — and every
 inference here runs per *poll*, over sources rather than rows, so log volume
 never drives its cost either.
 
-The three arrived in three eras (Phase 1's counting, 4a's task bars, 4b's
-inference) and shared one module until they shared nothing but the
+They arrived in four eras (Phase 1's counting, 4a's task bars, 4b's inference,
+then the row model) and shared one module until they shared nothing but the
 `RecordStore` interface. One module each now, with `smoothing.py` holding the
-interval fold both the period and the arrival rate use, and `layout.py` the
-structural row order the display draws them in. This package is that module's
-name, so `lumberjack.renderers.progress` still imports every one of them and
-there is no second surface to keep in step.
+interval fold both the period and the arrival rate use. This package is that
+module's name, so `lumberjack.renderers.progress` still imports every one of
+them and there is no second surface to keep in step.
 """
 
 from __future__ import annotations
@@ -43,6 +56,7 @@ from lumberjack.renderers.progress.heartbeat import (
     SessionHeartbeat,
 )
 from lumberjack.renderers.progress.layout import depth_first_order
+from lumberjack.renderers.progress.loops import LoopRow, LoopRowModel
 from lumberjack.renderers.progress.smoothing import PERIOD_SMOOTHING
 from lumberjack.renderers.progress.sources import (
     CONTAINMENT_CONFIRMATIONS,
@@ -59,6 +73,12 @@ from lumberjack.renderers.progress.sources import (
     resolve_max_bars,
 )
 from lumberjack.renderers.progress.tasks import TaskBarState, TaskProgressModel
+from lumberjack.renderers.progress.templates import (
+    LOOKBACKS,
+    MAX_LABEL,
+    TemplateIndex,
+    describe_template,
+)
 
 __all__ = [
     "CONTAINMENT_CONFIRMATIONS",
@@ -66,7 +86,9 @@ __all__ = [
     "DEFAULT_REFRESH_INTERVAL",
     "HEARTBEAT_FRAMES",
     "IDLE_PERIODS",
+    "LOOKBACKS",
     "MAX_BARS_ENV_VAR",
+    "MAX_LABEL",
     "MESSAGE_LOOKBACK",
     "MIN_IDLE_SECONDS",
     "MIN_NESTING_RATIO",
@@ -75,10 +97,14 @@ __all__ = [
     "SAME_LOOP_TOLERANCE",
     "BarState",
     "HeartbeatState",
+    "LoopRow",
+    "LoopRowModel",
     "RepeatingSourceModel",
     "SessionHeartbeat",
     "TaskBarState",
     "TaskProgressModel",
+    "TemplateIndex",
     "depth_first_order",
+    "describe_template",
     "resolve_max_bars",
 ]

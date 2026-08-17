@@ -59,16 +59,14 @@ def depth_first_order(
         children.setdefault(parent, []).append(key)
 
     result: list[SourceKey] = []
-    seen: set[SourceKey] = set()
     # Reversed because the stack pops from the end, and siblings must come off
-    # it in the order they arrived.
+    # it in the order they arrived. Nothing can be pushed twice: `order` holds
+    # each key once, so each appears in exactly one child list.
     stack: list[SourceKey] = list(reversed(children.get(None, ())))
     while stack:
         key = stack.pop()
-        if key in seen:
-            continue
-        seen.add(key)
         result.append(key)
         stack.extend(reversed(children.get(key, ())))
+    seen = set(result)
     result.extend(key for key in order if key not in seen)
     return result
