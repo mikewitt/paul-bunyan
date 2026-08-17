@@ -67,8 +67,6 @@ import json
 import logging
 import os
 import platform
-import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -448,27 +446,71 @@ def _machine() -> dict[str, Any]:
     }
 
 
+def _git_dir(start: Path) -> Path | None:
+    """The `.git` directory for `start`, following a worktree's pointer file."""
+    for parent in [start, *start.parents]:
+        candidate = parent / ".git"
+        if candidate.is_dir():
+            return candidate
+        if candidate.is_file():
+            # A linked worktree: `.git` is a file reading `gitdir: <path>`.
+            # This repo runs agents in worktrees, so the case is not exotic.
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+            _, _, path = text.partition("gitdir:")
+            resolved = Path(path.strip())
+            return resolved if resolved.is_dir() else None
+    return None
+
+
 def _git_commit() -> str | None:
     """Which revision produced these numbers. Best-effort, never fatal.
 
-    Resolved through `shutil.which` rather than relying on `PATH` lookup
-    inside `subprocess`, so the absolute binary is what runs and a machine
-    without git returns None instead of raising.
+    Read straight out of `.git` rather than shelling out to `git rev-parse`.
+    Three reasons, in order of how much they matter: it works on a machine
+    with no git installed, it costs a file read instead of a process spawn,
+    and it keeps a benchmark from launching subprocesses at all — which is
+    one less thing for a reader (or a static analyser) to have to think about.
+
+    Every failure path returns None. A baseline without a revision is mildly
+    less useful; a benchmark that raises while collecting provenance is
+    useless, so nothing here is allowed to escape.
     """
-    git = shutil.which("git")
-    if git is None:
-        return None
     try:
-        out = subprocess.run(
-            [git, "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).resolve().parent,
-            timeout=5,
+        git_dir = _git_dir(Path(__file__).resolve().parent)
+        if git_dir is None:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            # Detached HEAD holds the sha directly.
+            return head[:7] or None
+
+        ref = head.removeprefix("ref:").strip()
+        # A worktree's refs live in the main checkout's git dir, which
+        # `commondir` points at; for an ordinary checkout there is no such
+        # file and the git dir is its own common dir.
+        commondir = git_dir / "commondir"
+        common = (
+            (git_dir / commondir.read_text(encoding="utf-8").strip()).resolve()
+            if commondir.is_file()
+            else git_dir
         )
-    except (OSError, subprocess.SubprocessError):
+        loose = common / ref
+        if loose.is_file():
+            return loose.read_text(encoding="utf-8").strip()[:7] or None
+
+        # Packed refs: one "<sha> <ref>" per line, comments and peeled tags
+        # (^<sha>) interleaved.
+        packed = common / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name.strip() == ref:
+                    return sha[:7] or None
+    except OSError:
         return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    return None
 
 
 def _report(

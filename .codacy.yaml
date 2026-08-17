@@ -75,8 +75,28 @@
 exclude_paths:
   - "uv.lock"
 
+# Engine scoping is per engine, which is easy to forget and was: `tests/**`
+# was excluded from bandit and then a *different* engine flagged
+# `subprocess.run([sys.executable, ...])` in tests/test_benchmark.py as a
+# non-static argv. The bandit block does not cover it, so semgrep gets the
+# same two paths.
+#
+# The test launches the benchmark as a real child process on purpose — that
+# is what proves the script still runs end to end as a script, which an
+# in-process call to `main()` would not. `sys.executable` and a `Path` built
+# from `__file__` are the only non-literal parts, there is no shell, and no
+# input reaches it. Same category as the B603 entry above.
+#
+# `benchmarks/` no longer launches anything: `_git_commit()` reads `.git`
+# directly rather than shelling out to `git rev-parse`. It is kept in the
+# list because a benchmark is dev tooling either way, not because it still
+# has a finding.
 engines:
   bandit:
+    exclude_paths:
+      - "tests/**"
+      - "benchmarks/**"
+  semgrep:
     exclude_paths:
       - "tests/**"
       - "benchmarks/**"
