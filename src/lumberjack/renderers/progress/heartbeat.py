@@ -56,6 +56,10 @@ def heartbeat_frames(encoding: str | None) -> str:
     than to a package: an unencodable glyph is exactly as fatal as a missing
     dependency, and just as unnecessary.
     """
+    if encoding is None:
+        # rich's own convention for a stream that does not declare one, and
+        # the reason to match it is that rich is what performs the write.
+        return HEARTBEAT_FRAMES
     if not encoding:
         return HEARTBEAT_FRAMES_ASCII
     try:

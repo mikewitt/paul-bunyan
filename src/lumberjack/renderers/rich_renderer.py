@@ -55,6 +55,7 @@ from lumberjack.pump import FlushPump
 from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
+    HEARTBEAT_FRAMES_ASCII,
     BarState,
     CyclePosition,
     HeartbeatState,
@@ -451,17 +452,34 @@ class RichProgressRenderer:
         self._max_bars = resolve_max_bars(max_bars)
         self._suppressed_bars = 0
         self._console = Console(file=stream if stream is not None else sys.stderr)
-        # What this terminal can actually encode, decided once. A Windows
-        # console on cp1252 takes neither braille nor `▪`, and an unencodable
-        # write raises `UnicodeEncodeError` from inside `emit()` — Principle 9's
-        # degrade-never-error, applied to the terminal rather than to a package.
-        encoding = getattr(self._console.file, "encoding", None)
-        self._frames = heartbeat_frames(encoding)
-        collapsed_mark = _COLLAPSED_BAR
-        try:
-            _COLLAPSED_BAR.encode(encoding or "ascii")
-        except (UnicodeEncodeError, LookupError):
+        # What this terminal can actually take, decided once and from rich's
+        # own answers rather than from the raw stream. A Windows console on
+        # cp1252 carries neither braille nor `▪`, and an unencodable write
+        # raises `UnicodeEncodeError` from inside `emit()` — Principle 9's
+        # degrade-never-error, applied to the terminal instead of to a package.
+        #
+        # Two signals, because they catch different things. `Console.encoding`
+        # already defaults to utf-8 for a stream that will not say, which is
+        # the convention to match: rich is what does the writing, so agreeing
+        # with it is what keeps our glyphs and its box characters consistent.
+        # `legacy_windows` is the second: there rich swaps its *own* bars for
+        # ASCII, and a row mixing its `-` with our `▪` would be the worst of
+        # both.
+        legacy = bool(getattr(self._console, "legacy_windows", False))
+        if legacy:
+            # Said outright rather than by passing a sentinel encoding: `None`
+            # means "the stream did not say", which rich reads as utf-8, and
+            # routing "degrade" through the same value made this branch draw
+            # braille on the one console that cannot take it.
+            self._frames = HEARTBEAT_FRAMES_ASCII
             collapsed_mark = _COLLAPSED_BAR_ASCII
+        else:
+            self._frames = heartbeat_frames(self._console.encoding)
+            collapsed_mark = _COLLAPSED_BAR
+            try:
+                _COLLAPSED_BAR.encode(self._console.encoding)
+            except (UnicodeEncodeError, LookupError):
+                collapsed_mark = _COLLAPSED_BAR_ASCII
         # markup=False throughout: labels carry file paths and user-supplied
         # task names, and a stray "[" in either must not parse as a rich tag.
         self._task_progress = Progress(

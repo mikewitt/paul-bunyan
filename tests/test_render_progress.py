@@ -95,7 +95,13 @@ def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         rich_renderer_module,
         "Console",
-        lambda **kwargs: real_console(force_terminal=True, width=100, **kwargs),
+        # legacy_windows pinned off: on a Windows runner rich detects it and
+        # swaps its own `━` for `-`, so an assertion about a bar's shape would
+        # fail there for a reason that has nothing to do with the display.
+        # What rich does on a legacy console has its own tests.
+        lambda **kwargs: real_console(
+            force_terminal=True, width=100, legacy_windows=False, **kwargs
+        ),
     )
 
 
@@ -1484,3 +1490,45 @@ def test_a_task_that_ends_short_of_its_total_keeps_both_numbers(task_rig):
     task_rig.tick()
     line = _line(_strip_ansi(task_rig.output()), "gave up early")
     assert "50%" in line and "5/10" in line
+
+
+def test_a_legacy_windows_console_gets_glyphs_it_can_draw(store: RecordStore):
+    """rich swaps its *own* bars for ASCII on a legacy console. Ours have to
+    follow, or a row mixes rich's `-` with our `▪` and gets the worst of both.
+
+    Regression test with a history: an earlier fix routed "degrade" through a
+    `None` encoding, then `None` was given the opposite meaning — rich's own
+    convention, "the stream did not say, assume utf-8" — and this branch went
+    back to drawing braille on the one console that cannot take it. The two
+    meanings are now said separately, and this pins both.
+    """
+    real_console = rich_renderer_module.Console
+
+    def make(legacy: bool, monkeypatch: pytest.MonkeyPatch) -> RichProgressRenderer:
+        monkeypatch.setattr(
+            rich_renderer_module,
+            "Console",
+            lambda **kwargs: real_console(
+                force_terminal=True, width=90, legacy_windows=legacy, **kwargs
+            ),
+        )
+        return RichProgressRenderer(store, stream=io.StringIO(), refresh_interval=0)
+
+    with pytest.MonkeyPatch.context() as patch:
+        legacy, modern = make(True, patch), make(False, patch)
+        try:
+            assert legacy._frames.isascii(), "braille where it cannot be encoded"
+            assert not modern._frames.isascii(), "ASCII dots on a console that can"
+            marks = [
+                next(
+                    c
+                    for c in r._source_progress.columns
+                    if hasattr(c, "_collapsed_mark")
+                )
+                for r in (legacy, modern)
+            ]
+            assert marks[0]._collapsed_mark.isascii()
+            assert not marks[1]._collapsed_mark.isascii()
+        finally:
+            legacy.close()
+            modern.close()

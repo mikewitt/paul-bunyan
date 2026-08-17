@@ -346,8 +346,12 @@ def test_the_heartbeat_survives_a_rich_free_install(store, make_row, monkeypatch
         # A Windows console's default. It encodes neither braille nor `━`.
         ("cp1252", HEARTBEAT_FRAMES_ASCII),
         ("ascii", HEARTBEAT_FRAMES_ASCII),
-        # A stream that will not say, and one that names something unknown.
-        (None, HEARTBEAT_FRAMES_ASCII),
+        # A stream that will not say. rich treats that as utf-8 and rich is
+        # what does the writing, so disagreeing with it would mean drawing
+        # ASCII dots beside its Unicode bars.
+        (None, HEARTBEAT_FRAMES),
+        # An empty string is a stream that said "nothing", not one that said
+        # nothing — take it at its word.
         ("", HEARTBEAT_FRAMES_ASCII),
         ("definitely-not-a-codec", HEARTBEAT_FRAMES_ASCII),
     ],
