@@ -43,9 +43,10 @@ All eight `should be` lines are decided, which makes this file the readable
 form of the display spec: the prose lives in "What the display is for" in
 CLAUDE.md. Most of it is now built — one row per inferred loop, counting
 iterations, labelled by template, laid out by containment and collapsing when
-quiet (#8, #43, #56) — and what remains is #53's intra-iteration row and
-#54's polish. If a `today` line stops being true, this file has caught a
-change: update it, because those lines are observations rather than hopes.
+quiet (#8, #43, #56), plus the intra-iteration row a loop too slow to read
+earns (#53) — and what remains is #54's polish. If a `today` line stops being
+true, this file has caught a change: update it, because those lines are
+observations rather than hopes.
 
 ## How to log so this works
 
@@ -154,14 +155,18 @@ def run_pipeline() -> None:
 def run_sequence() -> None:
     """A slow loop whose body narrates its own stages.
 
-    The shape that motivates #53. All five lines are one loop body — the source
-    says so outright, and the display now draws them as one row counting
-    iterations. There is still no ratio to take, so no total, so no bar that
-    fills.
+    The shape that motivated #53. All five lines are one loop body — the source
+    says so outright, and the display draws them as one row counting
+    iterations. There is still no ratio to take, so no total, so the loop row
+    itself never fills.
 
-    But the information is plainly there: reaching "committing" means this
-    iteration is nearly done. That is ordinal position within a cycle, which
-    the AST already reports (`static.CallSite.position`) and nothing yet draws.
+    What fills is the row beneath it. Reaching "committing" means this
+    iteration is nearly done, and that is ordinal position within a cycle:
+    `static.CallSite.position` says this line is 5 of 5 in the body, before the
+    program starts. The row is drawn *because the loop is slow* — at 1.5s an
+    iteration the loop row alone cannot distinguish running from hung, which is
+    the first question the display exists to answer. `siblings` below has the
+    same structure at 120 iterations a second and gets no second row.
     """
     for batch in range(6):
         log.debug("batch %d: opening connection", batch)
@@ -188,6 +193,10 @@ def run_siblings() -> None:
     because the code is badly written, it was granular because the display
     inherited its unit from the grouping key. Keep the four lines; they are
     what makes the merge worth testing.
+
+    It is also the negative case for #53: identical in shape to `sequence` and
+    two hundred times faster, so the legibility criterion refuses the
+    intra-iteration row here and grants it there.
     """
     for row in range(400):
         log.debug("row %d: parsed", row)
@@ -378,7 +387,10 @@ SCENARIOS: tuple[Scenario, ...] = (
             "(20/20) from the ratio to its parent, is lexically corroborated by "
             "the source, and is drawn indented directly beneath that parent "
             "(#43). The other four pulse: nothing in the stream says how long "
-            "they are."
+            "they are. No intra-iteration rows anywhere here — every loop runs "
+            "far too fast to earn one, and `transform`'s body has a "
+            "conditional warning in it, so it has no stable order to draw "
+            "against either (#53)."
         ),
         should=(
             "This, and it is the reason this is still the demo to show someone. "
@@ -392,25 +404,31 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="sequence",
         stream="A slow loop; its body logs five distinct stages, once each.",
         today=(
-            "One row for the loop — `demo.py:163 run_sequence()` — pulsing, "
+            "Two rows. The loop — `demo.py:171 run_sequence()` — pulsing, "
             "counting iterations (6, not the 30 records), ticking once per "
-            "~1.5s. The five call sites merged (#8). No sub-iteration progress "
-            "yet: that is the second row, and it is #53."
+            "~1.5s; the five call sites merged into it (#8). Indented beneath "
+            "it, a **determinate** bar for position within the iteration, "
+            "cycling `1 of 5` to `5 of 5` and named for the stage that just "
+            "fired — `batch …: validating checksums` (#53). At 1.5s an "
+            "iteration the loop row alone cannot tell running from hung, which "
+            "is what earns the second row; `siblings` has the same shape 200x "
+            "faster and gets one row."
         ),
         should=(
-            "Three rows. A **pulsing** bar for the outer loop — its total is "
-            "'ideally but unlikely' to be inferable, so it stays a pulse and "
-            "becomes determinate only if someone wraps the range in `track()`. "
-            "Beneath it a **determinate** bar for position within the current "
-            "iteration, ticked by the body's call sites in order (#53). "
-            "Optionally a third line showing the most recent message. The "
-            "stage *name* comes from `record.msg` — the template, which stdlib "
-            "keeps separate from the data whenever the call uses lazy "
-            "%-formatting (ruff's G001-G004 enforce exactly that). So "
-            "'batch %d: validating checksums' is a stable label per source "
-            "location with no parsing of rendered text and no hints config. "
-            "An f-string at the call site destroys the template, and then "
-            "there is only a position."
+            "This, minus a third line. The outer loop's total is 'ideally but "
+            "unlikely' to be inferable, so it stays a **pulse** and becomes "
+            "determinate only if someone wraps the range in `track()`. The "
+            "position row needs no inference at all: `static.CallSite.position` "
+            "says which of the body's five lines just fired, so it is a dict "
+            "lookup rather than a measurement, and a body with a branch in it "
+            "gets no such row rather than a wrong percentage. The stage *name* "
+            "comes from `record.msg` — the template, which stdlib keeps "
+            "separate from the data whenever the call uses lazy %-formatting "
+            "(ruff's G001-G004 enforce exactly that). An f-string at the call "
+            "site destroys the template, and then there is only a position. "
+            "The optional third line — the most recent message, per row — is "
+            "deliberately not built; the session heartbeat carries one for the "
+            "whole run."
         ),
         run=run_sequence,
     ),
@@ -418,10 +436,12 @@ SCENARIOS: tuple[Scenario, ...] = (
         name="siblings",
         stream="One fast loop with four call sites in its body.",
         today=(
-            "One row, `demo.py:188 run_siblings()`, reading **400 iterations** "
-            "— the rows the code operated on, not the 1600 log calls that "
-            "described them. The four call sites are the identity underneath "
-            "it, and the store and the exit summary still report all 1600."
+            "One row, `demo.py:201 run_siblings()`, reading **400 "
+            "iterations** — the rows the code operated on, not the 1600 log "
+            "calls that described them. The four call sites are the identity "
+            "underneath it, and the store and the exit summary still report "
+            "all 1600. No second row: at ~120 iterations a second the "
+            "legibility criterion refuses one (#53)."
         ),
         should=(
             "This (#8). Every call site here says `row %d`, so the row is the "
