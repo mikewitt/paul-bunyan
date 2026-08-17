@@ -36,7 +36,10 @@ from lumberjack import (
 )
 from lumberjack.detect import OutputMode  # noqa: E402
 from lumberjack.handler import LumberjackHandler  # noqa: E402
-from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
+from lumberjack.renderers.rich_renderer import (  # noqa: E402
+    RichProgressRenderer,
+    _relayout,
+)
 from lumberjack.session import Session  # noqa: E402
 from lumberjack.store import RecordStore  # noqa: E402
 
@@ -679,6 +682,101 @@ def test_an_inferred_inner_loop_is_indented_under_its_parent(
     frame = _nested_frame(store, make_row, polls=5)
     outer, inner = _line(frame, "foo.py:4"), _line(frame, "foo.py:6")
     assert inner.index("foo.py:6") > outer.index("foo.py:4"), "the inner bar sits flush"
+
+
+# --- where a row is drawn (#43) --------------------------------------------
+#
+# Two things have to hold: rich really does render in insertion order and
+# survive being reordered underneath it, and the renderer really does put a
+# child under the parent it was inferred to run inside. The first is a claim
+# about somebody else's library, so it is pinned separately — an upgrade that
+# changes it must fail here rather than silently scrambling the display.
+
+
+def test_rich_renders_progress_tasks_in_insertion_order():
+    """The mechanism the re-layout rests on. `Progress.tasks` is
+    `list(self._tasks.values())` over a plain dict, so the dict's order is the
+    screen's order and rebuilding it moves rows."""
+    progress = rich_renderer_module.Progress()
+    first = progress.add_task("first")
+    second = progress.add_task("second")
+    assert [task.id for task in progress.tasks] == [first, second]
+
+    with progress._lock:
+        progress._tasks = {tid: progress._tasks[tid] for tid in (second, first)}
+    assert [task.id for task in progress.tasks] == [second, first]
+
+
+def test_reordering_rich_tasks_preserves_their_state():
+    """Why it is a reorder and not a remove-and-re-add: the `Task` carries the
+    elapsed clock and the completion, and recreating it throws both away."""
+    progress = rich_renderer_module.Progress()
+    first = progress.add_task("first", total=10)
+    second = progress.add_task("second", total=10)
+    progress.update(first, completed=7)
+    before = progress._tasks[first]
+
+    _relayout(progress, [second, first])
+
+    after = progress._tasks[first]
+    assert after is before, "the Task was recreated rather than moved"
+    assert after.completed == 7
+    assert after.start_time == before.start_time
+    assert [task.id for task in progress.tasks] == [second, first]
+
+
+def test_relayout_keeps_rows_the_caller_did_not_mention():
+    """A row missing from the order is a caller that stopped drawing it — the
+    bar ceiling does exactly that — and losing it here would delete work from
+    the screen for a reason that has nothing to do with structure."""
+    progress = rich_renderer_module.Progress()
+    first = progress.add_task("first")
+    second = progress.add_task("second")
+    _relayout(progress, [second])
+    assert [task.id for task in progress.tasks] == [second, first]
+
+
+def test_a_nested_bar_moves_under_its_parent_when_containment_settles(
+    as_terminal, store: RecordStore, make_row
+):
+    """The defect this exists to fix. An inner loop logs N times per outer
+    iteration, so it always qualifies for a bar first — and under
+    first-qualified placement it then indents beneath whatever unrelated row
+    happened to precede it. Here that is a loop on another thread, which is
+    exactly the `pipeline` scenario.
+    """
+    stream = io.StringIO()
+    renderer = RichProgressRenderer(
+        store, stream=stream, min_repeats=3, refresh_interval=0
+    )
+    at = time.time() - 45.0
+    try:
+        for _ in range(6):
+            # An unrelated loop on thread 2, fast enough to qualify on the
+            # first poll and so to be registered before either of the others.
+            rows = [
+                make_row(lineno=9, func_name="other", thread=2, created=at + i * 0.5)
+                for i in range(16)
+            ]
+            rows.append(make_row(lineno=4, func_name="outer", thread=1, created=at))
+            rows += [
+                make_row(lineno=6, func_name="inner", thread=1, created=at + i)
+                for i in range(8)
+            ]
+            store.append(rows)
+            at += 8.0
+            renderer.refresh()
+        frame = _strip_ansi(stream.getvalue())
+    finally:
+        renderer.close()
+
+    rows_drawn = [ln for ln in re.split(r"[\r\n]", frame) if "foo.py:" in ln]
+    last = rows_drawn[-3:]
+    assert [ln.strip().split()[0] for ln in last] == [
+        "foo.py:9",
+        "foo.py:4",
+        "foo.py:6",
+    ], f"the child did not move under its parent: {last}"
 
 
 def test_an_inferred_inner_loop_shows_its_position_in_the_cycle(

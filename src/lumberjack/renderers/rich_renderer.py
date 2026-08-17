@@ -52,6 +52,7 @@ from lumberjack.renderers.progress import (
     RepeatingSourceModel,
     SessionHeartbeat,
     TaskProgressModel,
+    depth_first_order,
     resolve_max_bars,
 )
 from lumberjack.schema import LogRecordRow, SourceKey
@@ -154,6 +155,38 @@ def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
             return
         task.total = total
         task.finished_time = None
+
+
+def _relayout(progress: Progress, order: list[TaskID]) -> None:
+    """Re-lay-out a `Progress`'s rows without disturbing the rows themselves.
+
+    `Progress.tasks` is `list(self._tasks.values())` and `_tasks` is a plain
+    dict, so **insertion order is render order** and placement is otherwise
+    decided once, at `add_task()`. Rebuilding that dict in a new order is the
+    whole mechanism (verified against rich 15.0.0, and pinned by a test so an
+    upgrade that changes it fails loudly rather than silently scrambling the
+    display).
+
+    **Reordered, never removed and re-added.** `remove_task()` plus a fresh
+    `add_task()` would put the row in the right place and throw away the
+    `Task` — its start time, its elapsed clock, its completion — so every
+    structural change would reset the timers of the rows it moved.
+
+    Private access for the same reason `_set_total` has it: rich exposes no
+    public way to order tasks. Anything already in the dict but absent from
+    `order` is kept, at the end, so a caller that has stopped drawing a row
+    cannot silently delete it here.
+    """
+    with progress._lock:  # noqa: SLF001 - no public reorder exists; see above
+        current = progress._tasks  # noqa: SLF001
+        wanted = [task_id for task_id in order if task_id in current]
+        if len(wanted) < len(current):
+            placed = set(wanted)
+            wanted += [task_id for task_id in current if task_id not in placed]
+        if wanted == list(current):
+            return
+        reordered = {task_id: current[task_id] for task_id in wanted}
+        progress._tasks = reordered  # noqa: SLF001
 
 
 def _format_source_detail(bar: BarState) -> str:
@@ -373,6 +406,14 @@ class RichProgressRenderer:
             bars = bars[: self._max_bars]
         for bar in bars:
             self._draw_source_bar(bar)
+        # Structure, then position. `_draw_source_bar` registers a row wherever
+        # the model first reported it, which for a nested loop is always before
+        # its parent exists — an inner line logs N times per outer iteration,
+        # so it qualifies first every time. Re-laying-out here is what stops
+        # that row being indented under whichever unrelated loop happened to
+        # precede it. The order is a pure function of containment, so this is
+        # a no-op on every poll where nothing structural moved.
+        self._relayout_source_bars(bars)
         # `update()` and not `refresh()`: the frame is drawn once, below.
         self._live.update(self._compose())
         self._live.refresh()
@@ -392,6 +433,17 @@ class RichProgressRenderer:
             rows.append(_format_heartbeat(heartbeat))
         rows += [self._task_progress, self._source_progress]
         return Group(*rows)
+
+    def _relayout_source_bars(self, bars: list[BarState]) -> None:
+        """Put every drawn row after the row it was inferred to run inside."""
+        order = depth_first_order(
+            [bar.source for bar in bars],
+            {bar.source: bar.parent for bar in bars},
+        )
+        _relayout(
+            self._source_progress,
+            [self._tasks[source] for source in order if source in self._tasks],
+        )
 
     def _draw_source_bar(self, bar: BarState) -> None:
         """One inferred bar: pulsing, determinate, or retired.

@@ -371,17 +371,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         stream="Four threads. Three flat loops and one genuinely nested pair.",
         today=(
             "Five bars. The nested inner line infers its own total (20/20) from "
-            "the ratio to its parent. The other four pulse — nothing in the "
-            "stream says how long they are."
+            "the ratio to its parent, and is drawn indented directly beneath "
+            "that parent — the row moves there on the poll the containment is "
+            "confirmed (#43). The other four pulse: nothing in the stream says "
+            "how long they are."
         ),
         should=(
-            "Mostly right, and the reason this is still the demo to show "
-            "someone. One defect: the nested child indents under whichever row "
-            "precedes it — an unrelated loop on another thread. Fixed by "
-            "re-laying-out on structural change, which for rich means "
-            "rebuilding `Progress._tasks` in the new order under its lock; "
-            "that reorders rendering while preserving the `Task` objects, so "
-            "elapsed time survives and nothing flickers (#43)."
+            "This, and it is the reason this is still the demo to show someone. "
+            "The remaining gap is the outer loops' totals, which are 'ideally "
+            "but unlikely' to be inferable — they stay pulses until someone "
+            "wraps a range in `track()`, and that gap is deliberate."
         ),
         run=run_pipeline,
     ),

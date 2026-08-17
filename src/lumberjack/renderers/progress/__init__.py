@@ -28,9 +28,10 @@ never drives its cost either.
 The three arrived in three eras (Phase 1's counting, 4a's task bars, 4b's
 inference) and shared one module until they shared nothing but the
 `RecordStore` interface. One module each now, with `smoothing.py` holding the
-interval fold both the period and the arrival rate use. This package is that
-module's name, so `lumberjack.renderers.progress` still imports every one of
-them and there is no second surface to keep in step.
+interval fold both the period and the arrival rate use, and `layout.py` the
+structural row order the display draws them in. This package is that module's
+name, so `lumberjack.renderers.progress` still imports every one of them and
+there is no second surface to keep in step.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from lumberjack.renderers.progress.heartbeat import (
     HeartbeatState,
     SessionHeartbeat,
 )
+from lumberjack.renderers.progress.layout import depth_first_order
 from lumberjack.renderers.progress.smoothing import PERIOD_SMOOTHING
 from lumberjack.renderers.progress.sources import (
     CONTAINMENT_CONFIRMATIONS,
@@ -77,5 +79,6 @@ __all__ = [
     "SessionHeartbeat",
     "TaskBarState",
     "TaskProgressModel",
+    "depth_first_order",
     "resolve_max_bars",
 ]
