@@ -46,6 +46,21 @@
 #       because it does not recognize the Ruff-specific `# noqa: S608`". So a
 #       line that must satisfy both tools needs both markers.
 #
+#     B101 itself is not answered by either marker, and is not meant to be. It
+#     is skipped wholesale in `bandit.yaml`, next to this file, because 852
+#     `# nosec B101` comments on 852 asserts would encode nothing about the code
+#     — only that a suppression was once required. See that file for why
+#     skipping the rule costs nothing and why `exclude_dirs` was refused.
+#
+#     Bandit auto-discovers **no** config file. Not `pyproject.toml` (a
+#     `[tool.bandit]` block there is read only with an explicit `-c`), and not
+#     `.bandit` either — both were tested against bandit directly. Codacy is
+#     what supplies the `-c`, for the filenames it recognises, and only when the
+#     tool's "use configuration file" setting is on. It already is here, for
+#     Bandit and for Ruff, which is why `bandit.yaml` needed no UI change and
+#     why Codacy's Ruff reports nothing: it reads `pyproject.toml` and agrees
+#     with the local gate.
+#
 #     A third result, learned the expensive way on the same PR. `_INSERT_SQL`
 #     was 85 characters, so adding `# noqa: S608` overflowed the line and forced
 #     a rewrap — and rewrapping it republished a finding nobody had changed the
@@ -58,10 +73,11 @@
 #     suppression does not fit, put it in `per-file-ignores` rather than
 #     reflowing the code around it.
 #
-#     The 852 B101s bandit still reports in `tests/` did *not* appear as PR
-#     findings, because Codacy counts issues on changed lines and the asserts
-#     were not changed. That is worth knowing before reading a green PR summary
-#     as "bandit is happy with tests/" — it is not the same claim.
+#     Before `bandit.yaml` existed, the 852 B101s bandit reported in `tests/`
+#     mostly did *not* show up as PR findings — Codacy counts issues on changed
+#     lines, and only three assert lines were touched. Those three were the
+#     "3 high" the PR chased for hours. Read a quiet PR summary accordingly: it
+#     means "nothing you edited is flagged", never "the directory is clean".
 #   - B108 has no suppression anywhere, because it was fixed instead. The fake
 #     `pathname` in the row fixtures was "/tmp/foo.py"; it is now
 #     "/nonexistent/foo.py". The tests require a path with no source on disk —
@@ -72,7 +88,9 @@
 # and B608 stay visible in Codacy on purpose, exactly as before: they are meant
 # to be re-read rather than inherited, and neither line was touched by the move
 # to ruff. Their ruff-side counterparts are suppressed — B110's at the line,
-# B608's by path — but nothing was added to make Codacy stop reporting either. `examples/`' two B101s were fixed
+# B608's by path — but nothing was added to make Codacy stop reporting either.
+#
+# `examples/`' two B101s were fixed
 # rather than kept, back when this file still had a bandit block — both were
 # `assert store is not None` narrowing a type for mypy, which `python -O`
 # strips, so the narrowing vanished and a None reached the call. Keeping the

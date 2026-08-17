@@ -1,0 +1,27 @@
+# Bandit's configuration, read by Codacy's Bandit engine (its "use configuration
+# file" setting is enabled for this repository, so this file is honoured without
+# any further UI change).
+#
+# Why this file exists at all: `.codacy.yaml` can scope by *path* but not by
+# *pattern*, so the only way it could silence B101 in tests/ was to exclude the
+# whole directory from bandit — which threw away every other bandit rule there
+# too. Bandit's own config can express the narrow thing directly.
+#
+# `skips` rather than `exclude_dirs: [tests]`, deliberately. Excluding the
+# directory would re-create exactly the blind spot this repository just spent a
+# change removing: B603, B108 and B102 in tests/ would stop being reported
+# again. Skipping the single rule keeps bandit looking at tests/ for everything
+# else.
+#
+# Skipping B101 outright costs nothing, because the rule is enforced in a
+# strictly stronger place. `pyproject.toml` selects ruff's `S`, whose S101 is
+# the same check, exempted only under `tests/**` — and ruff runs in pre-commit
+# and in the required `lint` job, so an assert reaching src/ now fails *before*
+# merge rather than being reported by Codacy after it.
+#
+# Note bandit does NOT auto-discover any config file — not `pyproject.toml`, not
+# `.bandit`. Both were tested. It reads one only when passed `-c`, which is what
+# Codacy does with the filenames it recognises (bandit.yml, bandit.yaml,
+# .bandit, bandit.toml, bandit.ini). Renaming this file silently disables it.
+skips:
+  - B101
