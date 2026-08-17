@@ -121,14 +121,13 @@ exclude_paths:
 #                                 against a remembered rule. Same category as
 #                                 B101 above: the `exec` is the test.
 #
-# **An edit here does not take effect on the branch that makes it.** Codacy
-# reads the configuration file from the *default branch*, and where the two
-# disagree the default branch wins — so a pull request adding an engine key
-# sees no change in its own analysis and clears the finding only once merged.
-# Four rounds of edits were spent here reading an unmoved count as evidence the
-# key was wrong. It is worth knowing before the fifth: if a new exclusion looks
-# inert on a PR, that is the expected behaviour and not a reason to go changing
-# the key.
+# The name is load-bearing in a way the docs undersell. They say the deprecated
+# aliases "remain accepted", and for `pylint` that is not true of an
+# `exclude_paths` block: the stanza was ignored in silence, the finding stayed,
+# and only `pylintpython3` cleared it. So an exclusion that appears to do
+# nothing is a wrong key until proven otherwise — a pull request's own analysis
+# *does* honour a new engine block, which is what makes that a same-round test
+# rather than something you find out at merge.
 engines:
   bandit:
     exclude_paths:
