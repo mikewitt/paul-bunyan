@@ -121,6 +121,11 @@ def capture(
         os.environ["TERM"] = "xterm-256color"
         # rich suppresses colour when it thinks nothing can show it.
         os.environ["FORCE_COLOR"] = "1"
+        # And without this it picks a *standard* 8-colour system, which
+        # flattens the pulsing bars into solid slabs. The pulse is a gradient
+        # across the bar, so colour depth is the difference between what this
+        # records and what the terminal actually shows.
+        os.environ["COLORTERM"] = "truecolor"
         os.execvp(argv[0], argv)
 
     start = last = time.monotonic()
@@ -336,7 +341,11 @@ def main(argv: list[str] | None = None) -> int:
         optimize=True,
     )
     size = out.stat().st_size
-    print(f"{out.relative_to(root)}  {len(images)} frames  {size / 1024:,.0f} KiB")
+    try:
+        shown: Path | str = out.relative_to(root)
+    except ValueError:  # --out pointed somewhere outside the repo
+        shown = out
+    print(f"{shown}  {len(images)} frames  {size / 1024:,.0f} KiB")
     return 0
 
 
