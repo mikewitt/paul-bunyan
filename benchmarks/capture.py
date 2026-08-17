@@ -226,7 +226,7 @@ def _stdlib_stream() -> Iterator[logging.Logger]:
     logger = logging.getLogger("bench.stream")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
-    sink = open(os.devnull, "w")
+    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
     handler = logging.StreamHandler(sink)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
@@ -243,7 +243,12 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
 
     stderr goes to devnull for the duration: the plain renderer is
     write-through, so leaving it pointed at a terminal would benchmark the
-    terminal.
+    terminal. The sink is opened as UTF-8 with `errors="replace"` rather than
+    in the platform default, because it exists to *discard* output and so must
+    never fail on it — on Windows the locale encoding is `cp1252`, which
+    cannot carry the display's bar and heartbeat characters, and the resulting
+    `UnicodeEncodeError` was invisible: it fired while stderr still pointed
+    here, so the traceback went to devnull too.
 
     One caveat on the rich arm, since it is the flattering row. Its *analysis*
     timer runs regardless of where output goes — the store queries and bar
@@ -263,7 +268,7 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
     """
     _reset_logging()
     real_stderr = sys.stderr
-    sink = open(os.devnull, "w")
+    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
     sys.stderr = sink
     try:
         lumberjack.init(
@@ -271,9 +276,14 @@ def _lumberjack(output_mode: str, buffer_size: int) -> Iterator[logging.Logger]:
         )
         yield logging.getLogger("bench.lumberjack")
     finally:
-        lumberjack.shutdown()
+        # stderr first: `shutdown()` raising while it still points at devnull
+        # swallows its own traceback, which is how a Windows-only failure here
+        # showed up as an empty stdout and an empty stderr.
         sys.stderr = real_stderr
-        sink.close()
+        try:
+            lumberjack.shutdown()
+        finally:
+            sink.close()
 
 
 def _measure(arm: Arm, records: int) -> Sample:
@@ -398,7 +408,9 @@ def measure_drain(records: int) -> float:
     survive.
     """
     _reset_logging()
-    real_stderr, sink = sys.stderr, open(os.devnull, "w")
+    real_stderr, sink = sys.stderr, open(
+        os.devnull, "w", encoding="utf-8", errors="replace"
+    )
     sys.stderr = sink
     try:
         lumberjack.init(
@@ -414,9 +426,14 @@ def measure_drain(records: int) -> float:
         lumberjack.flush()
         elapsed = time.perf_counter_ns() - start
     finally:
-        lumberjack.shutdown()
+        # stderr first: `shutdown()` raising while it still points at devnull
+        # swallows its own traceback, which is how a Windows-only failure here
+        # showed up as an empty stdout and an empty stderr.
         sys.stderr = real_stderr
-        sink.close()
+        try:
+            lumberjack.shutdown()
+        finally:
+            sink.close()
     return records / (elapsed / 1e9)
 
 

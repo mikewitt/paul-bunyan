@@ -38,6 +38,32 @@ MESSAGE_LOOKBACK = 4
 #: only moves when a record does.
 HEARTBEAT_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+#: What to spin with when the output encoding cannot carry braille. A Windows
+#: console on `cp1252` encodes neither these dots nor `━` nor `▪`, and a write
+#: it cannot encode raises `UnicodeEncodeError` rather than degrading — which
+#: would take down the `logger.debug()` that reached it.
+#:
+#: rich substitutes its *own* box and bar characters when it detects a limited
+#: encoding, and cannot know to do the same for a string lumberjack authored,
+#: so anything drawn from this module owes its own fallback.
+HEARTBEAT_FRAMES_ASCII = "|/-\\"
+
+
+def heartbeat_frames(encoding: str | None) -> str:
+    """The frame set `encoding` can actually carry.
+
+    Principle 9's rule — degrade, never error — applied to the terminal rather
+    than to a package: an unencodable glyph is exactly as fatal as a missing
+    dependency, and just as unnecessary.
+    """
+    if not encoding:
+        return HEARTBEAT_FRAMES_ASCII
+    try:
+        HEARTBEAT_FRAMES.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return HEARTBEAT_FRAMES_ASCII
+    return HEARTBEAT_FRAMES
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class HeartbeatState:
@@ -77,10 +103,13 @@ class HeartbeatState:
             return None
         return 1.0 / self.period
 
-    @property
-    def glyph(self) -> str:
-        """The current frame. Identical across polls that brought nothing."""
-        return HEARTBEAT_FRAMES[self.beat % len(HEARTBEAT_FRAMES)]
+    def glyph(self, frames: str = HEARTBEAT_FRAMES) -> str:
+        """The current frame. Identical across polls that brought nothing.
+
+        `frames` is passed in by the renderer, which is the only part that
+        knows what the output encoding can carry — see `heartbeat_frames()`.
+        """
+        return frames[self.beat % len(frames)]
 
 
 class SessionHeartbeat:

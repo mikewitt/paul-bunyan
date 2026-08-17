@@ -55,9 +55,11 @@ from __future__ import annotations
 
 from lumberjack.renderers.progress.heartbeat import (
     HEARTBEAT_FRAMES,
+    HEARTBEAT_FRAMES_ASCII,
     MESSAGE_LOOKBACK,
     HeartbeatState,
     SessionHeartbeat,
+    heartbeat_frames,
 )
 from lumberjack.renderers.progress.layout import depth_first_order
 from lumberjack.renderers.progress.loops import LoopRow, LoopRowModel
@@ -95,6 +97,8 @@ __all__ = [
     "DEFAULT_MIN_REPEATS",
     "DEFAULT_REFRESH_INTERVAL",
     "HEARTBEAT_FRAMES",
+    "HEARTBEAT_FRAMES_ASCII",
+    "heartbeat_frames",
     "IDLE_PERIODS",
     "LOOKBACKS",
     "MAX_BARS_ENV_VAR",

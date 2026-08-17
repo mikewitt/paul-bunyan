@@ -62,6 +62,7 @@ from lumberjack.renderers.progress import (
     LoopRowModel,
     SessionHeartbeat,
     TaskProgressModel,
+    heartbeat_frames,
     resolve_max_bars,
 )
 from lumberjack.schema import LogRecordRow, SourceKey
@@ -109,7 +110,7 @@ def _format_rate(row: LoopRow) -> str:
 _HEARTBEAT_SUMMARY_WIDTH = 26
 
 
-def _format_heartbeat(state: HeartbeatState) -> Text:
+def _format_heartbeat(state: HeartbeatState, frames: str) -> Text:
     """The session row: is anything arriving, how fast, and what was it.
 
     Three facts and no fourth. There is deliberately no elapsed clock and no
@@ -123,7 +124,7 @@ def _format_heartbeat(state: HeartbeatState) -> Text:
     creeping along and one that has nearly stopped.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{state.glyph}  ", style="progress.spinner")
+    text.append(f"{state.glyph(frames)}  ", style="progress.spinner")
     plural = "" if state.events == 1 else "s"
     summary = f"{state.events:,} event{plural}"
     if state.rate is not None:
@@ -230,8 +231,15 @@ def _format_position_detail(position: CyclePosition) -> str:
     return f"{position.current} of {position.total}"
 
 
-#: The mark a collapsed row shows where a running one shows a bar.
+#: The mark a collapsed row shows where a running one shows a bar, and its
+#: fallback for an output encoding that cannot carry it. `cp1252` — a Windows
+#: console's default — encodes neither this nor the heartbeat's braille, and an
+#: unencodable write raises rather than degrading, which would take down the
+#: `logger.debug()` that reached it. rich substitutes its *own* box and bar
+#: characters on a limited encoding and cannot know to do the same for a
+#: character lumberjack chose.
 _COLLAPSED_BAR = "▪"
+_COLLAPSED_BAR_ASCII = "#"
 
 #: The task field that says a row has collapsed. Carried on the rich `Task`
 #: rather than looked up per render, because a column is handed a `Task` and
@@ -279,13 +287,14 @@ class _RowBarColumn(ProgressColumn):
     returns text half the time.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, collapsed_mark: str = _COLLAPSED_BAR) -> None:
         self._bar = BarColumn()
+        self._collapsed_mark = collapsed_mark
         super().__init__()
 
     def render(self, task: Task) -> RenderableType:
         if task.fields.get(_COLLAPSED):
-            return Text(_COLLAPSED_BAR, style="bar.finished")
+            return Text(self._collapsed_mark, style="bar.finished")
         return self._bar.render(task)
 
 
@@ -442,6 +451,17 @@ class RichProgressRenderer:
         self._max_bars = resolve_max_bars(max_bars)
         self._suppressed_bars = 0
         self._console = Console(file=stream if stream is not None else sys.stderr)
+        # What this terminal can actually encode, decided once. A Windows
+        # console on cp1252 takes neither braille nor `▪`, and an unencodable
+        # write raises `UnicodeEncodeError` from inside `emit()` — Principle 9's
+        # degrade-never-error, applied to the terminal rather than to a package.
+        encoding = getattr(self._console.file, "encoding", None)
+        self._frames = heartbeat_frames(encoding)
+        collapsed_mark = _COLLAPSED_BAR
+        try:
+            _COLLAPSED_BAR.encode(encoding or "ascii")
+        except (UnicodeEncodeError, LookupError):
+            collapsed_mark = _COLLAPSED_BAR_ASCII
         # markup=False throughout: labels carry file paths and user-supplied
         # task names, and a stray "[" in either must not parse as a rich tag.
         self._task_progress = Progress(
@@ -459,7 +479,7 @@ class RichProgressRenderer:
         # bars' columns are: a label is a message template or a file path.
         self._source_progress = Progress(
             _RowTextColumn(),
-            _RowBarColumn(),
+            _RowBarColumn(collapsed_mark),
             # `completed` drives the bar's fill, which is the *cycle* position
             # once one is inferred, so the counts a reader wants are a field
             # rather than the bar's own numbers.
@@ -578,7 +598,7 @@ class RichProgressRenderer:
         heartbeat = self._model.heartbeat
         rows: list[RenderableType] = []
         if heartbeat.events:
-            rows.append(_format_heartbeat(heartbeat))
+            rows.append(_format_heartbeat(heartbeat, self._frames))
         rows += [self._task_progress, self._source_progress]
         return Group(*rows)
 

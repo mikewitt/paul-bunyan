@@ -25,9 +25,11 @@ import pytest
 
 from lumberjack.renderers.progress import (
     HEARTBEAT_FRAMES,
+    HEARTBEAT_FRAMES_ASCII,
     MESSAGE_LOOKBACK,
     RepeatingSourceModel,
     SessionHeartbeat,
+    heartbeat_frames,
 )
 
 
@@ -44,11 +46,11 @@ def test_the_glyph_is_frozen_across_empty_polls(store, make_row):
     model = RepeatingSourceModel(store, min_repeats=3)
     store.append(_loop_rows(make_row, 4))
     model.poll()
-    running = model.heartbeat.glyph
+    running = model.heartbeat.glyph()
 
     for _ in range(20):
         model.poll()
-        assert model.heartbeat.glyph == running, "the heartbeat animated on its own"
+        assert model.heartbeat.glyph() == running, "the heartbeat animated on its own"
 
 
 def test_the_beat_advances_only_when_records_arrived(store, make_row):
@@ -70,7 +72,7 @@ def test_consecutive_beats_show_different_glyphs(store, make_row):
     for _ in range(3):
         store.append(_loop_rows(make_row, 1))
         model.poll()
-        seen.append(model.heartbeat.glyph)
+        seen.append(model.heartbeat.glyph())
     assert len(set(seen)) == 3
 
 
@@ -79,7 +81,7 @@ def test_the_frames_cycle_rather_than_running_out(store, make_row):
     for _ in range(len(HEARTBEAT_FRAMES) + 1):
         store.append(_loop_rows(make_row, 1))
         model.poll()
-    assert model.heartbeat.glyph == HEARTBEAT_FRAMES[1]
+    assert model.heartbeat.glyph() == HEARTBEAT_FRAMES[1]
 
 
 def test_nothing_has_arrived_yet_is_an_empty_heartbeat(store):
@@ -330,4 +332,45 @@ def test_the_heartbeat_survives_a_rich_free_install(store, make_row, monkeypatch
     model.poll()
     assert model.heartbeat.events == 2
     assert model.heartbeat.rate == pytest.approx(1.0)
-    assert model.heartbeat.glyph
+    assert model.heartbeat.glyph()
+
+
+# --- what the terminal can actually encode ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("encoding", "expected"),
+    [
+        ("utf-8", HEARTBEAT_FRAMES),
+        ("UTF-8", HEARTBEAT_FRAMES),
+        # A Windows console's default. It encodes neither braille nor `━`.
+        ("cp1252", HEARTBEAT_FRAMES_ASCII),
+        ("ascii", HEARTBEAT_FRAMES_ASCII),
+        # A stream that will not say, and one that names something unknown.
+        (None, HEARTBEAT_FRAMES_ASCII),
+        ("", HEARTBEAT_FRAMES_ASCII),
+        ("definitely-not-a-codec", HEARTBEAT_FRAMES_ASCII),
+    ],
+)
+def test_the_frames_degrade_to_what_the_encoding_carries(encoding, expected):
+    """Principle 9 applied to the terminal rather than to a package.
+
+    An unencodable write raises `UnicodeEncodeError`, and this one would raise
+    from inside `emit()` — taking down the `logger.debug()` that reached it,
+    which is the one thing the capture path may never do. rich substitutes its
+    own box and bar characters on a limited encoding and cannot know to do the
+    same for a string lumberjack chose, so this module owes its own fallback.
+    """
+    assert heartbeat_frames(encoding) == expected
+
+
+def test_the_fallback_frames_survive_a_windows_console(store, make_row):
+    """The whole set, not just the first frame: a cycle that runs off the end
+    of an encodable prefix would fail on the fourth beat rather than the
+    first, which is worse than failing immediately."""
+    frames = heartbeat_frames("cp1252")
+    model = RepeatingSourceModel(store, min_repeats=3)
+    for _ in range(len(frames) * 2 + 1):
+        store.append(_loop_rows(make_row, 1))
+        model.poll()
+        model.heartbeat.glyph(frames).encode("cp1252")
