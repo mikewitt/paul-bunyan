@@ -71,10 +71,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             fonts-dejavu-core fonts-freefont-ttf
+      # --all-extras is load-bearing: `rich` is the `recommended` extra, not
+      # a base dependency, and without it the demo degrades — correctly, per
+      # Principle 9 — to the plain scrolling renderer, which the recorder
+      # then films faithfully. That gif shipped once. --require '━' is the
+      # backstop: the run fails unless some frame actually drew a bar, so a
+      # future fallback (missing extra, broken TTY detection) reads as a red
+      # check instead of a wrong recording.
       - name: Record the pipeline scenario
         run: >
-          uv run --with pillow --with pyte --with fonttools
-          python scripts/record_demo.py pipeline
+          uv run --all-extras --with pillow --with pyte --with fonttools
+          python scripts/record_demo.py pipeline --require '━'
       - name: Assert the recording is not trivially small
         # ~140 KiB is the healthy size; a run that captured a blank screen or
         # died after one frame still writes a gif, just a tiny one. The floor

@@ -304,6 +304,18 @@ def main(argv: list[str] | None = None) -> int:
             "terminal height. Pass an empty string to keep everything."
         ),
     )
+    parser.add_argument(
+        "--require",
+        default="",
+        help=(
+            "fail unless some frame's text contains this string. CI passes "
+            "the bar glyph '━': a recording can complete perfectly while "
+            "filming the *plain* renderer's scrolling fallback — that is "
+            "what a missing `rich` degrades to, by design — and no file-size "
+            "or exit-code check can tell that gif from the real display. "
+            "This one shipped once."
+        ),
+    )
     args = parser.parse_args(argv)
 
     out = Path(args.out) if args.out else root / "docs" / f"demo-{args.scenario}.gif"
@@ -316,6 +328,17 @@ def main(argv: list[str] | None = None) -> int:
         args.fps,
         args.stop_at,
     )
+    if args.require and not any(
+        args.require in "".join(line.split("\x00")[0::4])
+        for _, snap in frames
+        for line in snap.split("\n")
+    ):
+        print(
+            f"no frame ever contained {args.require!r} — the live display "
+            "did not draw (is rich installed in this environment?)",
+            file=sys.stderr,
+        )
+        return 1
     if args.max_seconds:
         frames = [f for f in frames if f[0] <= args.max_seconds]
     if args.stop_at and frames:
