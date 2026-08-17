@@ -67,6 +67,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -448,10 +449,18 @@ def _machine() -> dict[str, Any]:
 
 
 def _git_commit() -> str | None:
-    """Which revision produced these numbers. Best-effort, never fatal."""
+    """Which revision produced these numbers. Best-effort, never fatal.
+
+    Resolved through `shutil.which` rather than relying on `PATH` lookup
+    inside `subprocess`, so the absolute binary is what runs and a machine
+    without git returns None instead of raising.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return None
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            [git, "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
             cwd=Path(__file__).resolve().parent,
@@ -652,8 +661,7 @@ def _render_comparison(baseline: dict[str, Any], current: dict[str, Any]) -> str
 
 
 def main(argv: list[str] | None = None) -> int:
-    assert __doc__ is not None
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--records", type=int, default=100_000)
     parser.add_argument(
         "--repeats",

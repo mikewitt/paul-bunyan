@@ -75,7 +75,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import random
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -241,13 +240,17 @@ def run_bursty() -> None:
     Principle 10 says a display that is wrong here is acceptable. This
     scenario exists so "acceptable" is something you can look at rather than
     something asserted in a docstring.
+
+    A fixed stall pattern rather than a seeded RNG. A design fixture is
+    argued over across runs and machines, so it should emit the *same* stream
+    every time; what matters is the shape — mostly quick, occasionally a long
+    pause — and a literal set says that more plainly than a distribution does.
     """
-    rng = random.Random(0)
+    stalls = {3, 11, 19, 28, 35}
     for item in range(40):
         log.debug("processing item %d", item)
-        # Mostly quick, occasionally a long stall — the distribution that
-        # breaks an average.
-        time.sleep(0.02 if rng.random() < 0.8 else rng.uniform(0.5, 1.2))
+        # 12% of iterations take 40x the rest, which is what breaks an average.
+        time.sleep(0.8 if item in stalls else 0.02)
 
 
 def run_phases() -> None:

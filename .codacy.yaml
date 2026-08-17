@@ -50,6 +50,22 @@
 # design: a lockfile is thousands of near-identical dependency stanzas, and
 # counting those as duplicated code makes the repo-wide duplication figure
 # meaningless.
+# `benchmarks/` is excluded from bandit on the same grounds as `tests/`: it is
+# development tooling, not shipped in the wheel, and never run by a user of
+# the package. Its four findings are all artefacts of what a benchmark has to
+# do:
+#
+#   B404  import_subprocess    — `capture.py` shells out once, to
+#   B603  subprocess_without_    `git rev-parse --short HEAD`, so a recorded
+#         shell_equals_true      baseline says which revision produced it.
+#   B607  start_process_with_    Fixed argv list, no user input anywhere near
+#         partial_path           it, wrapped in try/except and best-effort by
+#                                design — a missing `git` returns None.
+#   B101  assert_used          — `assert __doc__ is not None` narrows a type
+#                                for mypy before `__doc__.split()`.
+#
+# The same "excluding more than the noise defeats the tool" test applies: this
+# is one file of dev tooling, and `src/` and `examples/` both stay in scope.
 exclude_paths:
   - "uv.lock"
 
@@ -57,3 +73,4 @@ engines:
   bandit:
     exclude_paths:
       - "tests/**"
+      - "benchmarks/**"
