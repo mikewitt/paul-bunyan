@@ -278,13 +278,24 @@ class _Walker:
             depth=len(inner),
             parent=ctx.loops[-1] if ctx.loops else None,
         )
-        # Only `body` repeats. The iterable is evaluated once before the loop
-        # starts, the `while` condition is the loop's own bookkeeping, and a
-        # `for … else` clause runs once after it — so those children keep the
-        # enclosing context. `conditional` resets for the body because the
-        # flag describes a branch *inside this body*; a loop nested under an
-        # `if` is itself conditional, but its own body is not.
-        body = {id(stmt) for stmt in node.body}
+        # What repeats gets the inner context. The body always does. A
+        # `while` **test** does too — it is re-evaluated before every
+        # iteration, so a call there fires once per pass and belongs to the
+        # loop. `For.iter` does not: it is evaluated once before the loop
+        # starts. Neither does a `for … else` clause, which runs once after.
+        #
+        # Getting the `while` test wrong is not a case of claiming less: the
+        # call fires per iteration at runtime, so attributing it outside the
+        # loop makes static analysis *contradict* what the records show, and
+        # consumers use static as a veto over runtime inference.
+        #
+        # `conditional` resets for the body because the flag describes a
+        # branch *inside this body*; a loop nested under an `if` is itself
+        # conditional, but its own body is not.
+        repeats = {id(stmt) for stmt in node.body}
+        if isinstance(node, ast.While):
+            repeats.add(id(node.test))
+        body = repeats
         body_ctx = _Ctx(func_name=ctx.func_name, loops=inner, conditional=False)
         for child in ast.iter_child_nodes(node):
             self.visit(child, body_ctx if id(child) in body else ctx)

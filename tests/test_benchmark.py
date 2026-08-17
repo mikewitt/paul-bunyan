@@ -28,6 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -227,3 +228,30 @@ def test_matching_runs_are_comparable() -> None:
     """Guards the two refusal tests from passing by refusing everything."""
     same = {"records": 1000, "repeats": 5, "machine": capture._machine()}
     assert capture._incomparable(dict(same), dict(same)) == []
+
+
+def test_git_provenance_survives_an_unreadable_ref(tmp_path: Path) -> None:
+    """`_git_commit()` promises never to raise, and once did.
+
+    A non-UTF-8 `.git/HEAD` raised `UnicodeDecodeError`, which is a
+    `ValueError` and so slipped past an `except OSError` — taking the whole
+    benchmark down while it collected provenance it does not even need. The
+    contract is that a missing revision degrades the baseline slightly and
+    nothing else.
+    """
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_bytes(b"ref: refs/heads/\xff\xfemain")
+
+    with mock.patch.object(capture, "_git_dir", lambda _start: git_dir):
+        assert capture._git_commit() is None
+
+
+def test_git_provenance_reads_a_detached_head(tmp_path: Path) -> None:
+    """Guards the test above from passing because everything returns None."""
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("0123456789abcdef\n", encoding="utf-8")
+
+    with mock.patch.object(capture, "_git_dir", lambda _start: git_dir):
+        assert capture._git_commit() == "0123456"

@@ -21,6 +21,7 @@ import os
 import textwrap
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -641,9 +642,26 @@ def test_an_unparseable_file_is_not_reparsed_on_every_call(
 
     # Caching the failure matters more than caching a success: a broken file
     # would otherwise be read and rejected on every redraw.
-    assert static.analyze_file(str(path)) is None
-    path.unlink()
-    assert static.analyze_file(str(path)) is None
+    #
+    # The file stays on disk and `_parse` is counted, because an earlier
+    # version of this test deleted it between the two calls — which made the
+    # second one return None through the missing-file guard whether or not
+    # failures were cached at all. It passed with the cache disabled entirely,
+    # which is to say it pinned nothing.
+    calls = 0
+    real_parse = static._parse
+
+    def counting_parse(pathname: str) -> static.FileStructure | None:
+        nonlocal calls
+        calls += 1
+        return real_parse(pathname)
+
+    with mock.patch.object(static, "_parse", counting_parse):
+        assert static.analyze_file(str(path)) is None
+        assert static.analyze_file(str(path)) is None
+
+    assert path.exists(), "the file must stay put, or the guard answers instead"
+    assert calls == 1, f"the failure was re-parsed: {calls} calls"
 
 
 def test_the_result_cannot_be_mutated_by_a_caller(
@@ -659,3 +677,31 @@ def test_the_result_cannot_be_mutated_by_a_caller(
         structure.call_sites[99] = next(iter(structure.call_sites.values()))  # type: ignore[index]
     with pytest.raises(TypeError):
         structure.loops[99] = None  # type: ignore[index]
+
+
+def test_a_call_in_a_while_condition_belongs_to_the_loop(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """A `while` test re-runs every iteration, so a call there is in the loop.
+
+    Getting this wrong is not the harmless direction. The call fires once per
+    pass at runtime, so attributing it outside the loop makes the static answer
+    *contradict* the records — and consumers use static as a veto over runtime
+    inference, so a contradiction is worse than an absence.
+
+    `For.iter` is the genuine other case and is asserted alongside: it is
+    evaluated once, before the loop, so it stays outside.
+    """
+    structure = analyze("""
+        def poll(log, source, n):
+            i = 0
+            while log.debug("checking %d", i) or i < n:
+                i += 1
+            for item in log.info("starting %s", source) or []:
+                log.debug("item %s", item)
+        """)
+    by_template = {site.template: site for site in structure.call_sites.values()}
+
+    assert by_template["checking %d"].loop_chain != (), "while-test repeats"
+    assert by_template["item %s"].loop_chain != (), "a body always repeats"
+    assert by_template["starting %s"].loop_chain == (), "for-iter runs once"
