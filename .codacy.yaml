@@ -78,8 +78,13 @@ exclude_paths:
 # Engine scoping is per engine, which is easy to forget and was: `tests/**`
 # was excluded from bandit and then a *different* engine flagged
 # `subprocess.run([sys.executable, ...])` in tests/test_benchmark.py as a
-# non-static argv. The bandit block does not cover it, so semgrep gets the
-# same two paths.
+# non-static argv. The bandit block does not cover it.
+#
+# Both `semgrep` and `opengrep` are listed because the finding's origin is
+# only known from its wording, and Codacy moved from the one to the other —
+# so which key is live depends on when this runs. An unrecognised engine
+# name is inert, which makes listing both cheaper than guessing wrong and
+# spending another round trip to find out.
 #
 # The test launches the benchmark as a real child process on purpose — that
 # is what proves the script still runs end to end as a script, which an
@@ -97,6 +102,10 @@ engines:
       - "tests/**"
       - "benchmarks/**"
   semgrep:
+    exclude_paths:
+      - "tests/**"
+      - "benchmarks/**"
+  opengrep:
     exclude_paths:
       - "tests/**"
       - "benchmarks/**"
