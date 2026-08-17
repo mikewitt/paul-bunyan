@@ -43,8 +43,20 @@
 #
 #       `# noqa` is not, and Codacy said so itself: its review left a suggestion
 #       on `store.py` reading "Codacy's Bandit engine continues to flag it
-#       because it does not recognize the Ruff-specific `# noqa: S608`". Hence
-#       the dual tag on that line. Do not economise it down to one marker.
+#       because it does not recognize the Ruff-specific `# noqa: S608`". So a
+#       line that must satisfy both tools needs both markers.
+#
+#     A third result, learned the expensive way on the same PR. `_INSERT_SQL`
+#     was 85 characters, so adding `# noqa: S608` overflowed the line and forced
+#     a rewrap — and rewrapping it republished a finding nobody had changed the
+#     meaning of as *three highs and a medium introduced by the PR*, because
+#     Codacy counts issues on changed lines. The line is now byte for byte what
+#     it was, and S608 is exempted by path in `pyproject.toml` instead.
+#
+#     The general rule, worth more than the instance: **do not reformat a line
+#     carrying an accepted finding.** Touching it is what makes it new. Where a
+#     suppression does not fit, put it in `per-file-ignores` rather than
+#     reflowing the code around it.
 #
 #     The 852 B101s bandit still reports in `tests/` did *not* appear as PR
 #     findings, because Codacy counts issues on changed lines and the asserts
@@ -57,11 +69,10 @@
 #     directory where `foo.py` could plausibly turn up. The rule was right.
 #
 # `src/` and `examples/` were never excluded and still are not. `src/`'s B110
-# stays visible in Codacy on purpose, the same as before: it is meant to be
-# re-read rather than inherited. B608 is the one exception, and only because it
-# is a *medium* that fails the PR gate rather than a low that sits in a report —
-# it carries `# nosec B608` beside a `# noqa: S608`, with the argument for both
-# written at the line. `examples/`' two B101s were fixed
+# and B608 stay visible in Codacy on purpose, exactly as before: they are meant
+# to be re-read rather than inherited, and neither line was touched by the move
+# to ruff. Their ruff-side counterparts are suppressed — B110's at the line,
+# B608's by path — but nothing was added to make Codacy stop reporting either. `examples/`' two B101s were fixed
 # rather than kept, back when this file still had a bandit block — both were
 # `assert store is not None` narrowing a type for mypy, which `python -O`
 # strips, so the narrowing vanished and a None reached the call. Keeping the

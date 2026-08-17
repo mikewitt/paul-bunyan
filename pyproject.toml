@@ -84,6 +84,20 @@ select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
 # the directory keeps the rule enforced where it is actionable today (src/) and
 # leaves #45 to fix the tests rather than annotate them.
 "tests/**" = ["S101", "SLF001"]
+# S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
+# and the indirection is the point. That statement is a pre-existing finding
+# `.codacy.yaml` has already assessed and kept — `_COLUMNS` is a module-level
+# tuple of literal column names, values go through `?` placeholders, and the
+# parity tests pin `_COLUMNS` against the real table. It is 85 characters, so a
+# trailing `# noqa: S608` overflows the line and forces a reformat.
+#
+# Reformatting it is what must not happen. Codacy counts issues on *changed*
+# lines, so rewrapping a line that has been accepted for months republishes its
+# findings as new ones introduced by whatever PR touched it — measured on #76,
+# where the split briefly produced three highs and a medium against a statement
+# nobody had changed the meaning of. Exempting by path leaves the line byte for
+# byte as it was, which is what keeps it out of the diff.
+"src/lumberjack/store.py" = ["S608"]
 
 [tool.black]
 target-version = ["py312"]
