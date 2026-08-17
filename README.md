@@ -23,16 +23,15 @@ the worker functions** — that is `examples/demo.py`, unmodified, under
 **Status: early, pre-1.0, and not published yet.** Working today: capture,
 SQLite storage, output-mode detection, plain/JSON/rich rendering, the explicit
 `track()` / `task()` API with outbound OpenTelemetry spans and the named bars
-it drives, structural inference over uninstrumented logging (loops timed and
-grouped by *source location*, so a loop inside a loop draws nested with a real
-percentage nobody declared), a session heartbeat, and static analysis of a
-source file's loop structure.
+it drives, structural inference over uninstrumented logging, one row per
+inferred loop with template labels, a session heartbeat, static analysis of a
+source file's loop structure, and an instrumentation linter that says which
+log line to add and where (`python -m lumberjack.lint`).
 
-Being built now: one row per inferred *loop* rather than per call site,
-structural re-layout, template labels, and sub-iteration progress. Still to
-come: a hints config, the inbound OpenTelemetry bridge, multiprocessing-aware
-capture, and an instrumentation linter. `CLAUDE.md` has the design and the
-reasoning; `examples/demo.py` has it in runnable form.
+Still to come: sub-iteration progress for a slow loop body, a hints config,
+the inbound OpenTelemetry bridge, and multiprocessing-aware capture.
+`CLAUDE.md` has the design and the reasoning; `examples/demo.py` has it in
+runnable form, one scenario per shape of log stream.
 
 ## Install
 
@@ -92,12 +91,12 @@ the same place stop scrolling and become bars that advance. Four worker
 threads, each logging inside its own loop (`examples/demo.py`), render as:
 
 ```text
-⠴  1,955 events · 435.3/s    normalized record 449
-demo.py:100 extract()     ━━━━━━━━━━━━━━━━━━━━ 700 records         233/s 0:00:02
-  demo.py:134 reconcile() ━━━━━━━━━━━━━━━━━━━━ 20/20 · 480 records 190/s 0:00:02
-demo.py:106 transform()   ━━━━━━━━━━━━━━━━━━━━ 450 records         141/s 0:00:02
-demo.py:117 load()        ━━━━━━━━━━━━━━━━━━━━ 300 records         97/s  0:00:02
-demo.py:132 reconcile()   ━━━━━━━━━━━━━━━━━━━━ 24 records          9/s   0:00:02
+⠴  1,863 events · 565.2/s     fetched row 671 from source table
+fetched row … from source table ━━━━━━━━━━━━━ 672 iterations         233/s 0:00:02
+normalized record …             ━━━━━━━━━━━━━ 405 iterations         140/s 0:00:02
+wrote batch … to warehouse      ━━━━━━━━━━━━━ 281 iterations         97/s  0:00:02
+reconciling batch …             ━━━━━━━━━━━━━ 24 iterations          9/s   0:00:02
+  compared row … against ledger ━━━━━━━━━━━━━ 19/20 · 480 iterations 188/s 0:00:02
 ```
 
 The top row is the **heartbeat**: how many records have arrived, how fast, and
@@ -109,22 +108,30 @@ rather than that the animation ran out. That is a prompt to log more, and it is
 honest: when a library spends three silent seconds inside a C extension, there
 is nothing to see and saying otherwise would be a lie.
 
-Below it, one bar per source location, with no concurrency-specific setup.
+Below it, **one row per loop** — not per log line. Several call sites in one
+loop body collapse into a single row, because a person wants the shape of
+their program rather than a bar per call site. Source location stays the
+identity underneath; it is simply not the display unit.
+
+Two consequences worth naming. Rows are labelled by the **message template**,
+which stdlib keeps separate from the rendered text whenever the call uses lazy
+`%` formatting — so `log.debug("fetched row %d from source table", i)` names
+its own row, with nothing parsed out of the output. And the count is
+**iterations**, not records: the fourth row says `24`, and the `reconcile`
+pair below it did 480 comparisons across those 24 batches.
+
 Three of those loops are flat, so their bars only count and pace: nothing in
 the stream says how long they are, and claiming otherwise would be a guess.
-`reconcile` runs a loop inside a loop, and *that* is in the stream — line 134
-fires twenty times between consecutive firings of line 132 — so it draws
-indented with a real `20/20`, from a total nobody declared. When a loop goes
-quiet for long enough its bar fills and reads `idle`.
+`reconcile` runs a loop inside a loop, and *that* is in the stream — the inner
+line fires twenty times between consecutive firings of the outer one — so it
+draws indented under its real parent with a `20/20` nobody declared. When a
+loop goes quiet its row collapses to a marker and reads `idle`, rather than
+vanishing: a finished run should still show what it did.
 
-Two things this deliberately does not do. It does not group by worker: two
-threads running the same loop share a bar, though thread and process are
+One thing this deliberately does not do: it does not group by worker. Two
+threads running the same loop share a row, though thread and process are
 recorded on every record and *are* what stop two unrelated loops being read as
-nested. And it does not move a bar once drawn — which is why the indented
-child above is sitting under `extract`, an unrelated loop on another thread,
-rather than under the `reconcile` line it actually belongs to. That one is a
-real defect, not a trade-off; see
-[#43](https://github.com/mikewitt/paul-bunyan/issues/43).
+nested.
 
 Inference is an 80% solution on purpose, and it will be wrong sometimes. When
 it is, the cost is a cosmetic one: a bar that pulses when it could have had a
