@@ -1,0 +1,78 @@
+name: Demo GIF
+
+# Re-records docs/demo-pipeline.gif on every pull request that could change
+# what it shows, and uploads the result as a workflow artifact for a reviewer
+# to eyeball. Two jobs in one:
+#
+# - It is the one check that runs the *whole* stack the way a user does —
+#   init(), four worker threads, the live display, teardown — under a real
+#   pty with a real terminal emulator reading the frames. A failure here with
+#   the test suite green is a flag that something untested broke.
+# - The artifact is the refreshed gif. It is deliberately NOT committed back:
+#   this workflow keeps CI's read-only token (see ci.yml's permissions
+#   comment — no job writes to the repository, and the coverage-badge
+#   history is why). When the README's gif is due a refresh, download the
+#   artifact from a run on trunk-bound work and commit it by hand.
+#
+# A gif is timing-dependent and never byte-stable, so no job compares it to
+# the committed one — the assertions are that the recording *completed* and
+# is not trivially small (a blank or instantly-exiting run collapses to a
+# few near-empty frames).
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "scripts/record_demo.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/demo-gif.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    # The pipeline scenario runs ~30s; everything else is setup. A hang in
+    # the display (the exact failure this exists to catch) should read as
+    # this timeout, not a six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      # The renderer's font chain is explicit paths, not fontconfig lookup:
+      # DejaVu Sans Mono for the box-drawing the bars are made of, FreeMono
+      # for the braille heartbeat glyphs DejaVu lacks (see the FACES comment
+      # in scripts/record_demo.py). Neither package is guaranteed on a
+      # runner image, so both are installed rather than assumed.
+      - name: Install the fonts the renderer draws with
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            fonts-dejavu-core fonts-freefont-ttf
+      - name: Record the pipeline scenario
+        run: >
+          uv run --with pillow --with pyte --with fonttools
+          python scripts/record_demo.py pipeline
+      - name: Assert the recording is not trivially small
+        # ~140 KiB is the healthy size; a run that captured a blank screen or
+        # died after one frame still writes a gif, just a tiny one. The floor
+        # is far below healthy so a legitimately shorter recording passes.
+        run: |
+          size=$(stat -c%s docs/demo-pipeline.gif)
+          echo "docs/demo-pipeline.gif is ${size} bytes"
+          test "$size" -ge 30000
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: demo-pipeline-gif
+          path: docs/demo-pipeline.gif
+          if-no-files-found: error
