@@ -226,15 +226,14 @@ def _stdlib_stream() -> Iterator[logging.Logger]:
     logger = logging.getLogger("bench.stream")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
-    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
-    handler = logging.StreamHandler(sink)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(handler)
-    try:
-        yield logger
-    finally:
-        logger.handlers.clear()
-        sink.close()
+    with Path(os.devnull).open("w", encoding="utf-8", errors="replace") as sink:
+        handler = logging.StreamHandler(sink)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        try:
+            yield logger
+        finally:
+            logger.handlers.clear()
 
 
 @contextlib.contextmanager
@@ -259,17 +258,14 @@ def _quiet_lumberjack(**init_kwargs: Any) -> Iterator[None]:
     """
     _reset_logging()
     real_stderr = sys.stderr
-    sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
-    sys.stderr = sink
-    try:
-        lumberjack.init(**init_kwargs)
-        yield
-    finally:
-        sys.stderr = real_stderr
+    with Path(os.devnull).open("w", encoding="utf-8", errors="replace") as sink:
+        sys.stderr = sink
         try:
-            lumberjack.shutdown()
+            lumberjack.init(**init_kwargs)
+            yield
         finally:
-            sink.close()
+            sys.stderr = real_stderr
+            lumberjack.shutdown()
 
 
 @contextlib.contextmanager
@@ -579,13 +575,19 @@ def _render_table(results: list[Result], records: int, drain_per_s: float) -> st
     floor = results[0].in_loop_ns or 1.0
     width = max(len(r.name) for r in results)
     lines = [
-        f"{records:,} records per arm, best of each set. "
-        f"Python {sys.version.split()[0]} on {sys.platform}.",
+        (
+            f"{records:,} records per arm, best of each set. "
+            f"Python {sys.version.split()[0]} on {sys.platform}."
+        ),
         "",
-        f"{'arm':<{width}}  {'in-loop':>10}  {'total':>10}  "
-        f"{'records/s':>12}  {'vs floor':>9}  {'spread':>7}  {'dropped':>8}",
-        f"{'-' * width}  {'-' * 10}  {'-' * 10}  {'-' * 12}  {'-' * 9}  "
-        f"{'-' * 7}  {'-' * 8}",
+        (
+            f"{'arm':<{width}}  {'in-loop':>10}  {'total':>10}  "
+            f"{'records/s':>12}  {'vs floor':>9}  {'spread':>7}  {'dropped':>8}"
+        ),
+        (
+            f"{'-' * width}  {'-' * 10}  {'-' * 10}  {'-' * 12}  {'-' * 9}  "
+            f"{'-' * 7}  {'-' * 8}"
+        ),
     ]
     for r in results:
         per_sec = 1e9 / r.total_ns if r.total_ns else float("inf")
@@ -637,12 +639,11 @@ def _incomparable(baseline: dict[str, Any], current: dict[str, Any]) -> list[str
     like a measurement, and this project has already put three mutually
     contradictory throughput figures into its own documentation as fact.
     """
-    reasons = []
-    for key in ("records", "repeats"):
-        if baseline.get(key) != current.get(key):
-            reasons.append(
-                f"{key}: baseline {baseline.get(key)}, now {current.get(key)}"
-            )
+    reasons = [
+        f"{key}: baseline {baseline.get(key)}, now {current.get(key)}"
+        for key in ("records", "repeats")
+        if baseline.get(key) != current.get(key)
+    ]
     base_machine, now_machine = baseline.get("machine", {}), current["machine"]
     for key in ("platform", "python", "cpu", "cpu_count"):
         if base_machine.get(key) != now_machine.get(key):
@@ -673,8 +674,10 @@ def _render_comparison(baseline: dict[str, Any], current: dict[str, Any]) -> str
     width = max(len(a["name"]) for a in current["arms"])
 
     header = [
-        f"Comparison against {baseline.get('git_commit') or 'unknown'} "
-        f"({baseline.get('timestamp', 'unknown time')})",
+        (
+            f"Comparison against {baseline.get('git_commit') or 'unknown'} "
+            f"({baseline.get('timestamp', 'unknown time')})"
+        ),
         "",
     ]
     if reasons:
@@ -687,9 +690,12 @@ def _render_comparison(baseline: dict[str, Any], current: dict[str, Any]) -> str
             "answer.",
             "",
         ]
-    lines = header + [
-        f"{'arm':<{width}}  {'baseline':>10}  {'current':>10}  {'delta':>8}  "
-        f"{'spreads':>13}  {'verdict':>8}",
+    lines = [
+        *header,
+        (
+            f"{'arm':<{width}}  {'baseline':>10}  {'current':>10}  {'delta':>8}  "
+            f"{'spreads':>13}  {'verdict':>8}"
+        ),
         f"{'-' * width}  {'-' * 10}  {'-' * 10}  {'-' * 8}  {'-' * 13}  {'-' * 8}",
     ]
     for arm in current["arms"]:
@@ -717,8 +723,10 @@ def _render_comparison(baseline: dict[str, Any], current: dict[str, Any]) -> str
     lines += [
         "",
         "Compared on in-loop absolutes, which are the stable thing on one box.",
-        "'noise' means the repeat ranges overlap. 'suspect' means they do not,"
-        f" but the change is under {SIGNIFICANT_DELTA_PCT:.0f}%",
+        (
+            "'noise' means the repeat ranges overlap. 'suspect' means they do not,"
+            f" but the change is under {SIGNIFICANT_DELTA_PCT:.0f}%"
+        ),
         "— around this instrument's resolution. Neither is evidence.",
         "",
         "Run it again before believing a single 'faster' or 'SLOWER', and read",

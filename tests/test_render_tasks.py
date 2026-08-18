@@ -9,7 +9,6 @@ stdlib `logging` → `LumberjackHandler` → `RecordStore` → bar.
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import logging
 import re
@@ -20,7 +19,6 @@ import pytest
 pytest.importorskip("rich")
 
 import lumberjack
-import lumberjack.renderers.rich_renderer as rich_renderer_module
 import lumberjack.tracking
 from lumberjack import session
 from lumberjack.detect import OutputMode
@@ -28,55 +26,12 @@ from lumberjack.handler import LumberjackHandler
 from lumberjack.renderers.rich_renderer import RichProgressRenderer
 from lumberjack.session import Session
 from lumberjack.store import RecordStore
-
-
-@dataclasses.dataclass
-class _Rig:
-    """A whole lumberjack pipeline, with the timers replaced by `tick()`."""
-
-    logger: logging.Logger
-    handler: LumberjackHandler
-    store: RecordStore
-    renderer: RichProgressRenderer
-    stream: io.StringIO
-
-    def tick(self) -> None:
-        """One flush-pump drain plus one redraw, run synchronously."""
-        self.store.append(self.handler.drain())
-        self.renderer.refresh()
-
-    def output(self) -> str:
-        return self.stream.getvalue()
+from rich_rig import Rig
+from rich_rig import line as _line
 
 
 @pytest.fixture
-def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the renderer's console believe it is talking to a real terminal."""
-    real_console = rich_renderer_module.Console
-    monkeypatch.setattr(
-        rich_renderer_module,
-        "Console",
-        # legacy_windows pinned off: on a Windows runner rich detects it and
-        # swaps its own `━` for `-`, so an assertion about a bar's shape would
-        # fail there for a reason that has nothing to do with the display.
-        lambda **kwargs: real_console(
-            force_terminal=True, width=100, legacy_windows=False, **kwargs
-        ),
-    )
-
-
-def _line(frame: str, needle: str) -> str:
-    """The needle's line as the *last* frame drew it.
-
-    A live display rewrites in place, so the captured stream holds every frame
-    since the first, separated by carriage returns as well as newlines. The
-    interesting one is always the most recent.
-    """
-    return next(ln for ln in reversed(re.split(r"[\r\n]", frame)) if needle in ln)
-
-
-@pytest.fixture
-def task_rig(as_terminal: None, store: RecordStore) -> Iterator[_Rig]:
+def task_rig(as_terminal: None, store: RecordStore) -> Iterator[Rig]:
     stream = io.StringIO()
     renderer = RichProgressRenderer(
         store, stream=stream, min_repeats=3, refresh_interval=0
@@ -100,7 +55,7 @@ def task_rig(as_terminal: None, store: RecordStore) -> Iterator[_Rig]:
         )
     )
     try:
-        yield _Rig(logger, handler, store, renderer, stream)
+        yield Rig(logger, handler, store, renderer, stream)
     finally:
         session.set_current_session(None)
         root.removeHandler(handler)
@@ -161,7 +116,7 @@ def test_a_container_task_shows_no_count_at_all(task_rig, strip_ansi):
 
 
 def test_subtasks_are_indented_under_their_parent(task_rig, strip_ansi):
-    with lumberjack.task("outer") as outer:
+    with lumberjack.task("outer") as outer:  # noqa: SIM117 - nesting is the hierarchy
         with outer.subtask("inner"):
             task_rig.tick()
     out = strip_ansi(task_rig.output())

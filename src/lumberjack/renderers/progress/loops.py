@@ -45,7 +45,7 @@ whatever nesting depth the child sits at.
 from __future__ import annotations
 
 import dataclasses
-import os
+import ntpath
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -437,7 +437,9 @@ class LoopRowModel:
         """
         template = self._templates.template(source)
         described = describe_template(template) if template else ""
-        return described or f"{os.path.basename(source.pathname)}:{source.lineno}"
+        # `ntpath.basename`, on every platform — see `SourceKey.format`.
+        where = ntpath.basename(source.pathname)
+        return described or f"{where}:{source.lineno}"
 
     def _parent_row(self, key: SourceKey, clock: BarState) -> SourceKey | None:
         """Which row this one runs inside: the AST first, then the timing.
@@ -554,7 +556,10 @@ class LoopRowModel:
             if group is not None and group.kind == "loop":
                 label = group.at.format()
             else:
-                label = f"{os.path.basename(key.pathname)} {key.func_name}()"
+                # `ntpath.basename` on every platform — see `SourceKey.format`
+                # for why not `os.path`: a record's pathname may be foreign.
+                base = ntpath.basename(key.pathname)
+                label = f"{base} {key.func_name}()"
         else:
             template = self._templates.template(key)
             described = describe_template(template) if template else ""
@@ -582,10 +587,22 @@ class LoopRowModel:
         """
         present = [key for key in self._order if key in rows]
         structural = depth_first_order(present, {k: r.parent for k, r in rows.items()})
+        # Reading `roots[parent]` here relies on `depth_first_order` having
+        # already placed every parent ahead of its children, which `_depths`
+        # states for its own walk and this one needs just as much: a child
+        # seen first would be rooted at itself and tear off its own subtree.
+        #
+        # Not `roots.get(parent, key)`, which ruff offers: `parent` is
+        # `SourceKey | None`, the `in` test narrows it and `.get()` does not,
+        # so the tidier form fails `mypy --strict src` — a required check.
         roots: dict[SourceKey, SourceKey] = {}
         for key in structural:
             parent = rows[key].parent
-            roots[key] = roots[parent] if parent in roots else key
+            # SIM401 would have this `roots.get(parent, key)`, which does not
+            # typecheck: `parent` is `SourceKey | None`, `dict.get` takes the
+            # key type, and `in` takes `object`. The rewrite trades a required
+            # CI check for a line of prose.
+            roots[key] = roots[parent] if parent in roots else key  # noqa: SIM401
         subtrees: dict[SourceKey, list[SourceKey]] = {}
         for key in structural:
             subtrees.setdefault(roots[key], []).append(key)

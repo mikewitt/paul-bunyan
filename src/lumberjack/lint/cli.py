@@ -31,6 +31,13 @@ EXIT_NO_FILES: Final = 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """The argparse entry point; the return value is the process exit code.
+
+    `argv` of None reads `sys.argv[1:]`, argparse's own convention.
+    `EXIT_NO_FILES` when nothing was analysed, `EXIT_FINDINGS` when at least
+    one finding gates, and 0 otherwise — including every `--agent-rules` run,
+    which prints its block and returns before the no-files check.
+    """
     parser = argparse.ArgumentParser(
         prog="python -m lumberjack.lint",
         description=(

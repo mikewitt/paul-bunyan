@@ -168,7 +168,7 @@ def test_progress_without_a_total_reads_as_a_bare_count(session):
 
 
 def test_a_failing_task_records_the_exception_at_error(session):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: SIM117 - the raise must cross __exit__
         with lumberjack.task("doomed"):
             raise ValueError("boom")
     end = session.read()[-1]
@@ -181,7 +181,7 @@ def test_a_failing_task_records_the_exception_at_error(session):
 def test_the_failure_row_carries_a_traceback(session):
     """The one record type with an exception in hand should fill the column
     the schema keeps for one."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: SIM117 - the raise must cross __exit__
         with lumberjack.task("doomed"):
             raise ValueError("boom")
     end = session.read()[-1]
@@ -225,7 +225,7 @@ def test_layering_sends_task_events_to_the_application_too(capsys, make_session)
 
 
 def test_a_nested_task_records_its_parent(session):
-    with lumberjack.task("outer") as outer:
+    with lumberjack.task("outer") as outer:  # noqa: SIM117 - nesting is the hierarchy
         with lumberjack.task("inner") as inner:
             assert inner.parent_task_id == outer.task_id
     inner_rows = [r for r in session.read() if r.task_label == "inner"]
@@ -293,7 +293,7 @@ def test_nesting_unwinds_in_order():
 
 
 def test_a_subtask_takes_its_own_total(session):
-    with lumberjack.task("parent") as parent:
+    with lumberjack.task("parent") as parent:  # noqa: SIM117 - nesting is the hierarchy
         with parent.subtask("child", total=5) as child:
             child.advance()
     rows = [r for r in session.read() if r.task_label == "child"]
@@ -314,7 +314,7 @@ def test_end_is_idempotent(session):
 
 def test_a_handle_cannot_be_entered_twice(session):
     t = lumberjack.task("once")
-    with t:
+    with t:  # noqa: SIM117 - t must be open for the re-entry
         with pytest.raises(RuntimeError, match="cannot be entered twice"):
             t.__enter__()
 
@@ -335,7 +335,9 @@ def test_advancing_after_the_end_is_a_noop(session):
 
 
 def test_an_exception_propagates_out_of_the_with(session):
-    with pytest.raises(ValueError, match="boom"):
+    # The exception has to cross `task.__exit__` to reach `pytest.raises`,
+    # and one combined `with` hides that ordering — which is the test.
+    with pytest.raises(ValueError, match="boom"):  # noqa: SIM117
         with lumberjack.task("doomed"):
             raise ValueError("boom")
 
@@ -546,7 +548,7 @@ def test_an_earlier_exit_does_not_evict_a_still_open_later_task(session):
 def test_a_finished_task_is_never_a_parent(session):
     """Whatever the token bookkeeping does, the ambient lookup walks past
     handles that have already ended."""
-    with lumberjack.task("outer") as outer:
+    with lumberjack.task("outer") as outer:  # noqa: SIM117 - the depth is the hierarchy
         with lumberjack.task("middle") as middle:
             middle.end()
             with lumberjack.task("child") as child:
@@ -726,7 +728,7 @@ def test_a_task_filtered_out_at_start_emits_no_rows_at_all(make_session):
     without an all-or-nothing gate a failing task under `init(level=WARNING)`
     would write a lone `end` row with no `start` to anchor it."""
     with make_session(level=logging.WARNING) as live:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError):  # noqa: SIM117 - the raise must cross __exit__
             with lumberjack.task("filtered"):
                 raise ValueError("boom")
         assert live.events() == []

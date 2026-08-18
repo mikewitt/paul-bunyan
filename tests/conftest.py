@@ -31,13 +31,15 @@ def _available_backends() -> dict[str, Callable[[], RecordStore]]:
     backends: dict[str, Callable[[], RecordStore]] = {
         "sqlite": lambda: SQLiteRecordStore(":memory:"),
     }
-    try:
+    try:  # noqa: SIM105 - suppress() has no `else:` to hang the block below on
         import duckdb  # noqa: F401
     except ImportError:
         pass
     # else: a future DuckDBRecordStore slots in here, e.g.:
-    #     from lumberjack.store import DuckDBRecordStore
-    #     backends["duckdb"] = lambda: DuckDBRecordStore(":memory:")
+    # ERA001 on the next two: this is the worked example of where a second
+    # backend slots in, not code someone forgot to delete.
+    #     from lumberjack.store import DuckDBRecordStore  # noqa: ERA001
+    #     backends["duckdb"] = lambda: DuckDBRecordStore(":memory:")  # noqa: ERA001
     return backends
 
 
@@ -54,38 +56,97 @@ def scripts_dir() -> Path:
 
 
 @pytest.fixture
+def make_log_record() -> Callable[..., logging.LogRecord]:
+    """Build a raw stdlib `LogRecord` with sane defaults; override by keyword.
+
+    The input side of `make_row`'s output: what `LogRecordRow.from_log_record`
+    is handed, for the tests that exercise that conversion rather than
+    starting from a row. `pathname` matches `make_row`'s default so the two
+    describe the same fictional source location from either end.
+
+    Not `__file__`, which is what both per-file copies of this said before
+    they were folded into one. That was correct while it sat in the test
+    module and silently wrong here: it would resolve to *conftest*, so
+    `pathname`, `filename` and `module` — the three columns source-location
+    identity is built on — would report this file rather than the caller's.
+    Nothing asserts on them today, which is exactly why it would have gone
+    unnoticed.
+    """
+
+    def _make(**overrides: object) -> logging.LogRecord:
+        kwargs: dict[str, object] = {
+            "name": "test.logger",
+            "level": logging.INFO,
+            "pathname": "/nonexistent/foo.py",
+            "lineno": 42,
+            "msg": "hello %s",
+            "args": ("world",),
+            "exc_info": None,
+        }
+        kwargs.update(overrides)
+        return logging.LogRecord(**kwargs)  # type: ignore[arg-type]
+
+    return _make
+
+
+@pytest.fixture
+def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the renderer's console believe it is talking to a real terminal.
+
+    Here rather than beside the rest of the rich rig in `tests/rich_rig.py`,
+    because a fixture body runs only when a test requests it: the rich import
+    below never executes under the `bare install (no rich)` job, which imports
+    this file unconditionally. A module-scope import could not say that.
+    """
+    import lumberjack.renderers.rich_renderer as rich_renderer_module
+
+    real_console = rich_renderer_module.Console
+    monkeypatch.setattr(
+        rich_renderer_module,
+        "Console",
+        # legacy_windows pinned off: on a Windows runner rich detects it and
+        # swaps its own `━` for `-`, so an assertion about a bar's shape would
+        # fail there for a reason that has nothing to do with the display.
+        # What rich does on a legacy console has its own tests.
+        lambda **kwargs: real_console(
+            force_terminal=True, width=100, legacy_windows=False, **kwargs
+        ),
+    )
+
+
+@pytest.fixture
 def make_row() -> Callable[..., LogRecordRow]:
     """Build a LogRecordRow with sane defaults; override any field by keyword."""
 
     def _make(**overrides: object) -> LogRecordRow:
-        fields: dict[str, object] = dict(
-            logger_name="test",
-            level_name="INFO",
-            level_no=20,
-            msg="msg",
-            message="hello world",
-            pathname="/nonexistent/foo.py",
-            filename="foo.py",
-            module="foo",
-            func_name="bar",
-            lineno=10,
-            created=time.time(),
-            thread=1,
-            thread_name="MainThread",
-            process=100,
-            process_name="MainProcess",
-            exc_text=None,
-            stack_text=None,
-            asyncio_task_name=None,
-            asyncio_task_id=None,
-            task_id=None,
-            parent_task_id=None,
-            task_label=None,
-            task_event=None,
-            progress_current=None,
-            progress_total=None,
-            template_id=None,
-        )
+        fields: dict[str, object] = {
+            "logger_name": "test",
+            "level_name": "INFO",
+            "level_no": 20,
+            "msg": "msg",
+            "message": "hello world",
+            "pathname": "/nonexistent/foo.py",
+            "filename": "foo.py",
+            "module": "foo",
+            "func_name": "bar",
+            "lineno": 10,
+            "created": time.time(),
+            "thread": 1,
+            "thread_name": "MainThread",
+            "process": 100,
+            "process_name": "MainProcess",
+            "exc_text": None,
+            "stack_text": None,
+            "asyncio_task_name": None,
+            "asyncio_task_id": None,
+            "task_id": None,
+            "parent_task_id": None,
+            "task_label": None,
+            "task_event": None,
+            "progress_current": None,
+            "progress_total": None,
+            "template_id": None,
+        }
         fields.update(overrides)
         return LogRecordRow(**fields)  # type: ignore[arg-type]
 
@@ -180,14 +241,14 @@ def make_task_event() -> Callable[..., TaskEvent]:
     """A TaskEvent with every progress column populated; override by keyword."""
 
     def _make(**overrides: object) -> TaskEvent:
-        fields: dict[str, object] = dict(
-            label="reindex",
-            kind="update",
-            task_id=7,
-            parent_task_id=3,
-            current=40,
-            total=100,
-        )
+        fields: dict[str, object] = {
+            "label": "reindex",
+            "kind": "update",
+            "task_id": 7,
+            "parent_task_id": 3,
+            "current": 40,
+            "total": 100,
+        }
         fields.update(overrides)
         return TaskEvent(**fields)  # type: ignore[arg-type]
 
@@ -237,7 +298,7 @@ def make_session() -> Callable[..., contextlib.AbstractContextManager[TrackingSe
     @contextlib.contextmanager
     def _make(**init_kwargs: object) -> Iterator[TrackingSession]:
         store = SQLiteRecordStore(":memory:")
-        kwargs: dict[str, object] = dict(output_mode="plain", flush_interval=0)
+        kwargs: dict[str, object] = {"output_mode": "plain", "flush_interval": 0}
         kwargs.update(init_kwargs)
         lumberjack.init(store=store, **kwargs)  # type: ignore[arg-type]
         try:

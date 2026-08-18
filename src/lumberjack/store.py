@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from operator import attrgetter
-from typing import NamedTuple
+from typing import NamedTuple, override
 
 from lumberjack.schema import LogRecordRow, SourceKey, StoredRecord
 
@@ -130,11 +130,35 @@ _INSERT_SQL = f"INSERT INTO records ({_COLS}) VALUES ({_PLACEHOLDERS})"  # nosec
 
 
 class RecordStore(abc.ABC):
-    # These methods carry the contract every backend implements against, and
-    # none of it is written down yet. lumberjack: see issue #15
+    """What every reader talks to, and the contract a backend implements.
+
+    The methods below are the specification; `SQLiteRecordStore` is one
+    implementation of them and is not it. Where that class's docstrings say
+    anything, they say what SQLite does about a requirement stated here —
+    never what a store must do.
+
+    Concurrent calls from several threads must work, and that is a
+    requirement of the interface rather than a convenience of the default
+    backend: in an ordinary session the flush pump appends from one thread
+    while the display's redraw timer reads from another, and `shutdown()`
+    appends and closes from whichever thread called it. `SQLiteRecordStore`
+    meets it with one internal lock serializing every statement; another
+    backend may meet it some other way, but not skip it.
+    """
 
     @abc.abstractmethod
-    def append(self, rows: Sequence[LogRecordRow]) -> None: ...
+    def append(self, rows: Sequence[LogRecordRow]) -> None:
+        """Take a batch of captured rows and keep every one of them.
+
+        The only write path, and the lossless half of Principle 6: a record
+        that reached here and did not reach the store is a bug rather than a
+        trade-off. Rows arrive in the order they were logged and the store
+        assigns each an ascending id — every watermark below is one of those
+        ids, so that ordering is contract and not incident.
+
+        An empty `rows` does nothing, which is the ordinary case: the pump
+        ticks on a timer whether or not anything was logged.
+        """
 
     @abc.abstractmethod
     def recent(
@@ -152,35 +176,104 @@ class RecordStore(abc.ABC):
 
         Oldest-first even though the newest are the ones selected, because
         every consumer — the exit dump, the examples, a human reading a tail
-        — wants them in the order they happened.
+        — wants them in the order they happened. That is also why there is
+        deliberately no separate `tail()`: the last `n` in the order they
+        happened is already what a tail means, and it is what `atexit`'s
+        diagnostic dump reads.
         """
 
     @abc.abstractmethod
     def count_by_template(
         self, window_seconds: float | None = None
-    ) -> Mapping[int | None, int]: ...
+    ) -> Mapping[int | None, int]:
+        """How many records carry each template id, including none at all.
+
+        Records with no template group under a `None` key, which today is
+        every captured record: `template_id` is a reserved column and nothing
+        writes it yet. `window_seconds` narrows the tally to records created
+        within that many seconds of now; without it it covers the whole
+        store.
+        """
 
     @abc.abstractmethod
     def count_by_source(
         self, window_seconds: float | None = None
-    ) -> Mapping[SourceKey, int]: ...
+    ) -> Mapping[SourceKey, int]:
+        """How many records each source location produced.
+
+        Counts everything, the tracking API's own rows included — unlike
+        `count_by_source_since()`, which drops them. `window_seconds` narrows
+        it as in `count_by_template()`. There is no watermark, so the cost is
+        the whole store every time: this answers a one-off question, never a
+        redraw loop's.
+        """
 
     @abc.abstractmethod
-    def count_by_source_since(self, after_id: int) -> SourceDelta: ...
+    def count_by_source_since(self, after_id: int) -> SourceDelta:
+        """Per-source counts for the rows appended after `after_id`.
+
+        The one method anything on a timer should call: it groups only what
+        is past the watermark, so a poll costs what arrived rather than what
+        the store holds. `SourceDelta.last_id` is the next call's `after_id`
+        and spans every row in the range — including the ones the counts drop
+        — so nothing is ever rescanned, and a delta with no new rows returns
+        `after_id` unchanged rather than rewinding.
+
+        Task-event rows are excluded from the counts, because the tracking
+        API knows its own exact numbers and draws its own bars; they still
+        move the watermark. Grouping is by worker
+        `(process, thread, asyncio_task_id)` as well as by source, and
+        `SourceDelta.workers` reports which workers each line was seen on —
+        containment analysis needs a shared worker before it may call one
+        loop nested inside another.
+        """
 
     @abc.abstractmethod
-    def task_events_since(self, after_id: int) -> TaskDelta: ...
+    def task_events_since(self, after_id: int) -> TaskDelta:
+        """The tracking API's rows appended after `after_id`, oldest first.
+
+        Rows rather than aggregates: a task bar is the latest state per task
+        rather than a tally, and there are few of them because progress ticks
+        are sampled. The watermark works as `count_by_source_since()`'s does
+        — `last_id` spans the whole range, ordinary records included, so they
+        are never rescanned.
+
+        The rows and `last_id` have to describe one snapshot. Read
+        separately, an event landing between them sits below the new
+        watermark and is skipped for good.
+        """
 
     @abc.abstractmethod
     def evict(
         self, *, before: float | None = None, keep_last: int | None = None
-    ) -> int: ...
+    ) -> int:
+        """Drop old records, by age or by count, and say how many went.
+
+        Exactly one of `before` and `keep_last`, or `ValueError` — neither
+        absence is a default worth guessing at. `before` is a `time.time()`
+        timestamp and is exclusive. `keep_last` is a floor rather than a
+        target: asking to keep more rows than exist deletes nothing, and zero
+        clears the store rather than meaning "no limit".
+        """
 
     @abc.abstractmethod
-    def templates(self) -> Sequence[int]: ...
+    def templates(self) -> Sequence[int]:
+        """The distinct template ids present, NULL excluded.
+
+        Empty today, since nothing writes `template_id` — the records
+        `count_by_template()` files under `None` have no id to return here.
+        """
 
     @abc.abstractmethod
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the backend's resources; the store is finished afterwards.
+
+        Not a flush and not a reset: nothing is promised about a closed store
+        beyond its being closed, and a backend is free to raise out of any
+        later query rather than answer one. `shutdown()` closes only a store
+        lumberjack created — one handed to `init()` stays open and remains the
+        caller's to close.
+        """
 
 
 _SCHEMA = """
@@ -272,7 +365,9 @@ class SQLiteRecordStore(RecordStore):
                 "one."
             )
 
+    @override
     def append(self, rows: Sequence[LogRecordRow]) -> None:
+        """One `executemany` and one commit per call: the batch is the unit."""
         if not rows:
             return
         values = list(map(_GET_COLUMNS, rows))
@@ -284,11 +379,13 @@ class SQLiteRecordStore(RecordStore):
         kwargs = {col: row[col] for col in _COLUMNS}
         return StoredRecord(id=row["id"], **kwargs)
 
+    @override
     def recent(
         self,
         n: int | None = DEFAULT_RECENT_LIMIT,
         since: float | None = None,
     ) -> Sequence[StoredRecord]:
+        """Selected newest-first by rowid under the `LIMIT`, reversed here."""
         sql = "SELECT * FROM records"
         params: list[object] = []
         if since is not None:
@@ -304,9 +401,16 @@ class SQLiteRecordStore(RecordStore):
             rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return [self._row_to_stored(r) for r in reversed(rows)]
 
+    @override
     def count_by_template(
         self, window_seconds: float | None = None
     ) -> Mapping[int | None, int]:
+        """Grouped off `idx_records_template_id`, so no temporary b-tree.
+
+        Unwindowed the index covers the query outright; `window_seconds` adds
+        `created`, which that index does not carry, so the rows are visited.
+        The grouping stays in index order either way.
+        """
         sql = "SELECT template_id, COUNT(*) AS cnt FROM records"
         params: list[object] = []
         if window_seconds is not None:
@@ -319,12 +423,15 @@ class SQLiteRecordStore(RecordStore):
             rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return {r["template_id"]: r["cnt"] for r in rows}
 
+    @override
     def count_by_source(
         self, window_seconds: float | None = None
     ) -> Mapping[SourceKey, int]:
-        """Whole-store tally. O(rows) — for one-off queries, not a redraw loop.
+        """Grouped off `idx_records_source`, in index order and unsorted.
 
-        Anything polling on a timer wants `count_by_source_since()` instead.
+        That is the same plan `count_by_source_since()` refuses with
+        `NOT INDEXED`, and the right one here: with no watermark every row is
+        in range anyway, so there is nothing to seek past.
         """
         sql = "SELECT pathname, lineno, func_name, COUNT(*) AS cnt FROM records"
         params: list[object] = []
@@ -341,25 +448,18 @@ class SQLiteRecordStore(RecordStore):
             for r in rows
         }
 
+    @override
     def count_by_source_since(self, after_id: int) -> SourceDelta:
-        """Group only the rows appended after `after_id`.
+        """A rowid-range delta, grouped in one pass.
 
-        Costs what arrived since the last call rather than what the store
-        holds, which is what lets a redraw run five times a second against a
-        million rows.
-
-        Task-event rows are excluded from the counts: the tracking API knows
-        its own exact numbers and gets its own bars, so counting its rows here
-        too would draw a source-location bar beside every named one.
-
-        They are excluded by *grouping*, not by a `WHERE` clause, and that
-        matters. Filtering them out of the range would take `MAX(id)` over the
-        surviving rows only, so a delta whose newest rows are all task events
-        would leave the watermark behind them — and every later poll would
-        rescan a range that only grows. Grouping on the predicate keeps the
-        watermark over the whole range while still dropping the counts.
-        Measured at a 5,000-row delta over 300k rows: 1.8ms against 2.2ms,
-        same query plan.
+        Task rows are dropped by *grouping* on the predicate, not by a
+        `WHERE` clause, and that matters. Filtering them out of the range
+        would take `MAX(id)` over the surviving rows only, so a delta whose
+        newest rows are all task events would leave the watermark behind them
+        — and every later poll would rescan a range that only grows. Grouping
+        on the predicate keeps the watermark over the whole range while still
+        dropping the counts. Measured at a 5,000-row delta over 300k rows:
+        1.8ms against 2.2ms, same query plan.
 
         `NOT INDEXED` is load-bearing, not leftover debugging. Left to itself
         SQLite serves the GROUP BY from `idx_records_source` as a covering
@@ -415,17 +515,13 @@ class SQLiteRecordStore(RecordStore):
             workers={k: frozenset(v) for k, v in workers.items()},
         )
 
+    @override
     def task_events_since(self, after_id: int) -> TaskDelta:
-        """The tracking API's rows appended after `after_id`, oldest first.
+        """No index on `task_event`, deliberately.
 
-        The same watermark contract as `count_by_source_since()`: costs what
-        arrived, not what the store holds. Rows rather than aggregates,
-        because a task bar is the *latest* state per task rather than a tally
-        — and there are few of them, since progress ticks are sampled.
-
-        No index on `task_event`, deliberately: the rowid range already bounds
-        the scan to the delta, and an index would cost every write to speed up
-        a filter over rows we are reading anyway. Measured below.
+        The rowid range already bounds the scan to the delta, so an index
+        would cost every write to speed up a filter over rows this is reading
+        anyway.
         """
         sql = (
             "SELECT id, task_id, parent_task_id, task_label, task_event, "
@@ -458,9 +554,15 @@ class SQLiteRecordStore(RecordStore):
         )
         return TaskDelta(events, top)
 
+    @override
     def evict(
         self, *, before: float | None = None, keep_last: int | None = None
     ) -> int:
+        """Bounded eviction deletes over an index range: `created`, or the rowid.
+
+        `keep_last=0` is neither — an unqualified `DELETE FROM records`, with
+        no predicate and no index to range over.
+        """
         if (before is None) == (keep_last is None):
             raise ValueError("evict() requires exactly one of before, keep_last")
         # keep_last first: the guard above already established exactly one is
@@ -487,13 +589,26 @@ class SQLiteRecordStore(RecordStore):
             self._conn.commit()
             return cur.rowcount
 
+    @override
     def templates(self) -> Sequence[int]:
+        """One `SELECT DISTINCT`, off `idx_records_template_id`.
+
+        The index covers it and the NULL filter is a range bound on that
+        index, so nothing touches the table.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT DISTINCT template_id FROM records WHERE template_id IS NOT NULL"
             ).fetchall()
         return [r["template_id"] for r in rows]
 
+    @override
     def close(self) -> None:
+        """One `close()` on the `sqlite3` connection, under the lock.
+
+        A second `close()` is a no-op, but every later *query* raises
+        `sqlite3.ProgrammingError` — which is what `shutdown()` leaves behind
+        for a store it owned.
+        """
         with self._lock:
             self._conn.close()

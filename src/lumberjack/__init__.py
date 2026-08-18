@@ -26,18 +26,18 @@ except importlib.metadata.PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
-    "init",
-    "shutdown",
+    "TaskHandle",
+    "__version__",
+    "current_handler",
+    "current_output_mode",
+    "current_renderer",
+    "current_store",
     "flush",
+    "init",
+    "is_initialized",
+    "shutdown",
     "task",
     "track",
-    "TaskHandle",
-    "is_initialized",
-    "current_handler",
-    "current_store",
-    "current_renderer",
-    "current_output_mode",
-    "__version__",
 ]
 
 

@@ -51,8 +51,10 @@ def format_report(report: Report) -> str:
         if finding.rule in ("loop-not-logged", "loop-logs-around")
     )
     summary = [
-        f"{report.files} file(s): {report.loops} loops, {report.call_sites} log "
-        f"calls, {report.repeating_call_sites} of them inside a loop body.",
+        (
+            f"{report.files} file(s): {report.loops} loops, {report.call_sites} "
+            f"log calls, {report.repeating_call_sites} of them inside a loop body."
+        ),
     ]
     if report.files_without_logging:
         summary.append(

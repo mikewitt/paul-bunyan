@@ -229,6 +229,10 @@ class CyclePositionModel:
         found = structure.loops.get(loop.lineno)
         if found is None:  # pragma: no cover - likewise
             return None
+        # `call_sites` counts what the AST recognised, which is not the same
+        # as what a record can match — a member refused downstream by the
+        # `funcName` check still admits the row here. See issue #83.
+        # lumberjack: see issue #83
         if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
             return None
         width = max(

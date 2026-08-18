@@ -13,7 +13,7 @@ from lumberjack.detect import (
 
 
 class _FakeStream(io.StringIO):
-    def __init__(self, tty: bool) -> None:
+    def __init__(self, *, tty: bool) -> None:
         super().__init__()
         self._tty = tty
 

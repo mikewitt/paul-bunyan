@@ -346,34 +346,59 @@ class RepeatingSourceModel:
                     # candidate standing rather than resetting it: a quiet
                     # poll is not evidence against the pairing either.
                     continue
-                parent = self._enclosing(source, levels[:depth])
-                if parent is None:
-                    self._candidate.pop(source, None)
-                    continue
-                ratio = self._period[parent] / self._period[source]
-                if ratio < MIN_NESTING_RATIO:
-                    self._candidate.pop(source, None)
-                    continue
-                seen = self._candidate.get(source)
-                if (
-                    seen is not None
-                    and seen[0] == parent
-                    and abs(ratio - seen[1]) <= RATIO_TOLERANCE * seen[1]
-                ):
-                    confirmations = seen[2] + 1
-                else:
-                    confirmations = 1
-                if confirmations >= CONTAINMENT_CONFIRMATIONS:
-                    self._parent[source] = parent
-                    self._total[source] = round(ratio)
-                    self._candidate.pop(source, None)
-                    # The cycle starts now rather than at the run's first
-                    # record: the count so far spans however many enclosing
-                    # iterations already went by, and charging those to the
-                    # first drawn cycle would show an instant overrun.
-                    self._cycle_base[source] = self._totals[source]
-                else:
-                    self._candidate[source] = (parent, ratio, confirmations)
+                self._weigh_pairing(source, levels[:depth])
+
+    def _weigh_pairing(self, source: SourceKey, outer: list[list[SourceKey]]) -> None:
+        """One source that has just moved: re-measure its pairing, or forget it.
+
+        Split out of `_infer_containment` above, which is left holding only
+        the two questions about *whether* to look at a source at all. What is
+        here is the measurement itself, and it has exactly three outcomes: no
+        usable parent (forget any standing candidate), enough agreement to
+        believe (freeze it), or one more agreeing poll on the tally.
+
+        Forgetting is deliberate rather than incidental. A source whose
+        enclosing candidate has gone, or whose ratio has fallen below
+        `MIN_NESTING_RATIO`, has actively contradicted the pairing — unlike a
+        quiet poll, which says nothing and leaves the tally alone.
+        """
+        parent = self._enclosing(source, outer)
+        if parent is None:
+            self._candidate.pop(source, None)
+            return
+        ratio = self._period[parent] / self._period[source]
+        if ratio < MIN_NESTING_RATIO:
+            self._candidate.pop(source, None)
+            return
+        confirmations = self._confirmations(source, parent, ratio)
+        if confirmations < CONTAINMENT_CONFIRMATIONS:
+            self._candidate[source] = (parent, ratio, confirmations)
+            return
+        self._parent[source] = parent
+        self._total[source] = round(ratio)
+        self._candidate.pop(source, None)
+        # The cycle starts now rather than at the run's first record: the
+        # count so far spans however many enclosing iterations already went
+        # by, and charging those to the first drawn cycle would show an
+        # instant overrun.
+        self._cycle_base[source] = self._totals[source]
+
+    def _confirmations(self, source: SourceKey, parent: SourceKey, ratio: float) -> int:
+        """How many consecutive re-measurements have agreed on this pairing.
+
+        Agreement is on *both* halves — the same parent and a ratio within
+        `RATIO_TOLERANCE` of the one last seen. A pairing that changes either
+        starts its tally over at one rather than inheriting the old count,
+        because what the tally is counting is consecutive agreement.
+        """
+        seen = self._candidate.get(source)
+        if (
+            seen is not None
+            and seen[0] == parent
+            and abs(ratio - seen[1]) <= RATIO_TOLERANCE * seen[1]
+        ):
+            return seen[2] + 1
+        return 1
 
     def _enclosing(
         self, source: SourceKey, outer: list[list[SourceKey]]

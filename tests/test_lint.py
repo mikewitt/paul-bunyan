@@ -486,7 +486,7 @@ def test_findings_are_reported_in_order_of_value(
     ranks = [lint.RULE_ORDER.index(finding.rule) for finding in findings]
     assert ranks == sorted(ranks)
     # #40's table, top to bottom, and every one of it reachable.
-    assert set(finding.rule for finding in findings) == set(lint.RULE_ORDER) - {
+    assert {finding.rule for finding in findings} == set(lint.RULE_ORDER) - {
         "nothing-repeating"
     }
 

@@ -15,7 +15,6 @@ property, that a timer redraws without anyone asking, uses `wait_until`.
 
 from __future__ import annotations
 
-import dataclasses
 import io
 import logging
 import re
@@ -34,6 +33,8 @@ from lumberjack.handler import LumberjackHandler
 from lumberjack.renderers.progress import LoopRowModel
 from lumberjack.renderers.rich_renderer import RichProgressRenderer
 from lumberjack.store import RecordStore
+from rich_rig import Rig
+from rich_rig import line as _line
 
 _TIMER_THREAD = "lumberjack-progress"
 
@@ -79,29 +80,10 @@ def make_renderer(
         renderer.close()
 
 
-@dataclasses.dataclass
-class _Rig:
-    """A whole lumberjack pipeline, with the timers replaced by `tick()`."""
-
-    logger: logging.Logger
-    handler: LumberjackHandler
-    store: RecordStore
-    renderer: RichProgressRenderer
-    stream: io.StringIO
-
-    def tick(self) -> None:
-        """One flush-pump drain plus one redraw, run synchronously."""
-        self.store.append(self.handler.drain())
-        self.renderer.refresh()
-
-    def output(self) -> str:
-        return self.stream.getvalue()
-
-
 @pytest.fixture
 def rig(
     store: RecordStore, make_renderer: Callable[..., RichProgressRenderer]
-) -> Iterator[_Rig]:
+) -> Iterator[Rig]:
     """A thin wrapper over `make_renderer`: the same tracked renderer, plus
     the logger/handler that feeds it so a test can log through the real
     capture path."""
@@ -113,32 +95,12 @@ def rig(
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     try:
-        yield _Rig(logger, handler, store, renderer, stream)
+        yield Rig(logger, handler, store, renderer, stream)
     finally:
         logger.removeHandler(handler)
 
 
-@pytest.fixture
-def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the renderer's console believe it is talking to a real terminal."""
-    real_console = rich_renderer_module.Console
-    monkeypatch.setattr(
-        rich_renderer_module,
-        "Console",
-        # legacy_windows pinned off: on a Windows runner rich detects it and
-        # swaps its own `━` for `-`, so an assertion about a bar's shape would
-        # fail there for a reason that has nothing to do with the display.
-        # What rich does on a legacy console has its own tests.
-        lambda **kwargs: real_console(
-            force_terminal=True, width=100, legacy_windows=False, **kwargs
-        ),
-    )
-
-
-# --- the premise -----------------------------------------------------------
-
-
-def test_a_loop_of_log_lines_becomes_one_advancing_bar(rig: _Rig):
+def test_a_loop_of_log_lines_becomes_one_advancing_bar(rig: Rig):
     for i in range(50):
         rig.logger.info("processing item %d", i)
     rig.tick()
@@ -150,7 +112,7 @@ def test_a_loop_of_log_lines_becomes_one_advancing_bar(rig: _Rig):
     assert label.endswith("test_a_loop_of_log_lines_becomes_one_advancing_bar()")
 
 
-def test_the_loop_lines_never_scroll(rig: _Rig):
+def test_the_loop_lines_never_scroll(rig: Rig):
     for i in range(50):
         rig.logger.info("processing item %d", i)
     rig.tick()
@@ -158,7 +120,7 @@ def test_the_loop_lines_never_scroll(rig: _Rig):
     assert "processing item" not in rig.output()
 
 
-def test_counts_come_from_the_store_not_the_callback(rig: _Rig):
+def test_counts_come_from_the_store_not_the_callback(rig: Rig):
     # Store, then render: records that never reached the store must not show
     # up in a bar, even though `render()` saw every one of them.
     for i in range(10):
@@ -170,7 +132,7 @@ def test_counts_come_from_the_store_not_the_callback(rig: _Rig):
     assert [b.count for b in rig.renderer.bars()] == [10]
 
 
-def test_records_written_by_another_writer_reach_the_bar(rig: _Rig, make_row):
+def test_records_written_by_another_writer_reach_the_bar(rig: Rig, make_row):
     # Same corollary from the other side: anything in the store counts, even
     # if this renderer's `render()` never saw it (a second thread, a second
     # process, or a future OTel bridge).
@@ -242,7 +204,7 @@ def test_the_environment_sets_the_ceiling(
 # --- lossy display, lossless store ----------------------------------------
 
 
-def test_swallowed_records_are_still_in_the_store(rig: _Rig):
+def test_swallowed_records_are_still_in_the_store(rig: Rig):
     for i in range(20):
         rig.logger.info("processing item %d", i)
     rig.tick()
@@ -251,7 +213,7 @@ def test_swallowed_records_are_still_in_the_store(rig: _Rig):
     assert messages[0] == "processing item 0"
 
 
-def test_a_warning_still_prints_above_the_bars(rig: _Rig):
+def test_a_warning_still_prints_above_the_bars(rig: Rig):
     for i in range(5):
         rig.logger.info("processing item %d", i)
     rig.logger.warning("disk is filling up")
@@ -261,7 +223,7 @@ def test_a_warning_still_prints_above_the_bars(rig: _Rig):
     assert "processing item" not in output
 
 
-def test_a_traceback_still_prints_above_the_bars(rig: _Rig):
+def test_a_traceback_still_prints_above_the_bars(rig: Rig):
     try:
         raise RuntimeError("boom")
     except RuntimeError:
@@ -281,7 +243,7 @@ def test_records_below_the_passthrough_level_are_collapsed(make_row, make_render
 # --- redraw cadence --------------------------------------------------------
 
 
-def test_log_volume_never_triggers_a_redraw(rig: _Rig, monkeypatch):
+def test_log_volume_never_triggers_a_redraw(rig: Rig, monkeypatch):
     redraws = 0
 
     def count_redraw() -> None:
@@ -333,7 +295,7 @@ def test_close_is_idempotent(make_renderer):
     renderer.close()
 
 
-def test_close_draws_a_final_frame(rig: _Rig):
+def test_close_draws_a_final_frame(rig: Rig):
     # Whatever the timer last drew is stale by the time a run ends; the counts
     # it finished on are the ones worth leaving on screen.
     for i in range(9):
@@ -441,16 +403,6 @@ def _nested_frame(
         at += 8.0
         renderer.refresh()
     return strip_ansi(stream.getvalue())
-
-
-def _line(frame: str, needle: str) -> str:
-    """The needle's line as the *last* frame drew it.
-
-    A live display rewrites in place, so the captured stream holds every frame
-    since the first, separated by carriage returns as well as newlines. The
-    interesting one is always the most recent.
-    """
-    return next(ln for ln in reversed(re.split(r"[\r\n]", frame)) if needle in ln)
 
 
 def test_a_nested_bar_moves_under_its_parent_when_containment_settles(
@@ -838,7 +790,7 @@ def test_the_live_display_does_route_stderr(as_terminal, make_renderer):
 # have no model-level twin.
 
 
-def _heartbeat_line(rig: _Rig, strip_ansi) -> str:
+def _heartbeat_line(rig: Rig, strip_ansi) -> str:
     """The heartbeat row as the last frame drew it.
 
     Found by the event count rather than by the glyph, which is the thing
@@ -853,7 +805,7 @@ def live(
     as_terminal: None,
     store: RecordStore,
     make_renderer: Callable[..., RichProgressRenderer],
-) -> Iterator[_Rig]:
+) -> Iterator[Rig]:
     """A renderer drawing to a terminal, driven a refresh at a time."""
     stream = io.StringIO()
     renderer = make_renderer(stream=stream)
@@ -863,12 +815,12 @@ def live(
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     try:
-        yield _Rig(logger, handler, store, renderer, stream)
+        yield Rig(logger, handler, store, renderer, stream)
     finally:
         logger.removeHandler(handler)
 
 
-def test_the_heartbeat_keeps_no_clock(live: _Rig, make_row, strip_ansi):
+def test_the_heartbeat_keeps_no_clock(live: Rig, make_row, strip_ansi):
     """An elapsed counter would tick through the silence above, which is the
     same lie in a different column."""
     live.store.append([make_row() for _ in range(4)])
@@ -876,7 +828,7 @@ def test_the_heartbeat_keeps_no_clock(live: _Rig, make_row, strip_ansi):
     assert not re.search(r"\d+:\d\d:\d\d", _heartbeat_line(live, strip_ansi))
 
 
-def test_the_heartbeat_is_drawn_above_every_bar(live: _Rig, make_row, strip_ansi):
+def test_the_heartbeat_is_drawn_above_every_bar(live: Rig, make_row, strip_ansi):
     """The overflow ellipsis crops from the bottom, and liveness is the row
     worth keeping."""
     live.store.append([make_row(message=f"fetched row {i}") for i in range(5)])

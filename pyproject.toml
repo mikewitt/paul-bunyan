@@ -73,7 +73,51 @@ src = ["src", "tests"]
 # `.codacy.yaml` records for silently-ignored engine keys. `SLF001` and `BLE001`
 # are selected for exactly that reason: they were already being suppressed by
 # hand, so either they are real rules or the comments were decoration.
-select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
+# `C901` is the ceiling. Everything above is archaeology on code already
+# written; this is what stops the next method regressing. max-complexity=10 is
+# chosen rather than defaulted: it admits the two blocks deliberately kept
+# after measurement (`from_log_record`, `_display_order`, both C-grade for
+# reasons argued at the code) and refuses anything worse. 8 would reopen those.
+#
+# `D101`/`D102`/`D103` are the missing-docstring rules, and they are here to
+# close #15: `RecordStore` is the contract every backend implements against,
+# and the module docstring tells implementers not to read the SQLite class as
+# the spec — so the ABC having no docstrings at all made the spec unwritten.
+# The rule now says so mechanically instead of an issue saying it.
+#
+# The rest of `D` is deliberately not selected, and D401 is why: 53 of its 89
+# findings are "first line should be in imperative mood" against docstrings
+# like "The installed handler, or None if `init()` hasn't run." Those are
+# properties, the noun phrase is the correct form for them, and "Return the
+# installed handler" carries strictly less. Same call as RUF002/RUF003 — a
+# rule answering a question nobody here is asking. D107 (`__init__`) and D105
+# (magic methods) are out for the weaker reason that the class docstring
+# already covers them.
+#
+# `LOG` is flake8-logging, and it is here for the same dogfooding reason as
+# `G` above — `G` governs how a message is *built*, `LOG` governs how the
+# logging API is *used*: LOG002 (`__name__`, not `__file__`), LOG007, LOG009
+# (`WARN` is deprecated), LOG015 (a call on the root logger). It scores zero
+# findings today, so adopting it costs nothing and buys a regression guard on
+# the one API this package is about. A logging library emitting a LOG finding
+# would be the sort of thing users notice first.
+#
+# `SIM`, `PTH`, `ISC`, `C4`, `ERA`, `PERF`, `RUF` and the singletons are the
+# cheap tier: about thirty findings, nearly all mechanical. The sets left out
+# are left out because they fight decisions already recorded — `ANN` against
+# "commented `-> None` on 150 test functions is bookkeeping", `EM`/`TRY003`
+# against this project's long, explanatory exception messages, `T201` against
+# teardown's deliberate stderr diagnostics, `COM812` against black itself.
+select = [
+    "E", "F", "I", "B", "UP", "G", "LOG", "S", "SIM",
+    "C901", "PTH", "ISC", "C4", "ERA", "PERF", "N", "PYI", "FBT", "RUF",
+    "D101", "D102", "D103", "SLF001", "BLE001",
+]
+
+# RUF002/RUF003 call en and em dashes "ambiguous". They are this repository's
+# prose style, in every docstring and comment it has; the rule is answering a
+# question nobody here is asking.
+ignore = ["RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 # S101: in a pytest suite the assert IS the test, and S101's actual concern —
@@ -81,12 +125,46 @@ select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
 # -O. Every other `S` rule still applies to tests/; only this one is exempt,
 # which is precisely the distinction a path exclusion could not draw.
 #
-# SLF001: tests reaching into renderer and model internals is a real finding,
-# not a false positive — it is issue #45, which wants those tests asserting on a
-# rendered frame instead. Suppressing all 31 inline would bury that; exempting
-# the directory keeps the rule enforced where it is actionable today (src/) and
-# leaves #45 to fix the tests rather than annotate them.
-"tests/**" = ["S101", "SLF001"]
+# SLF001: 31 findings, and they are three different things rather than one.
+# Counted with `--isolated`, since `per-file-ignores` applies even to a CLI
+# `--select`:
+#
+#   13  tests/test_benchmark.py   `_aggregate`, `_verdict`, `_machine`,
+#                                 `_git_commit` on benchmarks/capture.py — a
+#                                 script with no public API, where the private
+#                                 function *is* the unit under test
+#    3  tests/test_progress_layout.py  rich's own `Progress._lock`/`_tasks`,
+#                                 reached deliberately: CLAUDE.md pins insertion
+#                                 order as render order so a rich upgrade fails
+#                                 loudly instead of scrambling the display
+#   11  test_render_progress/tasks  our renderer's internals — 9 of them one
+#                                 test, and this is the only third that is a
+#                                 finding rather than a fixture
+#    4  scattered
+#
+# Only the third group is issue #71 (a `clock=` parameter and a redraw counter
+# would remove both of its remaining reaches). The first two are not defects and
+# have no annotation that would make them better.
+#
+# An earlier version of this comment said all 31 were "tests asserting on
+# renderer internals, which is issue #45". That was wrong twice: the majority
+# are not renderer internals, and #45's item on this was closed when the ceiling
+# tests moved to the public `suppressed_bars`. The exemption is still right; the
+# argument for it was not.
+"tests/**" = ["S101", "SLF001", "D101", "D102", "D103"]
+# D101/D102/D103 are scoped to `src/`, which is the package that ships
+# `py.typed` and whose ABC is the contract #15 is about. The 277 findings
+# outside it are 261 in `tests/`, 10 in `examples/`, 5 in `benchmarks/` and 1
+# in `scripts/` — and 258 of the 261 are D103 on test functions, where the
+# name *is* the documentation: `test_a_task_gets_a_bar_on_its_start_row` says
+# more than a docstring restating it would. Tests here already carry a
+# docstring wherever there is a reason to (`test_evict_keep_last`, the
+# mutation-testing note on the 7.6 ratio), and a blanket rule would replace
+# that judgement with 258 lines of filler — the exact thing selecting D was
+# meant to prevent.
+"examples/**" = ["D101", "D102", "D103"]
+"benchmarks/**" = ["D101", "D102", "D103"]
+"scripts/**" = ["D101", "D102", "D103"]
 # S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
 # for one plain reason: the line cannot carry both markers. `_COLUMNS` is a
 # module-level tuple of literal column names, values go through `?`
@@ -104,6 +182,25 @@ select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
 # reformatting accepted findings, and it applies whether or not this entry
 # exists.
 "src/lumberjack/store.py" = ["S608"]
+
+[tool.ruff.lint.pydocstyle]
+# PEP 698's `@override` marks a method that restates a base's contract rather
+# than declaring one, so D102 has nothing to ask of it — the docstring it
+# would demand is the one already on the abstract method. Verified: with this
+# set, D102 flags the ABC's abstract method and a genuinely new public method,
+# and skips the override. Without it the rule would demand boilerplate on
+# every implementation, which is what kept #15 open rather than enforced.
+#
+# `@override` is not free elsewhere, and the constraint is worth recording:
+# `Renderer` is a `Protocol` and nothing inherits it, so the renderers satisfy
+# it structurally and cannot carry the decorator — `mypy --strict` rejects it
+# with "no base method was found". Only real inheritance qualifies, which here
+# is `SQLiteRecordStore`, `LumberjackHandler.emit` and `rich_compat`'s three
+# `ProgressColumn` subclasses.
+ignore-decorators = ["typing.override"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.black]
 target-version = ["py312"]
