@@ -85,6 +85,27 @@ flush disabled, the record count is only knowable then, which the tier-1
   imprecise, so tier 1 asserts that a determinate bar appears, never that
   timing produced an exact number.
 
+### Slow is a separate axis
+
+`@pytest.mark.slow` is orthogonal to the tiers — a test can be tier 1 and
+slow, and conflating "how important" with "how long" is how a tiering scheme
+rots. `pyproject.toml` deselects `slow` from the default run, so `pytest` stays
+around eleven seconds; the `slow tests` CI job selects them with `-m slow`.
+
+`tests/tier1/test_slow_shapes.py` is the whole of it today, and everything in
+it is slow irreducibly: `MIN_LEGIBLE_PERIOD` is 1.0s and deliberately not
+settable from the public API, and an inferred total has to hold across
+consecutive real polls. Its assertions are loose about numbers and strict
+about shape — the inferred total is asserted as a band around 20, not as 20,
+because Principle 10 licenses the display to be imprecise and a test
+demanding precision would fail for being right.
+
+That job runs on one ubuntu leg rather than the matrix. Measured: a windows
+leg spends 65s provisioning before running anything and bills at double,
+where ubuntu spends 1s — so six copies would cost more than the rest of CI
+and learn nothing, since what these test is lumberjack's timing rather than
+the platform's.
+
 ## Tier 2
 
 Component contracts driven through a component's public API — `RecordStore`

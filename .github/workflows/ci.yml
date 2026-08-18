@@ -70,6 +70,28 @@ jobs:
       # bookkeeping; a real type error in a fixture is not.
       - run: uv run mypy tests examples benchmarks
 
+  # The tier-1 tests whose subject is elapsed time: the 1.0s legibility
+  # threshold that admits a position row, and an inferred total holding across
+  # consecutive real polls. `pyproject.toml` deselects them from every other
+  # run so the default suite stays ~11s; a later `-m` overrides that one.
+  #
+  # One ubuntu leg, not the matrix, and the reason is measured rather than
+  # felt. A windows leg spends 65s provisioning before it runs anything and
+  # bills at 2x, where ubuntu spends 1s — so running these six times would
+  # cost more than the whole rest of CI to learn nothing extra, since what
+  # they test is lumberjack's timing, not the platform's. It also multiplies
+  # the flake surface of the only tests here that depend on a loaded runner.
+  slow tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      - run: uv sync --all-extras
+      - run: uv run pytest -m slow
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
