@@ -22,6 +22,11 @@ from lumberjack.tracking import TASK_LOGGER_NAME, TICK_INTERVAL
 # --- the inert case: no init() ---------------------------------------------
 
 
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
+
+
 def test_a_task_without_init_emits_nothing(capsys):
     """The rung-1 promise from the other side: a library can instrument freely
     and a host application that never called `init()` sees no output.
@@ -701,7 +706,6 @@ def test_two_threads_cannot_both_enter_one_handle(session):
             for w in pair:
                 w.join()
             handle.end()
-            tracking._current_task.set(None)
     finally:
         sys.setswitchinterval(prev_interval)
 

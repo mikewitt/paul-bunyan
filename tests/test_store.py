@@ -22,6 +22,10 @@ from lumberjack.store import (
     WorkerKey,
 )
 
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
+
 
 def test_append_and_recent(store, make_row):
     store.append([make_row(message="one"), make_row(message="two")])

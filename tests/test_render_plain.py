@@ -12,6 +12,11 @@ from lumberjack.renderers.plain import PlainTextRenderer
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
+
+
 def test_text_mode_contains_message_and_no_ansi(make_row):
     stream = io.StringIO()
     renderer = PlainTextRenderer(stream=stream)
