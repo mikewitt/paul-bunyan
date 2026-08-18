@@ -59,14 +59,23 @@ def make_log_record() -> Callable[..., logging.LogRecord]:
 
     The input side of `make_row`'s output: what `LogRecordRow.from_log_record`
     is handed, for the tests that exercise that conversion rather than
-    starting from a row.
+    starting from a row. `pathname` matches `make_row`'s default so the two
+    describe the same fictional source location from either end.
+
+    Not `__file__`, which is what both per-file copies of this said before
+    they were folded into one. That was correct while it sat in the test
+    module and silently wrong here: it would resolve to *conftest*, so
+    `pathname`, `filename` and `module` — the three columns source-location
+    identity is built on — would report this file rather than the caller's.
+    Nothing asserts on them today, which is exactly why it would have gone
+    unnoticed.
     """
 
     def _make(**overrides: object) -> logging.LogRecord:
         kwargs: dict[str, object] = dict(
             name="test.logger",
             level=logging.INFO,
-            pathname=__file__,
+            pathname="/nonexistent/foo.py",
             lineno=42,
             msg="hello %s",
             args=("world",),
