@@ -582,6 +582,10 @@ class LoopRowModel:
         """
         present = [key for key in self._order if key in rows]
         structural = depth_first_order(present, {k: r.parent for k, r in rows.items()})
+        # Reading `roots[parent]` here relies on `depth_first_order` having
+        # already placed every parent ahead of its children, which `_depths`
+        # states for its own walk and this one needs just as much: a child
+        # seen first would be rooted at itself and tear off its own subtree.
         roots: dict[SourceKey, SourceKey] = {}
         for key in structural:
             parent = rows[key].parent
