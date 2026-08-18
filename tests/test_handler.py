@@ -140,3 +140,73 @@ def test_a_record_that_cannot_be_converted_goes_to_handleError():  # noqa: N802 
 
     assert handled == [record]
     assert handler.drain() == [], "a record that failed conversion must not be stored"
+
+
+# --- restore(): the retry path a failed store write needs -------------------
+
+
+def test_restore_puts_a_failed_batch_back_in_front(attached_logger):
+    """`drain()` is destructive, so a raising `append()` used to lose the
+    batch outright — a silent loss, which is the one thing Principle 6 does
+    not permit. The rows go back at the *front*: they are older than anything
+    that arrived while the write was failing."""
+    handler = LumberjackHandler()
+    with attached_logger(handler) as logger:
+        logger.info("first")
+        logger.info("second")
+        failed = handler.drain()
+        logger.info("arrived during the failure")
+
+    handler.restore(failed)
+
+    assert [row.message for row in handler.drain()] == [
+        "first",
+        "second",
+        "arrived during the failure",
+    ]
+
+
+def test_restore_is_bounded_and_counts_what_will_not_fit(attached_logger):
+    """A permanently failing store must not grow the retry queue without
+    limit. What no longer fits is counted as dropped, so the exit report
+    covers it for free rather than needing a second message."""
+    handler = LumberjackHandler(buffer_size=3)
+    with attached_logger(handler) as logger:
+        for i in range(3):
+            logger.info("old %d", i)
+        failed = handler.drain()
+        logger.info("new")
+
+    assert handler.dropped == 0
+    handler.restore(failed)
+
+    # Two of the three retried rows fit alongside the one that arrived since.
+    assert handler.dropped == 1
+    assert [row.message for row in handler.drain()] == ["old 1", "old 2", "new"]
+
+
+def test_restore_drops_the_oldest_rather_than_the_newest(attached_logger):
+    """A full `deque` discards from the far end, so letting `extendleft`
+    spill would evict the records the buffer already holds in order to make
+    room for older ones being retried. Dropping the oldest is the rule the
+    buffer already applies when it overflows."""
+    handler = LumberjackHandler(buffer_size=2)
+    with attached_logger(handler) as logger:
+        logger.info("oldest")
+        logger.info("older")
+        failed = handler.drain()
+        logger.info("newest")
+
+    handler.restore(failed)
+    assert [row.message for row in handler.drain()] == ["older", "newest"]
+
+
+def test_restoring_more_than_the_buffer_holds_keeps_the_newest(attached_logger):
+    handler = LumberjackHandler(buffer_size=2)
+    with attached_logger(handler) as logger:
+        for i in range(5):
+            logger.info("row %d", i)
+    # Three were evicted on the way in, so `drain()` returns the last two.
+    failed = handler.drain()
+    handler.restore(failed)
+    assert [row.message for row in handler.drain()] == ["row 3", "row 4"]

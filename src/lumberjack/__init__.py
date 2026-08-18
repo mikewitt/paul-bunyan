@@ -204,6 +204,13 @@ def flush() -> None:
     which for the pump is lumberjack's own, but for anyone calling `flush()`
     by hand is theirs.
 
+    A failed write puts the batch back rather than losing it: `drain()` is
+    destructive, so without `restore()` a raising `append()` drops those
+    records silently, which is the one thing Principle 6 does not permit
+    (issue #77). The exception still propagates — the pump swallows it and
+    tries again next tick, and a caller invoking `flush()` by hand deserves
+    to hear that the store is failing.
+
     `teardown._flush_buffer` is a deliberate lock-free copy of the
     drain-then-append below (see the comment there for why); a change to the
     protocol here has to land in both places.
@@ -213,8 +220,13 @@ def flush() -> None:
         if session is None:
             return
         rows = session.handler.drain()
-        if rows:
+        if not rows:
+            return
+        try:
             session.store.append(rows)
+        except Exception:
+            session.handler.restore(rows)
+            raise
 
 
 def is_initialized() -> bool:

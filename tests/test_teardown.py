@@ -409,3 +409,38 @@ def test_uninstall_restores_previous_hook():
 
 def test_uninstall_without_install_is_a_noop():
     teardown.uninstall()
+
+
+def test_the_exit_flush_names_what_it_could_not_write(capsys):
+    """The one flush with no next tick.
+
+    During the run a failed write is retried — `flush()` puts the batch back
+    and the pump tries again. Here there is nowhere to put the rows, so the
+    only honest thing left is to say how many were lost. Silence would be
+    issue #77's defect moved to the place it is least recoverable.
+    """
+    _install(handler=_FakeHandler(rows=["a", "b", "c"]), store=_ExplodingStore())
+    teardown.run()
+
+    err = capsys.readouterr().err
+    assert "3 record(s) never reached the store" in err
+
+
+def test_a_store_that_takes_the_final_write_says_nothing(capsys):
+    """The message is about loss, so a successful exit must not carry it."""
+    _install(handler=_FakeHandler(rows=["a"]), store=_FakeStore())
+    teardown.run()
+    assert "never reached the store" not in capsys.readouterr().err
+
+
+def test_the_unwritten_count_does_not_survive_uninstall(capsys):
+    """Module state on its own lifecycle, like `_session` — a second session
+    in the same process must not inherit the first one's failure."""
+    _install(handler=_FakeHandler(rows=["a", "b"]), store=_ExplodingStore())
+    teardown.run()
+    teardown.uninstall()
+    capsys.readouterr()
+
+    _install(handler=_FakeHandler(rows=["c"]), store=_FakeStore())
+    teardown.run()
+    assert "never reached the store" not in capsys.readouterr().err
