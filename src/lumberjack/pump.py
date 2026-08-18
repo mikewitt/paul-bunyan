@@ -12,6 +12,7 @@ per second as a trickle.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 
@@ -51,12 +52,11 @@ class FlushPump:
         # wait() doubles as an interruptible sleep: stop() is never left
         # waiting out a full interval.
         while not self._stop.wait(self.interval):
-            try:
+            # A store write failing must not kill the pump: the next tick
+            # still runs. It does not re-deliver the rows that failed, though —
+            # `drain()` empties the buffer before `append()` is attempted.
+            with contextlib.suppress(Exception):
                 self._flush()
-            except Exception:  # noqa: S110, BLE001
-                # A store write failing must not kill the pump; the next tick
-                # (and the atexit drain) get another shot at the same buffer.
-                pass
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal the thread and wait for it to exit. Idempotent."""
