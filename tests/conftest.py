@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import logging
-import os
 import re
 import textwrap
 import time
@@ -25,6 +24,7 @@ import lumberjack
 from lumberjack import static, tracking
 from lumberjack.schema import LogRecordRow, StoredRecord, TaskEvent
 from lumberjack.store import RecordStore, SQLiteRecordStore
+from subprocess_rig import child_env
 
 
 def _available_backends() -> dict[str, Callable[[], RecordStore]]:
@@ -358,30 +358,11 @@ def root_sentinel() -> Iterator[logging.Handler]:
 def subprocess_env() -> Callable[..., dict[str, str]]:
     """The environment a child process needs to exercise lumberjack from src.
 
-    One place instead of three, because every copy had to restate the same
-    two non-obvious lines: COVERAGE_PROCESS_START makes pytest-cov's .pth
-    hook measure the child (the excepthook/atexit/file-store paths run only
-    there), and PYTHONIOENCODING pins the child's stdio so the display's `…`
-    and `━` survive a Windows default of cp1252 — what the display does on a
-    terminal that cannot encode them is a separate question with its own
-    tests.
+    The fixture form of `subprocess_rig.child_env`, which is where the
+    reasoning lives — it is a plain function there because module-scoped
+    fixtures need it too and cannot request this one.
     """
-
-    def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
-        full_env = dict(os.environ)
-        src_dir = str(Path(__file__).parent.parent / "src")
-        full_env["PYTHONPATH"] = os.pathsep.join(
-            [src_dir, full_env.get("PYTHONPATH", "")]
-        )
-        full_env["PYTHONIOENCODING"] = "utf-8"
-        full_env["COVERAGE_PROCESS_START"] = str(
-            Path(__file__).parent.parent / "pyproject.toml"
-        )
-        if extra:
-            full_env.update(extra)
-        return full_env
-
-    return _env
+    return child_env
 
 
 @pytest.fixture(autouse=True)

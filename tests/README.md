@@ -1,0 +1,111 @@
+# The test tiers
+
+Three tiers, and only two of them make a claim. The point is a small surface
+that can be reviewed carefully and changed reluctantly, not a taxonomy for its
+own sake — so a tier is defined by a rule a machine can check, never by how
+important a test felt when it was written. Judgement decays; `test_tier1_rules.py`
+does not.
+
+| Tier | Where | Claim | Checked by |
+|---|---|---|---|
+| **1 — acceptance** | `tests/tier1/` | This is what the package is *for*, and how a user gets it | `tests/tier1/test_tier1_rules.py` |
+| **2 — contract** | `pytestmark = pytest.mark.tier2`, files stay put | A component's public API behaves as specified | marker + SLF001-clean |
+| **3 — internals** | everything else, unmarked | Whatever it says | nothing |
+
+**Unmarked is tier 3.** Only claims are validated, so drift runs downward: a
+test written carelessly claims nothing and gets nothing, rather than sliding
+into a tier someone believes was reviewed.
+
+## Tier 1
+
+A parent test in `tests/tier1/` launches a standalone script from
+`tests/tier1/scripts/` as a real child process and asserts on its stdout,
+stderr and exit code. Nothing else.
+
+**The scripts are the artifact.** Each one reads as a program a developer might
+actually write — `import lumberjack`, `init()`, a loop, some logging — and a
+reviewer reading the directory should come away knowing how to use the package.
+That is the second job tier 1 does: it is the API's executable specification,
+so a call that reads badly here is a finding about the API, not about the test.
+
+Enforced, with a deliberate violation of each proven to fail:
+
+- **A script may import `lumberjack` and the standard library, nothing else** —
+  and `lumberjack` bare, never a submodule. `from lumberjack.store import …` is
+  the tell that a script wants something the published surface does not offer.
+- **A parent never imports `lumberjack` at all.** This is the rule the tier rests
+  on. A parent that imports the package can quietly become an in-process test
+  wearing acceptance clothing — asserting on objects instead of on what a user
+  would see — and the tier stops meaning anything.
+- **Nothing private** on either side; **no `monkeypatch`** in a parent.
+- **Launch through `subprocess_rig.child_env()`**, which sets
+  `COVERAGE_PROCESS_START`. A parent that builds its own environment stops
+  measuring the child, silently: the run still passes and only the coverage
+  number moves.
+
+`test_tier1_rules.py` lives *inside* `tests/tier1/`, because a guard outside the
+protected path is the cheap way in.
+
+### Two facts every tier-1 assertion rests on
+
+Both measured, both easy to trip over:
+
+- **`dump_last_n=0`, unless the dump is the subject.** Left on, the `atexit`
+  diagnostic replays the tail of the store *after* the display comes down, so
+  a script that logs 50 things prints 50 lines after its own bar. Every clean
+  frame assertion here depends on it being off.
+- **A piped `Live` prints the final frame only.** With `output_mode="rich"`
+  forced onto a non-TTY stderr, rich does not repeat frames — which is why
+  `re.findall(r"processing item \d+", stderr) == ["processing item 199"]` is a
+  stable assertion rather than a race. This is rich's behaviour, not ours: if a
+  rich upgrade changes it, every stderr assertion here moves at once.
+
+### Why `loop_to_bar.py` and `scripts/loop_then_exit.py` both exist
+
+They are not a duplicate that someone forgot to merge. `loop_then_exit.py` is a
+fixture with environment knobs for exit-path plumbing, and it needs a
+file-backed store the parent reopens *after the child dies* — with the final
+flush disabled, the record count is only knowable then, which the tier-1
+`current_store()`-to-stdout protocol structurally cannot do. It also imports
+`SQLiteRecordStore`, which tier 1 forbids. One is plumbing; one is documentation.
+
+### What tier 1 deliberately does not cover
+
+- **`shutdown()` and restoring the root logger.** Exercised incidentally — the
+  process exits — but never asserted on. It is lifecycle, not the product.
+- **TTY detection.** Every script forces `output_mode` explicitly. Detection →
+  rich is covered only by `demo-gif.yml` under a real pty, and closing that gap
+  is its own problem.
+- **`wrapped`, `bursty`, `silent`** (see `examples/demo.py --list`). The first
+  two are shapes the design documents as handled *badly*; pinning them here
+  would freeze known-wrong behaviour as the acceptance contract, and tier 1 is
+  meant to be expensive to change. `silent`'s contract is that the heartbeat
+  *stops*, which a single final frame cannot witness.
+- **Exact totals from inference.** Principle 10 licenses the display to be
+  imprecise, so tier 1 asserts that a determinate bar appears, never that
+  timing produced an exact number.
+
+## Tier 2
+
+Component contracts driven through a component's public API — `RecordStore`
+conformance, handler capture, output-mode detection, tracking semantics.
+Fabricated inputs (`make_row`, `make_task_row`) are fine here; that is the
+difference from tier 1, which may not fabricate anything.
+
+Marked file-wide with `pytestmark = pytest.mark.tier2`, never per-function: the
+private-access check is per-file, so a half-marked file would be uncheckable.
+If half a file qualifies, the file is tier 3 until someone splits it.
+
+## Tier 3
+
+Everything else. Private access is allowed and expected — `test_benchmark.py`
+unit-tests a script's private functions, `test_progress_layout.py` pins rich's
+own internals as an upgrade canary. No marker, no rule, no work.
+
+## Changing a tier-1 test
+
+**A failing tier-1 test means the change is wrong, not the test.** That is the
+entire value of a tier: it is the one place where "make CI green" is not a
+licence to edit the assertion. If you believe a tier-1 test is genuinely wrong,
+say so in the pull request and change it as its own commit with its own
+argument — never in the commit that made it fail.

@@ -215,6 +215,18 @@ warn_unused_configs = true
 testpaths = ["tests"]
 addopts = "--cov=lumberjack --cov-report=term-missing"
 filterwarnings = ["error"]
+# Registering these is not bookkeeping: `filterwarnings = ["error"]` turns
+# pytest's unknown-mark warning into a collection error, so a typo'd
+# `@pytest.mark.tier2x` fails the run rather than silently marking nothing.
+# Verified by writing one and watching collection stop.
+#
+# `tier2` is the contract tier — see tests/README.md. `slow` is a separate
+# axis on purpose: a test can be tier 1 and slow, and conflating "how
+# important" with "how long" is what makes a tiering scheme rot (#72).
+markers = [
+    "tier2: a component contract, driven through a public component API",
+    "slow: takes seconds, usually because real time or real threads drive it",
+]
 
 [tool.coverage.run]
 source = ["lumberjack"]
