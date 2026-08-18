@@ -33,6 +33,12 @@ concurrency:
 # copies of whatever uv picked.
 jobs:
   lint:
+    # First in the chain. Every job below waits on the one before it, so a
+    # failure here costs nine seconds instead of the ~12 billed minutes a full
+    # fan-out spends before reporting the same thing. The trade is real and
+    # accepted: a red run now names one broken job rather than all of them, so
+    # a second failure only surfaces after the first is fixed.
+    #
     # Its own job, not a step in the matrix below: style is a property of the
     # source, not of the OS or interpreter running it, so checking it six
     # times says the same thing six times — and reports a single misplaced
@@ -55,6 +61,7 @@ jobs:
       - run: uv run black --check .
 
   typecheck:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -81,7 +88,8 @@ jobs:
   # cost more than the whole rest of CI to learn nothing extra, since what
   # they test is lumberjack's timing, not the platform's. It also multiplies
   # the flake surface of the only tests here that depend on a loaded runner.
-  slow tests:
+  slow-tests:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -93,11 +101,14 @@ jobs:
       - run: uv run pytest -m slow
 
   test:
+    needs: typecheck
     runs-on: ${{ matrix.os }}
     strategy:
       # Report every combination: a failure on one OS/version shouldn't hide
       # whether the others are healthy.
       fail-fast: false
+      # One leg at a time: the jobs are chained, so the matrix is chained too.
+      max-parallel: 1
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
@@ -111,6 +122,7 @@ jobs:
       - run: uv run pytest
 
   bare:
+    needs: slow-tests
     # Design principle 8: `pip install lumberjack` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
     # `test` installs every extra, so without this job no `except ImportError`
@@ -152,6 +164,7 @@ jobs:
       - run: uv run pytest
 
   package:
+    needs: bare
     # The wheel is the artefact users actually get, and it is assembled by
     # hatchling from a config nothing else exercises — a mistake in the
     # packages list or a missing py.typed passes every other job here.
@@ -211,7 +224,7 @@ jobs:
     # bare-install skipif, and Windows path branches — but collecting it
     # means six `--partial` uploads plus a `final` call, which is a lot of
     # workflow for a fraction of a percent.
-    needs: test
+    needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

@@ -369,7 +369,11 @@ So **a sub-5% change is invisible to a single before/after pair** on this class 
 
 ### CI
 
-Jobs are independent — knowing *which* is broken beats making one wait on another, the same reasoning behind `fail-fast: false` on the matrix.
+**Jobs run in a chain, one at a time.** `lint` → `typecheck` → `test` (with `max-parallel: 1`, so the six legs are serial too) → `slow-tests` → `bare` → `package` → `coverage`. This reverses the original decision, which was "jobs are independent — knowing *which* is broken beats making one wait on another", and the reversal is deliberate: a fan-out spends roughly twelve billed minutes before reporting what a nine-second `lint` already knew. Wall-clock is longer and that is accepted.
+
+The cost is real and is the thing the old note was protecting: a red run now names one broken job, so a second failure only surfaces after the first is fixed. `fail-fast: false` stays on the matrix, so a failing leg does not cancel its siblings — the serialization is about not *starting* work that a earlier failure has already invalidated, not about hiding results that exist.
+
+Worth knowing before touching the runner budget: the suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and bills at 2×, where ubuntu spends 1 second — so windows is 55% of the bill from 3 of 14 jobs, and trimming *tests* saves almost nothing. The lever is which legs run, never which tests.
 
 | Job | Guards |
 |---|---|
