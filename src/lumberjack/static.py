@@ -27,6 +27,11 @@ What it cannot see, and why each silence is the correct failure:
 - **Comprehensions and generator expressions**, which are modelled neither as
   loops nor as scopes: a call site inside one is attributed to the enclosing
   function and to the enclosing loops.
+- **Whether an annotation is evaluated at all.** Under
+  `from __future__ import annotations` it never is, and 3.14's `__annotate__`
+  defers it further, but it is attributed to the enclosing scope as though it
+  ran there. Excluding annotations is a different change from the one
+  decorators and defaults wanted; nothing recognisable has been found in one.
 - **Whether a context manager swallows.** `with contextlib.suppress(...)` and
   `with open(...)` are one node type, so every `with` body is treated as
   conditional. That costs real position rows on an ordinary shape and
@@ -403,8 +408,11 @@ def _nested_statements(node: ast.AST) -> int:
     return total
 
 
-#: Scope boundaries. A `return` inside one belongs to it, not to the loop
-#: body that lexically contains it, and a `break` cannot cross one at all.
+#: Scope boundaries, which two separate rules need. A `return` inside one
+#: belongs to it rather than to the loop body that lexically contains it, and
+#: a `break` cannot cross one at all; and only a scope node's *body* runs in
+#: the scope it introduces, which is what `_Walker._visit_scope` is for.
+_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
 _SCOPES: Final = (
     ast.FunctionDef,
     ast.AsyncFunctionDef,
@@ -481,32 +489,42 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     walk decides what a node *is* and this decides what it *encloses*. A node
     matching none of these hands its own context straight down.
 
-    Loops are the deliberate omission: only part of a loop statement repeats,
-    so `_Walker._visit_loop` splits the children itself rather than giving
-    them all one context.
+    Loops and scopes are the deliberate omissions: only part of either
+    statement runs where the node says it does, so `_Walker._visit_loop` and
+    `_visit_scope` split the children themselves and call this for the half
+    that belongs inside. What comes back here is *that* half's context.
 
-    One node, one child context — which is the shape, and is *not* enough for
-    a scope node. A decorator, a parameter default, an annotation and a class
-    base all execute in the enclosing scope at definition time, but they are
-    children of the node that introduces the new one, so they receive the
-    reset here along with the body that does belong to it. That claims the
-    wrong `func_name` and, worse, an empty loop chain for something that
-    really does repeat. See issue #82 for the measurement and for why the
-    fix has to move `loops` and `conditional` together.
+    One node, one child context is the shape, and it is not enough on its
+    own — a decorator, a parameter default, an annotation and a class base
+    all execute in the enclosing scope at definition time, though they are
+    children of the node introducing the new one. Handing them the reset
+    claimed the wrong `func_name` and, worse, an empty loop chain for
+    something that really does repeat (issue #82).
     """
-    # lumberjack: see issue #82
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-        # A scope boundary resets the loop chain: a closure defined inside
-        # a loop body is not called once per iteration, and `funcName` on
-        # its records reads the inner name, not the enclosing one.
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        # A function boundary resets the loop chain: a closure defined inside
+        # a loop body is not called once per iteration, and `funcName` on its
+        # records reads the inner name, not the enclosing one.
         return _Ctx(
             func_name=node.name,
             func_lineno=node.lineno,
-            # A class body has no parameters, and a call in one is not a
-            # wrapper forwarding anything.
-            params=frozenset() if isinstance(node, ast.ClassDef) else _params(node),
+            params=_params(node),
             loops=(),
             conditional=False,
+        )
+    if isinstance(node, ast.ClassDef):
+        # A class body is the one scope that is not a deferral: it executes
+        # immediately, in place, once per pass of whatever encloses it. So it
+        # takes the new name — CPython reports `funcName='Row'` for a call in
+        # `class Row:`, and static agreeing is what lets the site through the
+        # consumer's name check — and *keeps* the loop chain and the branch
+        # flag, which describe when the statement runs rather than what it is.
+        return ctx._replace(
+            func_name=node.name,
+            func_lineno=node.lineno,
+            # No parameters, and a call in a class body is not a wrapper
+            # forwarding anything.
+            params=frozenset(),
         )
     if isinstance(node, ast.Lambda):
         return _Ctx(
@@ -550,8 +568,11 @@ class _Walker:
             if log_call is not None:
                 self.found.append(_Found(log_call=log_call, ctx=ctx))
             # Keep descending: an argument can be another call.
-        elif isinstance(node, ast.For | ast.AsyncFor | ast.While):
+        elif isinstance(node, _LOOP_NODES):
             self._visit_loop(node, ctx)
+            return
+        elif isinstance(node, _SCOPES):
+            self._visit_scope(node, ctx)
             return
 
         ctx = _child_ctx(node, ctx)
@@ -564,6 +585,29 @@ class _Walker:
         conditional_ctx = ctx._replace(conditional=True)
         for child in ast.iter_child_nodes(node):
             self.visit(child, conditional_ctx if id(child) in deferred else ctx)
+
+    def _visit_scope(self, node: _Scope, ctx: _Ctx) -> None:
+        """Only the body executes in the new scope.
+
+        A decorator expression, a parameter default, an annotation and a
+        class base are all children of the node that introduces the scope
+        and all execute in the *enclosing* one, at definition time. Giving
+        them the reset context named the wrong function and emptied the loop
+        chain for something that genuinely repeats: a decorator on a `def`
+        inside a `for` runs once per iteration, because the `def` statement
+        re-executes. See issue #82.
+
+        Annotations are the one member this still gets wrong, and
+        deliberately: under `from __future__ import annotations` they are
+        never evaluated at all, so they want *excluding* rather than
+        re-scoping. That is a different change from the one the rest of
+        these want, and nothing recognisable has ever been found in one.
+        """
+        inner = _child_ctx(node, ctx)
+        body = node.body if isinstance(node.body, list) else [node.body]
+        belongs = {id(stmt) for stmt in body}
+        for child in ast.iter_child_nodes(node):
+            self.visit(child, inner if id(child) in belongs else ctx)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor | ast.While, ctx: _Ctx) -> None:
         inner = (*ctx.loops, node.lineno)

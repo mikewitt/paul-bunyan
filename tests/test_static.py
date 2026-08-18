@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
@@ -918,3 +919,130 @@ def test_the_first_operand_of_a_boolop_always_runs(
         """)
     (loop,) = structure.loops.values()
     assert loop.stable_order
+
+
+# --------------------------------------------------------------------------
+# Only a scope node's body runs in the scope it introduces
+# --------------------------------------------------------------------------
+
+DEFINITION_TIME = """
+def outer(items):
+    for item in items:
+        @(log.debug("decorating %s", item) or (lambda f: f))
+        def worker():
+            log.debug("in worker")
+
+        worker()
+
+
+def classbody(items):
+    for item in items:
+        class Row:
+            log.debug("class body %s", item)
+
+
+def defaults(items):
+    for item in items:
+        def worker(x=log.debug("default %s", item)):
+            pass
+"""
+
+
+def test_a_definition_time_expression_belongs_to_the_enclosing_scope(
+    write_module: Callable[..., Path],
+) -> None:
+    """A decorator, a class base and a parameter default all evaluate where
+    the `def` is written, not inside it — so a `def` in a loop body evaluates
+    them once per iteration, and static used to say `loop_chain=()`.
+
+    Driven against real records rather than a remembered rule, for the reason
+    `test_ast_linenos_match_the_records_they_emit` gives: this is a claim
+    about what CPython attributes, and it should fail if CPython changes.
+    See issue #82.
+    """
+    path = write_module(DEFINITION_TIME, name="definition_time.py")
+    logger = logging.getLogger("test_static.definition_time")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    capture = _Capture()
+    logger.addHandler(capture)
+    try:
+        namespace: dict[str, object] = {"log": logger}
+        source = path.read_text(encoding="utf-8")
+        exec(compile(source, str(path), "exec"), namespace)  # noqa: S102 # nosec B102
+        for name in ("outer", "classbody", "defaults"):
+            fn = namespace[name]
+            assert callable(fn)
+            fn([1, 2, 3])
+    finally:
+        logger.removeHandler(capture)
+
+    structure = static.analyze_file(str(path))
+    assert structure is not None
+    by_template = {site.template: site for site in structure.call_sites.values()}
+
+    # The three definition-time expressions: named for the enclosing
+    # function, and inside the loop that re-executes the `def`.
+    for template in ("decorating %s", "class body %s", "default %s"):
+        site = by_template[template]
+        assert site.loop_chain != (), f"{template!r} repeats and said it did not"
+
+    # And the runtime agrees about all four, including the closure body,
+    # which is the one that really does leave the loop behind.
+    for record in capture.records:
+        emitted = structure.call_sites.get(record.lineno)
+        assert emitted is not None, f"no call site at line {record.lineno}"
+        assert emitted.func_name == record.funcName, record.msg
+
+    fired = Counter(record.msg for record in capture.records)
+    assert fired["decorating %s"] == 3, "the decorator re-evaluates per iteration"
+    assert by_template["in worker"].loop_chain == (), "a closure body does not"
+
+
+def test_a_class_body_keeps_the_loop_it_is_written_in(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """The one scope that is not a deferral.
+
+    A class body executes immediately and in place, so it takes the new name
+    — CPython reports `funcName='Row'` — and keeps the loop chain. Resetting
+    both agreed with the consumer's `funcName` check by accident, so the site
+    was *accepted* with an empty chain and earned the standalone
+    one-bar-per-call-site row the row model exists to remove.
+    """
+    structure = analyze("""
+        def build(log, items):
+            for item in items:
+                class Row:
+                    log.debug('row %s', item)
+        """)
+    (site,) = structure.call_sites.values()
+    assert site.func_name == "Row"
+    assert site.loop_chain != ()
+
+
+def test_a_conditionally_defined_decorator_stays_conditional(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """`loops` and `conditional` move together, which is the trap.
+
+    Restoring the loop chain for a decorator while dropping the branch flag
+    would readmit this as a stable-ordered body member — turning issue #82's
+    fail-*closed* miss into issue #81's fail-*open* fabricated percentage,
+    which is strictly worse than either.
+    """
+    structure = analyze("""
+        def build(log, items, flag):
+            for item in items:
+                log.debug('opening')
+                if flag:
+                    @(log.debug('decorating %s', item) or (lambda f: f))
+                    def worker():
+                        pass
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    decorating = next(s for s in loop.call_sites if s.template == "decorating %s")
+    assert decorating.loop_chain != ()
+    assert decorating.conditional
+    assert not loop.stable_order
