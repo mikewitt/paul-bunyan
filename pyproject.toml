@@ -79,6 +79,14 @@ src = ["src", "tests"]
 # after measurement (`from_log_record`, `_display_order`, both C-grade for
 # reasons argued at the code) and refuses anything worse. 8 would reopen those.
 #
+# `LOG` is flake8-logging, and it is here for the same dogfooding reason as
+# `G` above — `G` governs how a message is *built*, `LOG` governs how the
+# logging API is *used*: LOG002 (`__name__`, not `__file__`), LOG007, LOG009
+# (`WARN` is deprecated), LOG015 (a call on the root logger). It scores zero
+# findings today, so adopting it costs nothing and buys a regression guard on
+# the one API this package is about. A logging library emitting a LOG finding
+# would be the sort of thing users notice first.
+#
 # `SIM`, `PTH`, `ISC`, `C4`, `ERA`, `PERF`, `RUF` and the singletons are the
 # cheap tier: about thirty findings, nearly all mechanical. The sets left out
 # are left out because they fight decisions already recorded — `ANN` against
@@ -86,7 +94,7 @@ src = ["src", "tests"]
 # against this project's long, explanatory exception messages, `T201` against
 # teardown's deliberate stderr diagnostics, `COM812` against black itself.
 select = [
-    "E", "F", "I", "B", "UP", "G", "S", "SIM",
+    "E", "F", "I", "B", "UP", "G", "LOG", "S", "SIM",
     "C901", "PTH", "ISC", "C4", "ERA", "PERF", "N", "PYI", "FBT", "RUF",
     "SLF001", "BLE001",
 ]
@@ -102,11 +110,32 @@ ignore = ["RUF002", "RUF003"]
 # -O. Every other `S` rule still applies to tests/; only this one is exempt,
 # which is precisely the distinction a path exclusion could not draw.
 #
-# SLF001: tests reaching into renderer and model internals is a real finding,
-# not a false positive — it is issue #45, which wants those tests asserting on a
-# rendered frame instead. Suppressing all 31 inline would bury that; exempting
-# the directory keeps the rule enforced where it is actionable today (src/) and
-# leaves #45 to fix the tests rather than annotate them.
+# SLF001: 31 findings, and they are three different things rather than one.
+# Counted with `--isolated`, since `per-file-ignores` applies even to a CLI
+# `--select`:
+#
+#   13  tests/test_benchmark.py   `_aggregate`, `_verdict`, `_machine`,
+#                                 `_git_commit` on benchmarks/capture.py — a
+#                                 script with no public API, where the private
+#                                 function *is* the unit under test
+#    3  tests/test_progress_layout.py  rich's own `Progress._lock`/`_tasks`,
+#                                 reached deliberately: CLAUDE.md pins insertion
+#                                 order as render order so a rich upgrade fails
+#                                 loudly instead of scrambling the display
+#   11  test_render_progress/tasks  our renderer's internals — 9 of them one
+#                                 test, and this is the only third that is a
+#                                 finding rather than a fixture
+#    4  scattered
+#
+# Only the third group is issue #71 (a `clock=` parameter and a redraw counter
+# would remove both of its remaining reaches). The first two are not defects and
+# have no annotation that would make them better.
+#
+# An earlier version of this comment said all 31 were "tests asserting on
+# renderer internals, which is issue #45". That was wrong twice: the majority
+# are not renderer internals, and #45's item on this was closed when the ceiling
+# tests moved to the public `suppressed_bars`. The exemption is still right; the
+# argument for it was not.
 "tests/**" = ["S101", "SLF001"]
 # S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
 # for one plain reason: the line cannot carry both markers. `_COLUMNS` is a
