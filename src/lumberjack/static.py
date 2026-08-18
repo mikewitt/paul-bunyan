@@ -27,8 +27,10 @@ What it cannot see, and why each silence is the correct failure:
 - **Comprehensions and generator expressions**, which are modelled neither as
   loops nor as scopes: a call site inside one is attributed to the enclosing
   function and to the enclosing loops.
-- **`break`, `continue` and `return`**, which make a body's textual order an
-  upper bound rather than a promise.
+- **Whether a context manager swallows.** `with contextlib.suppress(...)` and
+  `with open(...)` are one node type, so every `with` body is treated as
+  conditional. That costs real position rows on an ordinary shape and
+  fabricates none, which is the direction Principle 10 points.
 
 And the thing it must never be trusted about: a file that has changed since the
 running process imported it. Line numbers move, and `file:lineno` is exact and
@@ -152,9 +154,12 @@ class CallSite:
     #: call is not inside a loop. Resets at every function, lambda and class
     #: boundary: a closure defined in a loop body does not run per iteration.
     loop_chain: tuple[int, ...]
-    #: The call sits under an `if`, `try` or `match` *within its innermost
-    #: loop body*, so it may not fire on every iteration. A consumer ordering
-    #: a body should treat that body as having no stable order.
+    #: The call may not fire on an iteration where the body's other sites
+    #: do — because it sits under a branch (`if`, `try`, `match`, `with`) or
+    #: in the deferred half of an expression, or because a `break`,
+    #: `continue` or `return` earlier in the same body can skip it. Scoped to
+    #: the innermost loop body. A consumer ordering a body should treat that
+    #: body as having no stable order.
     conditional: bool
     #: 1-based ordinal within the innermost loop body, in textual order, and
     #: the body's size — `position` of `body_size`. Both None exactly when
@@ -212,14 +217,23 @@ class Loop:
         sub-iteration bar built on it would show a wrong percentage rather
         than an imprecise one.
 
-        Under-detects, and fails *open* when it does — see issue #81. This
-        reads `conditional`, which the walk sets for statement-level branches
-        only, while the module docstring above already records `break`,
-        `continue` and `return` as making textual order an upper bound. A
-        guard clause, a `for`/`else`, `cond and log(...)` and
-        `contextlib.suppress` all return True here and should not.
+        `conditional` is what carries this, and the walk sets it for three
+        separate reasons: a call under a statement-level branch (`if`, `try`,
+        `match`, `with`), a call in the deferred half of an expression
+        (`a and log(...)`, a conditional expression, an `assert` message),
+        and a call textually after a `break`, `continue` or `return` in the
+        same body. All three are the same claim — this line may not fire on
+        an iteration where an earlier one did — and any of them is enough to
+        withhold the row.
+
+        Where it errs it now errs *closed*: a guard clause marks the whole
+        remainder of the body conditional even though those sites really do
+        fire together, and a `with` that cannot suppress is treated as one
+        that can. Both cost a row that would have been correct. The direction
+        matters more than the count — a withheld row claims less, while the
+        determinate row this used to admit showed a percentage that was
+        wrong. See issue #81 for what it looked like before.
         """
-        # lumberjack: see issue #81
         return all(not site.conditional for site in self.call_sites)
 
 
@@ -389,6 +403,77 @@ def _nested_statements(node: ast.AST) -> int:
     return total
 
 
+#: Scope boundaries. A `return` inside one belongs to it, not to the loop
+#: body that lexically contains it, and a `break` cannot cross one at all.
+_SCOPES: Final = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+)
+
+_LOOP_NODES: Final = (ast.For, ast.AsyncFor, ast.While)
+
+
+def _deferred_children(node: ast.AST) -> frozenset[int]:
+    """The children of `node` that evaluate only sometimes, by `id()`.
+
+    `_child_ctx` gives one context to every child, which is right for a
+    statement-level branch — an `if` defers its whole body — and wrong for an
+    expression that defers only part of itself. These three do:
+
+    - `a and log(...)` / `a or log(...)` — everything after the first operand
+    - `log(...) if cond else None` — both arms, never the test
+    - `assert cond, log(...)` — the message, which evaluates only on failure
+
+    Corpus incidence of a log call in one of these is 0 across 2,244 files
+    (see issue #81), so this buys no measured coverage today. It is here
+    because the shapes are ordinary Python and the alternative is a
+    determinate bar over a body that does not have the order it claims.
+    """
+    if isinstance(node, ast.BoolOp):
+        return frozenset(id(value) for value in node.values[1:])
+    if isinstance(node, ast.IfExp):
+        return frozenset({id(node.body), id(node.orelse)})
+    if isinstance(node, ast.Assert):
+        return frozenset({id(node.msg)}) if node.msg is not None else frozenset()
+    return frozenset()
+
+
+def _jumps_out(node: ast.AST, *, nested_loop: bool = False) -> bool:
+    """Whether `node` can end the enclosing loop body early.
+
+    `break`, `continue` and `return` make textual order an upper bound rather
+    than a promise: everything after one of them is skippable, so a
+    determinate sub-iteration bar over the body would show a percentage that
+    is wrong rather than imprecise. This is the everyday shape — a guard
+    clause at the top of a loop — and it used to pass `stable_order`.
+
+    Three boundaries, each of which changes the answer:
+
+    - **Scopes.** A `return` in a nested `def` returns from that `def`.
+    - **A nested loop's body.** Its `break` and `continue` bind to it, and its
+      `return` still binds to us.
+    - **A nested loop's `else` clause.** Not part of that loop, so a `break`
+      there binds to us after all — which is why this cannot simply stop
+      descending at a loop.
+    """
+    if isinstance(node, ast.Return):
+        return True
+    if isinstance(node, ast.Break | ast.Continue):
+        return not nested_loop
+    if isinstance(node, _SCOPES):
+        return False
+    if isinstance(node, _LOOP_NODES):
+        return any(_jumps_out(child, nested_loop=True) for child in node.body) or any(
+            _jumps_out(child, nested_loop=nested_loop) for child in node.orelse
+        )
+    return any(
+        _jumps_out(child, nested_loop=nested_loop)
+        for child in ast.iter_child_nodes(node)
+    )
+
+
 def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     """The context a node's children are visited with.
 
@@ -433,6 +518,14 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
         )
     if isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
         return ctx._replace(conditional=True)
+    if isinstance(node, ast.With | ast.AsyncWith):
+        # Whether the manager swallows is unknowable from the node type —
+        # `contextlib.suppress(E)` and `open(path)` are the same `With` — and
+        # the two differ in exactly the way this flag is about. Name-matching
+        # the known suppressors would catch the common case and miss a
+        # hand-rolled one, which is a *fail-open* miss and the class of defect
+        # this whole flag exists to close. So every `with` body is conditional.
+        return ctx._replace(conditional=True)
     return ctx
 
 
@@ -462,8 +555,15 @@ class _Walker:
             return
 
         ctx = _child_ctx(node, ctx)
+        # One context per child, except where only *part* of an expression
+        # is deferred — `_child_ctx` cannot say that, because it answers per
+        # node. A scope node reached this way still resets the flag for its
+        # own children, which is correct: a lambda's body has an order of its
+        # own regardless of when the lambda is evaluated.
+        deferred = _deferred_children(node)
+        conditional_ctx = ctx._replace(conditional=True)
         for child in ast.iter_child_nodes(node):
-            self.visit(child, ctx)
+            self.visit(child, conditional_ctx if id(child) in deferred else ctx)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor | ast.While, ctx: _Ctx) -> None:
         inner = (*ctx.loops, node.lineno)
@@ -497,8 +597,19 @@ class _Walker:
             repeats.add(id(node.test))
         body = repeats
         body_ctx = ctx._replace(loops=inner, conditional=False)
+        # Everything textually after a `break`, `continue` or `return` is
+        # skippable, so the body's order stops being a promise there. Split
+        # at the top level of the body only: a jump nested inside a statement
+        # is inside a branch, and that branch has already marked its own
+        # contents conditional.
+        after_jump = ctx._replace(loops=inner, conditional=True)
+        jumped = False
         for child in ast.iter_child_nodes(node):
-            self.visit(child, body_ctx if id(child) in body else ctx)
+            if id(child) not in body:
+                self.visit(child, ctx)
+                continue
+            self.visit(child, after_jump if jumped else body_ctx)
+            jumped = jumped or _jumps_out(child)
 
 
 # --------------------------------------------------------------------------
