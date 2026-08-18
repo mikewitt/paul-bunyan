@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import pty
-import select
 import sys
 import time
 from pathlib import Path
@@ -160,6 +158,14 @@ def capture(
     *screen* loses the marker just as readily when a chunk is big enough to
     scroll it away before the loop looks.
     """
+    # `pty` is POSIX-only — it pulls in `termios`, which does not exist on
+    # Windows — and this is the one function that needs it. Deferred for the
+    # same reason as `pyte` above: at module scope it made the whole file
+    # unimportable on the Windows test legs, so the pure parts could not be
+    # driven there. Recording still only works where a pty does.
+    import pty
+    import select
+
     import pyte
 
     screen = pyte.Screen(cols, rows)
