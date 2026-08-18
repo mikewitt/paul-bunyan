@@ -32,6 +32,13 @@ dev = [
     "black>=24.0",
     "pre-commit>=3.6",
     "mypy>=2.3.0",
+    # `tests/test_workflows.py` parses `.github/workflows/*.yml` to assert the
+    # job ids are ones GitHub accepts. It was importable already, transitively
+    # via pre-commit — declared here because a test that depends on someone
+    # else's dependency stops running the day they drop it, and this one exists
+    # because an invalid workflow produces no checks rather than a red one.
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -213,7 +220,12 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=lumberjack --cov-report=term-missing"
+# `-m "not slow"` is what keeps the default run fast (#72). The slow tests
+# are not lesser: they cover the shapes that only exist in elapsed time — the
+# 1.0s legibility threshold, an inferred total holding across consecutive real
+# polls — and a CI job runs them explicitly. A later `-m` on the command line
+# overrides this one, which is how that job selects them.
+addopts = "--cov=lumberjack --cov-report=term-missing -m 'not slow'"
 filterwarnings = ["error"]
 # Registering these is not bookkeeping: `filterwarnings = ["error"]` turns
 # pytest's unknown-mark warning into a collection error, so a typo'd

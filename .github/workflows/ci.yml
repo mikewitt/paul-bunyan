@@ -33,6 +33,12 @@ concurrency:
 # copies of whatever uv picked.
 jobs:
   lint:
+    # First in the chain. Every job below waits on the one before it, so a
+    # failure here costs nine seconds instead of the ~12 billed minutes a full
+    # fan-out spends before reporting the same thing. The trade is real and
+    # accepted: a red run now names one broken job rather than all of them, so
+    # a second failure only surfaces after the first is fixed.
+    #
     # Its own job, not a step in the matrix below: style is a property of the
     # source, not of the OS or interpreter running it, so checking it six
     # times says the same thing six times — and reports a single misplaced
@@ -55,6 +61,7 @@ jobs:
       - run: uv run black --check .
 
   typecheck:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -70,12 +77,45 @@ jobs:
       # bookkeeping; a real type error in a fixture is not.
       - run: uv run mypy tests examples benchmarks
 
+  # The tier-1 tests whose subject is elapsed time: the 1.0s legibility
+  # threshold that admits a position row, and an inferred total holding across
+  # consecutive real polls. `pyproject.toml` deselects them from every other
+  # run so the default suite stays ~11s; a later `-m` overrides that one.
+  #
+  # One ubuntu leg, not the matrix, and the reason is measured rather than
+  # felt. A windows leg spends 65s provisioning before it runs anything and
+  # bills at 2x, where ubuntu spends 1s — so running these six times would
+  # cost more than the whole rest of CI to learn nothing extra, since what
+  # they test is lumberjack's timing, not the platform's. It also multiplies
+  # the flake surface of the only tests here that depend on a loaded runner.
+  slow-tests:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      - run: uv sync --all-extras
+      - run: uv run pytest -m slow
+
   test:
+    needs: typecheck
     runs-on: ${{ matrix.os }}
     strategy:
       # Report every combination: a failure on one OS/version shouldn't hide
       # whether the others are healthy.
       fail-fast: false
+      # One leg at a time, because the owner asked for serial CI and accepted
+      # the wall-clock. Be clear about what this does *not* buy, so nobody
+      # re-derives it as a saving: with `fail-fast: false` above, all six legs
+      # run whether or not one fails, so serializing them cannot skip any —
+      # and on a public repository GitHub-hosted minutes are free anyway. The
+      # chain of `needs:` between *jobs* does prevent work from starting; this
+      # line only spaces it out. `fail-fast: true` is the lever if the matrix
+      # should ever stop early, at the cost of hiding which other legs failed.
+      max-parallel: 1
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
@@ -89,6 +129,7 @@ jobs:
       - run: uv run pytest
 
   bare:
+    needs: slow-tests
     # Design principle 8: `pip install lumberjack` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
     # `test` installs every extra, so without this job no `except ImportError`
@@ -130,6 +171,7 @@ jobs:
       - run: uv run pytest
 
   package:
+    needs: bare
     # The wheel is the artefact users actually get, and it is assembled by
     # hatchling from a config nothing else exercises — a mistake in the
     # packages list or a missing py.typed passes every other job here.
@@ -189,7 +231,7 @@ jobs:
     # bare-install skipif, and Windows path branches — but collecting it
     # means six `--partial` uploads plus a `final` call, which is a lot of
     # workflow for a fraction of a percent.
-    needs: test
+    needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
