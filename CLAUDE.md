@@ -388,6 +388,20 @@ Worth knowing before touching the runner budget: the suite is about **13%** of r
 
 CodeQL and Codacy also run, both configured outside this workflow.
 
+`tier1-guard.yml` is a separate workflow and a merge gate rather than a
+test: it fails any pull request whose diff touches both `tests/tier1/**` and
+`src/**` unless the pull request carries the `tier-1 change` label. The
+signature it catches is a change that alters behaviour and edits the
+assertion that noticed. Its own workflow because it needs the
+`labeled`/`unlabeled` triggers — applying the label has to re-run *it*, and
+would otherwise re-run the whole serial chain every time anyone touched a
+label. It is **not yet a required check**, which is the difference between a
+gate and a suggestion; making it one is a repository settings change that
+cannot be done from the tree, and doing so freezes its `name:` for the
+reason `bare install (no rich)` records below. Why a label rather than
+CODEOWNERS, and the two cases it deliberately does not catch, are in
+`tests/README.md`.
+
 A separate workflow, `demo-gif.yml`, re-records the demo gif on every PR
 that touches `src/`, `examples/` or the recorder, and uploads it as an
 artifact. It is a smoke test as much as a regeneration: it is the one check
