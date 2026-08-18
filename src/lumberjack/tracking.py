@@ -87,8 +87,8 @@ def _ambient_parent() -> TaskHandle | None:
     `_prev_ambient` is always set on it.
     """
     candidate = _current_task.get()
-    while candidate is not None and candidate._ended:
-        candidate = candidate._prev_ambient
+    while candidate is not None and candidate._ended:  # noqa: SLF001 - same class
+        candidate = candidate._prev_ambient  # noqa: SLF001 - same class
     return candidate
 
 
@@ -103,7 +103,7 @@ def _caller_origin() -> Origin:
     `stacklevel=` cannot do this job: the depth differs per entry point, and
     `__exit__` is invoked by the interpreter rather than from user code.
     """
-    frame = sys._getframe(2)
+    frame = sys._getframe(2)  # noqa: SLF001 - no public API for a caller's frame
     return frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name
 
 
@@ -174,7 +174,7 @@ class TaskHandle:
         self._span: Span | None = None
         tracer = otel.tracer()
         if tracer is not None:
-            parent_span = parent._span if parent is not None else None
+            parent_span = parent._span if parent is not None else None  # noqa: SLF001
             self._span = tracer.start_span(
                 label, context=otel.context_with_span(parent_span)
             )

@@ -122,8 +122,11 @@ _COLUMNS = (
     "template_id",
 )
 _GET_COLUMNS = attrgetter(*_COLUMNS)
+_COLS = ", ".join(_COLUMNS)
 _PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS)
-_INSERT_SQL = f"INSERT INTO records ({', '.join(_COLUMNS)}) VALUES ({_PLACEHOLDERS})"
+# Both halves come from `_COLUMNS`, the literal tuple above; every *value*
+# goes through a `?`. The parity tests pin `_COLUMNS` against the real table.
+_INSERT_SQL = f"INSERT INTO records ({_COLS}) VALUES ({_PLACEHOLDERS})"  # nosec B608
 
 
 class RecordStore(abc.ABC):
@@ -296,7 +299,9 @@ class SQLiteRecordStore(RecordStore):
             sql += " LIMIT ?"
             params.append(n)
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return [self._row_to_stored(r) for r in reversed(rows)]
 
     def count_by_template(
@@ -309,7 +314,9 @@ class SQLiteRecordStore(RecordStore):
             params.append(time.time() - window_seconds)
         sql += " GROUP BY template_id"
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return {r["template_id"]: r["cnt"] for r in rows}
 
     def count_by_source(
@@ -326,7 +333,9 @@ class SQLiteRecordStore(RecordStore):
             params.append(time.time() - window_seconds)
         sql += " GROUP BY pathname, lineno, func_name"
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return {
             SourceKey(r["pathname"], r["lineno"], r["func_name"]): r["cnt"]
             for r in rows

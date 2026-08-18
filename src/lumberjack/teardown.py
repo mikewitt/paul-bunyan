@@ -20,6 +20,7 @@ real traceback.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import sys
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -104,10 +105,8 @@ def run() -> None:
 def _stop_live_display() -> None:
     if _session is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         _session.renderer.close()
-    except Exception:
-        pass
 
 
 def _report_dropped() -> None:
@@ -118,7 +117,7 @@ def _report_dropped() -> None:
     """
     if _session is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         dropped = _session.handler.dropped
         if dropped:
             print(
@@ -127,8 +126,6 @@ def _report_dropped() -> None:
                 "lower flush_interval in init().",
                 file=sys.stderr,
             )
-    except Exception:
-        pass
 
 
 def _report_suppressed_bars() -> None:
@@ -144,7 +141,7 @@ def _report_suppressed_bars() -> None:
     """
     if _session is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         suppressed = getattr(_session.renderer, "suppressed_bars", 0)
         if suppressed:
             print(
@@ -155,8 +152,6 @@ def _report_suppressed_bars() -> None:
                 "fixes.",
                 file=sys.stderr,
             )
-    except Exception:
-        pass
 
 
 def _dump_diagnostics() -> None:
@@ -168,16 +163,18 @@ def _dump_diagnostics() -> None:
     # dropping the only copy of a record is worse.
     if getattr(_session.renderer, "write_through", False):
         return
-    try:
+    with contextlib.suppress(Exception):
         rows = _session.store.recent(n=_session.dump_last_n)
         dumper = PlainTextRenderer(stream=sys.stderr)
         for row in rows:
             dumper.render(row)
-    except Exception:
-        pass
 
 
 def _flush_buffer() -> None:
+    # The last chance the buffered records have: if `append()` raises here
+    # they are already out of the buffer and nothing holds them.
+    # lumberjack: see issue #77.
+    #
     # Deliberately a duplicate of `lumberjack.flush()`, not a call to it:
     # `flush()` takes `session.registry_lock()` around the same read-then-write
     # so a concurrent `shutdown()` cannot close the store between them, but
@@ -188,9 +185,7 @@ def _flush_buffer() -> None:
     # call to `flush()`.
     if _session is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         rows = _session.handler.drain()
         if rows:
             _session.store.append(rows)
-    except Exception:
-        pass

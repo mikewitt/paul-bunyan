@@ -32,7 +32,8 @@ DEMO = Path(__file__).resolve().parent.parent / "examples" / "demo.py"
 def analyze(write_module: Callable[..., Path]) -> Callable[..., static.FileStructure]:
     def _analyze(source: str, *, name: str | None = None) -> static.FileStructure:
         structure = static.analyze_file(str(write_module(source, name=name)))
-        assert structure is not None, "the fixture source should parse"
+        if structure is None:
+            raise AssertionError("the fixture source should parse")
         return structure
 
     return _analyze
@@ -41,7 +42,8 @@ def analyze(write_module: Callable[..., Path]) -> Callable[..., static.FileStruc
 @pytest.fixture
 def demo() -> static.FileStructure:
     structure = static.analyze_file(str(DEMO))
-    assert structure is not None, f"{DEMO} should be readable and parseable"
+    if structure is None:
+        raise AssertionError(f"{DEMO} should be readable and parseable")
     return structure
 
 
@@ -52,7 +54,8 @@ def loop_in(structure: static.FileStructure, func_name: str) -> static.Loop:
         for loop in structure.loops.values()
         if loop.func_name == func_name and loop.call_sites
     ]
-    assert len(loops) == 1, f"expected one logging loop in {func_name}, got {loops}"
+    if len(loops) != 1:
+        raise AssertionError(f"expected one logging loop in {func_name}, got {loops}")
     return loops[0]
 
 
@@ -238,7 +241,7 @@ def test_ast_linenos_match_the_records_they_emit(
     logger.addHandler(capture)
     try:
         namespace: dict[str, object] = {"log": logger, "logging": logging}
-        exec(compile(source, str(path), "exec"), namespace)
+        exec(compile(source, str(path), "exec"), namespace)  # noqa: S102 # nosec B102
         emit = namespace["emit"]
         assert callable(emit)
         emit(1)

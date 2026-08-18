@@ -19,15 +19,15 @@ import pytest
 
 pytest.importorskip("rich")
 
-import lumberjack  # noqa: E402
-import lumberjack.renderers.rich_renderer as rich_renderer_module  # noqa: E402
-import lumberjack.tracking  # noqa: E402
-from lumberjack import session  # noqa: E402
-from lumberjack.detect import OutputMode  # noqa: E402
-from lumberjack.handler import LumberjackHandler  # noqa: E402
-from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
-from lumberjack.session import Session  # noqa: E402
-from lumberjack.store import RecordStore  # noqa: E402
+import lumberjack
+import lumberjack.renderers.rich_renderer as rich_renderer_module
+import lumberjack.tracking
+from lumberjack import session
+from lumberjack.detect import OutputMode
+from lumberjack.handler import LumberjackHandler
+from lumberjack.renderers.rich_renderer import RichProgressRenderer
+from lumberjack.session import Session
+from lumberjack.store import RecordStore
 
 
 @dataclasses.dataclass

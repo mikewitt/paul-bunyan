@@ -24,7 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - these tests launch real child processes
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,7 +39,8 @@ _SCRIPT = _BENCHMARKS / "capture.py"
 def _load_capture() -> Any:
     """Import the script as a module — `benchmarks/` is not a package."""
     spec = importlib.util.spec_from_file_location("bench_capture", _SCRIPT)
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"{_SCRIPT} could not be loaded as a module")
     module = importlib.util.module_from_spec(spec)
     # Registered before exec: `@dataclass` resolves its annotations through
     # `sys.modules[cls.__module__]`, which is None for a module still being
@@ -58,17 +59,18 @@ def benchmark_json() -> dict:
     env = dict(os.environ)
     src_dir = str(Path(__file__).resolve().parent.parent / "src")
     env["PYTHONPATH"] = os.pathsep.join([src_dir, env.get("PYTHONPATH", "")])
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603  # nosec B603
         [sys.executable, str(_SCRIPT), "--records", "200", "--repeats", "2", "--json"],
         capture_output=True,
         text=True,
         env=env,
         timeout=120,
     )
-    assert result.returncode == 0, (
-        f"benchmark exited {result.returncode} — a non-zero exit means it "
-        f"lost records.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"benchmark exited {result.returncode} — a non-zero exit means it "
+            f"lost records.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     return json.loads(result.stdout)
 
 

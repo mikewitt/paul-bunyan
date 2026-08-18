@@ -22,6 +22,7 @@ Two renderers live here:
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from typing import TYPE_CHECKING, TextIO
 
@@ -664,12 +665,10 @@ class RichProgressRenderer:
         # counts a run finished on are the interesting ones.
         if self._pump is not None:
             self._pump.stop()
-        try:
+        # A store closed ahead of us must not cost the user their terminal (or
+        # mangle a traceback) — stopping the display matters more.
+        with contextlib.suppress(Exception):
             self.refresh()
-        except Exception:
-            # A store closed ahead of us must not cost the user their terminal
-            # (or mangle a traceback) — stopping the display matters more.
-            pass
         self._closed = True
         # Deliberately not fixed here, despite this being the line that would
         # do it: `Live.stop()` sets `vertical_overflow = "visible"` itself,

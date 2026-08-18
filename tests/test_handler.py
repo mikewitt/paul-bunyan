@@ -112,3 +112,25 @@ def test_a_task_event_travels_extra_through_the_handler_to_the_store(
     assert (row.task_id, row.parent_task_id) == (7, 3)
     assert (row.progress_current, row.progress_total) == (40, 100)
     assert row.message == "task progress: reindex 40/100"
+
+
+def test_a_record_that_cannot_be_converted_goes_to_handleError():
+    """stdlib's contract for a bad record, and the one path `emit()` swallows.
+
+    A broken record must not take down the `log.info()` that produced it, and
+    must not silently vanish either — `handleError` is where stdlib says it
+    goes. Previously uncovered, which meant the `except` was untested.
+    """
+    handler = LumberjackHandler()
+    handled: list[logging.LogRecord] = []
+    handler.handleError = handled.append
+
+    # Two placeholders, one argument: `getMessage()` raises TypeError inside
+    # `from_log_record`. An *empty* args tuple would not — stdlib skips the
+    # `%` entirely when there is nothing to interpolate.
+    record = logging.LogRecord("n", logging.INFO, "p.py", 1, "%d %d", (1,), None)
+
+    handler.emit(record)
+
+    assert handled == [record]
+    assert handler.drain() == [], "a record that failed conversion must not be stored"

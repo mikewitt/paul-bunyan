@@ -99,6 +99,42 @@ def _uninstall_after() -> Iterator[None]:
     teardown.uninstall()
 
 
+class _ExplodingStore(_FakeStore):
+    """Every method teardown calls raises. The swallow is what is under test."""
+
+    def append(self, rows: list[str]) -> None:
+        raise RuntimeError("store is closed")
+
+    def recent(self, n: int | None = None, since: float | None = None) -> list[str]:
+        raise RuntimeError("store is closed")
+
+
+class _ExplodingRenderer(_FakeRenderer):
+    def close(self) -> None:
+        raise RuntimeError("terminal is gone")
+
+
+def test_a_failing_store_and_renderer_do_not_escape_teardown():
+    """Principle 6's other half: cleanup must never hide the real traceback.
+
+    Worth a test rather than a comment, because the swallow moved into
+    `contextlib.suppress` and line coverage cannot see inside it — the block
+    reads as covered whether or not anything ever raised in it. Only an
+    exception actually thrown here distinguishes the two.
+    """
+    _install(store=_ExplodingStore(), renderer=_ExplodingRenderer())
+    teardown.run()  # must not raise
+
+
+def test_a_failing_step_does_not_stop_the_ones_after_it():
+    """Each step is wrapped separately, so one failure is not five."""
+    renderer = _FakeRenderer()
+    _install(store=_ExplodingStore(), renderer=renderer)
+    teardown.run()
+    # `_flush_buffer` raised first; the display was still taken down after it.
+    assert renderer.closed == 1
+
+
 def test_install_sets_excepthook():
     prev_hook = sys.excepthook
     _install()

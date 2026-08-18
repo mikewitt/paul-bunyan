@@ -64,7 +64,7 @@ def make_row() -> Callable[..., LogRecordRow]:
             level_no=20,
             msg="msg",
             message="hello world",
-            pathname="/tmp/foo.py",
+            pathname="/nonexistent/foo.py",
             filename="foo.py",
             module="foo",
             func_name="bar",

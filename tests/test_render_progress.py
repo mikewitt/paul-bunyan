@@ -28,12 +28,12 @@ import pytest
 
 pytest.importorskip("rich")
 
-import lumberjack.renderers.rich_renderer as rich_renderer_module  # noqa: E402
-from fixture_sources import SEQUENCE, STAGES  # noqa: E402
-from lumberjack.handler import LumberjackHandler  # noqa: E402
-from lumberjack.renderers.progress import LoopRowModel  # noqa: E402
-from lumberjack.renderers.rich_renderer import RichProgressRenderer  # noqa: E402
-from lumberjack.store import RecordStore  # noqa: E402
+import lumberjack.renderers.rich_renderer as rich_renderer_module
+from fixture_sources import SEQUENCE, STAGES
+from lumberjack.handler import LumberjackHandler
+from lumberjack.renderers.progress import LoopRowModel
+from lumberjack.renderers.rich_renderer import RichProgressRenderer
+from lumberjack.store import RecordStore
 
 _TIMER_THREAD = "lumberjack-progress"
 
@@ -185,7 +185,7 @@ def test_records_written_by_another_writer_reach_the_bar(rig: _Rig, make_row):
 def _unrelated_loops(store: RecordStore, make_row, count: int, *, records: int = 3):
     """`count` separate loops, each pacing itself differently.
 
-    Distinct periods are load-bearing here, not decoration. `/tmp/foo.py` has
+    Distinct periods are load-bearing here, not decoration. `/nonexistent/foo.py` has
     no source on disk, so the row model falls back to the runtime signal —
     equal periods plus a shared worker means one loop body — and sources that
     all fire within the same microsecond satisfy that and merge into one row.

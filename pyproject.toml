@@ -50,7 +50,60 @@ src = ["src", "tests"]
 # the *template* and `record.args` the data. lumberjack reads both as separate
 # columns; an f-string destroys the template at the call site and it cannot be
 # recovered. The package that depends on that discipline should be held to it.
-select = ["E", "F", "I", "B", "UP", "G"]
+#
+# `S` is flake8-bandit, and selecting it here is bandit's ruleset moving to the
+# one place that can scope it. `.codacy.yaml` wants to say "an assert is fine in
+# tests/ and nowhere else" and has no vocabulary for it — its own comment says
+# so: "Individual patterns can only be disabled in the Codacy web UI, so path
+# scoping is the whole of what this file can express." It therefore had to
+# exclude `tests/**` wholesale, which cost the suite every *other* finding those
+# engines produce. `per-file-ignores` below says the intended thing exactly.
+#
+# Verified against what `.codacy.yaml` documents bandit reporting, and covering
+# every rule that was firing: S110/S608 in src/, S606 in scripts/,
+# S101/S108/S603/S102 in tests/. Not a complete superset, though — bandit's B404
+# has no non-preview equivalent here, so those sites carry `# nosec B404`; see
+# `.codacy.yaml`. What is gained is that an `assert` reaching src/ now fails
+# pre-commit and the required `lint` job rather than being caught by Codacy
+# after merge.
+#
+# `RUF100` is what stops any of the above rotting. Three `# noqa`s in this repo
+# were inert because their rules were never selected, and an unenforced
+# suppression is indistinguishable from a working one — the same failure mode
+# `.codacy.yaml` records for silently-ignored engine keys. `SLF001` and `BLE001`
+# are selected for exactly that reason: they were already being suppressed by
+# hand, so either they are real rules or the comments were decoration.
+select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: in a pytest suite the assert IS the test, and S101's actual concern —
+# asserts stripped under `python -O` — does not apply to code nothing runs under
+# -O. Every other `S` rule still applies to tests/; only this one is exempt,
+# which is precisely the distinction a path exclusion could not draw.
+#
+# SLF001: tests reaching into renderer and model internals is a real finding,
+# not a false positive — it is issue #45, which wants those tests asserting on a
+# rendered frame instead. Suppressing all 31 inline would bury that; exempting
+# the directory keeps the rule enforced where it is actionable today (src/) and
+# leaves #45 to fix the tests rather than annotate them.
+"tests/**" = ["S101", "SLF001"]
+# S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
+# for one plain reason: the line cannot carry both markers. `_COLUMNS` is a
+# module-level tuple of literal column names, values go through `?`
+# placeholders, and the parity tests pin `_COLUMNS` against the real table — so
+# the finding is wrong, and both ruff and bandit have to be told so. The
+# statement is 71 characters; `# noqa: S608` alone fits (85) and `# nosec B608`
+# alone fits (85), but both together are 99 and overflow. Bandit has no
+# path-scoped config, so bandit's marker must be the inline one and ruff's must
+# be here.
+#
+# An earlier version of this comment justified the split as "keeping the line
+# byte for byte as it was, out of the diff". That is no longer true — the line
+# was edited anyway to add the `# nosec` — and it was never the real reason.
+# The genuine changed-line lesson lives in `.codacy.yaml`; it is about not
+# reformatting accepted findings, and it applies whether or not this entry
+# exists.
+"src/lumberjack/store.py" = ["S608"]
 
 [tool.black]
 target-version = ["py312"]
