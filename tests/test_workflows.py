@@ -35,6 +35,20 @@ def _workflows() -> list[Path]:
     return sorted(_WORKFLOWS.glob("*.yml")) + sorted(_WORKFLOWS.glob("*.yaml"))
 
 
+def _jobs(path: Path) -> dict[str, dict]:
+    """The workflow's `jobs` mapping, or empty if it has none.
+
+    `yaml.safe_load` returns None for a file that is empty or all comments,
+    and `None.get` is an AttributeError — so a placeholder workflow would have
+    made these tests *error* rather than report. That matters more here than
+    it usually would: this file exists because an unparseable workflow fails
+    by going silent, and a guard that crashes on the edge case is a guard that
+    has to be debugged at the moment it is most needed.
+    """
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return loaded.get("jobs", {}) or {}
+
+
 def test_there_are_workflows_to_check() -> None:
     """A parametrized rule over an empty list passes for the wrong reason."""
     assert _workflows()
@@ -42,7 +56,7 @@ def test_there_are_workflows_to_check() -> None:
 
 @pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
 def test_every_job_id_is_one_github_accepts(path: Path) -> None:
-    jobs = yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs", {})
+    jobs = _jobs(path)
     bad = [name for name in jobs if not _JOB_ID.fullmatch(name)]
     assert bad == [], f"{path.name} has job ids GitHub will reject: {bad}"
 
@@ -51,7 +65,7 @@ def test_every_job_id_is_one_github_accepts(path: Path) -> None:
 def test_every_needs_names_a_job_that_exists(path: Path) -> None:
     """A `needs:` pointing at nothing is the same class of defect — the
     workflow is rejected whole, and nothing runs."""
-    jobs = yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs", {})
+    jobs = _jobs(path)
     for name, body in jobs.items():
         needs = body.get("needs") or []
         if isinstance(needs, str):
@@ -63,7 +77,7 @@ def test_every_needs_names_a_job_that_exists(path: Path) -> None:
 @pytest.mark.parametrize("path", _workflows(), ids=lambda p: p.name)
 def test_the_dependency_graph_is_acyclic(path: Path) -> None:
     """A cycle is accepted by the parser and rejected by GitHub."""
-    jobs = yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs", {})
+    jobs = _jobs(path)
     graph = {}
     for name, body in jobs.items():
         needs = body.get("needs") or []
@@ -77,3 +91,12 @@ def test_the_dependency_graph_is_acyclic(path: Path) -> None:
                 resolved.add(name)
                 progress = True
     assert set(graph) == resolved, f"{path.name}: cycle among {set(graph) - resolved}"
+
+
+def test_a_workflow_with_no_jobs_is_handled_rather_than_crashing(tmp_path) -> None:
+    """The edge case the helper exists for, driven directly: an empty file, a
+    comment-only file, and one with a `jobs:` key and nothing under it."""
+    for text in ("", "# nothing here\n", "name: x\njobs:\n"):
+        path = tmp_path / "w.yml"
+        path.write_text(text, encoding="utf-8")
+        assert _jobs(path) == {}, repr(text)
