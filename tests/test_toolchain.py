@@ -12,7 +12,7 @@ push as after it.
 from __future__ import annotations
 
 import re
-import subprocess
+import subprocess  # nosec B404 - these tests launch real child processes
 import sys
 from pathlib import Path
 

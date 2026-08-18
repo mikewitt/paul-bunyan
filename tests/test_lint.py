@@ -20,7 +20,7 @@ from __future__ import annotations
 import ast
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 - these tests launch real child processes
 import sys
 from collections.abc import Callable
 from pathlib import Path

@@ -59,11 +59,14 @@ src = ["src", "tests"]
 # exclude `tests/**` wholesale, which cost the suite every *other* finding those
 # engines produce. `per-file-ignores` below says the intended thing exactly.
 #
-# Verified rule-for-rule and site-for-site against what `.codacy.yaml` documents
-# bandit reporting: S110/S608 in src/, S606 in scripts/, S101/S108/S603/S102 in
-# tests/. Nothing is given up by moving it here, and something is gained — an
-# `assert` reaching src/ now fails pre-commit and the required `lint` job rather
-# than being caught by Codacy after merge.
+# Verified against what `.codacy.yaml` documents bandit reporting, and covering
+# every rule that was firing: S110/S608 in src/, S606 in scripts/,
+# S101/S108/S603/S102 in tests/. Not a complete superset, though — bandit's B404
+# has no non-preview equivalent here, so those sites carry `# nosec B404`; see
+# `.codacy.yaml`. What is gained is that an `assert` reaching src/ now fails
+# pre-commit and the required `lint` job rather than being caught by Codacy
+# after merge.
+#
 # `RUF100` is what stops any of the above rotting. Three `# noqa`s in this repo
 # were inert because their rules were never selected, and an unenforced
 # suppression is indistinguishable from a working one — the same failure mode
@@ -85,18 +88,21 @@ select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
 # leaves #45 to fix the tests rather than annotate them.
 "tests/**" = ["S101", "SLF001"]
 # S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
-# and the indirection is the point. That statement is a pre-existing finding
-# `.codacy.yaml` has already assessed and kept — `_COLUMNS` is a module-level
-# tuple of literal column names, values go through `?` placeholders, and the
-# parity tests pin `_COLUMNS` against the real table. It is 85 characters, so a
-# trailing `# noqa: S608` overflows the line and forces a reformat.
+# for one plain reason: the line cannot carry both markers. `_COLUMNS` is a
+# module-level tuple of literal column names, values go through `?`
+# placeholders, and the parity tests pin `_COLUMNS` against the real table — so
+# the finding is wrong, and both ruff and bandit have to be told so. The
+# statement is 71 characters; `# noqa: S608` alone fits (85) and `# nosec B608`
+# alone fits (85), but both together are 99 and overflow. Bandit has no
+# path-scoped config, so bandit's marker must be the inline one and ruff's must
+# be here.
 #
-# Reformatting it is what must not happen. Codacy counts issues on *changed*
-# lines, so rewrapping a line that has been accepted for months republishes its
-# findings as new ones introduced by whatever PR touched it — measured on #76,
-# where the split briefly produced three highs and a medium against a statement
-# nobody had changed the meaning of. Exempting by path leaves the line byte for
-# byte as it was, which is what keeps it out of the diff.
+# An earlier version of this comment justified the split as "keeping the line
+# byte for byte as it was, out of the diff". That is no longer true — the line
+# was edited anyway to add the `# nosec` — and it was never the real reason.
+# The genuine changed-line lesson lives in `.codacy.yaml`; it is about not
+# reformatting accepted findings, and it applies whether or not this entry
+# exists.
 "src/lumberjack/store.py" = ["S608"]
 
 [tool.black]

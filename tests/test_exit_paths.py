@@ -12,7 +12,7 @@ import importlib.util
 import os
 import re
 import sqlite3
-import subprocess
+import subprocess  # nosec B404 - these tests launch real child processes
 import sys
 from collections.abc import Callable
 from pathlib import Path

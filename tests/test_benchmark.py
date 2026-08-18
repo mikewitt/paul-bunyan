@@ -24,7 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - these tests launch real child processes
 import sys
 from pathlib import Path
 from typing import Any

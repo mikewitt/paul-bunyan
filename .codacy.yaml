@@ -17,9 +17,18 @@
 # So the whole directory went, and with it every *other* finding bandit would
 # have reported there. That was the real cost, and it was paid silently.
 #
-# `ruff --select S` was checked against what bandit reports, rule for rule and
-# site for site, and reproduces it exactly: S110/S608 in src/, S606 in scripts/,
-# S101/S108/S603/S102 in tests/. Ruff also has `per-file-ignores`, so
+# `ruff --select S` was checked against what bandit reports and covers every
+# rule that was actually firing: S110/S608 in src/, S606 in scripts/,
+# S101/S108/S603/S102 in tests/.
+#
+# It is *not* a complete superset, and an earlier version of this comment
+# overstated it as "rule for rule and site for site". Bandit's B404
+# (`import subprocess`) has no non-preview ruff equivalent — ruff's S404 is
+# preview-gated in 0.16.2 and answers `Selection S404 has no effect because
+# preview is not enabled`, firing on the same four test files only under
+# `--preview`. Those four imports therefore carry `# nosec B404` rather than
+# relying on ruff to mirror them. Check for gaps like that before assuming the
+# two tools agree on a rule neither of them is currently reporting. Ruff also has `per-file-ignores`, so
 # `pyproject.toml` now says "S101 is exempt in tests/, every other S rule is
 # not" — one line, in the repo, enforced by pre-commit and the required `lint`
 # job. That is strictly stronger than what was here: an `assert` reaching `src/`
@@ -28,8 +37,9 @@
 # Two consequences worth stating rather than discovering:
 #
 #   - The remaining findings are suppressed inline, at the code, with the reason
-#     beside them — `# noqa: S110, BLE001 - swallowing is the point` reads better
-#     than the same sentence in a config file three directories away. Where a
+#     beside them — `# noqa: S603  # nosec B603 - launches a real child process`
+#     reads better than the same sentence in a config file three directories
+#     away. Where a
 #     line needs to satisfy both tools it carries both markers, because bandit
 #     reads `# nosec` and has never read `# noqa`.
 #
