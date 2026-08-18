@@ -1,0 +1,61 @@
+# Makes a tier-1 edit visible rather than forbidden.
+#
+# `tests/README.md` says a failing tier-1 test means the change is wrong, not
+# the test. That is an instruction, and an instruction is the weakest of the
+# three things available — instruct, gate the merge, detect after the fact.
+# This is the middle one. The reasoning, and what it deliberately does not
+# catch, live in `scripts/tier1_guard.py` beside the rule itself.
+#
+# Its own workflow rather than a job in `ci.yml`, because it needs the
+# `labeled`/`unlabeled` triggers and CI does not: applying the label has to
+# re-run *this* check, and would otherwise re-run the whole serial chain
+# every time anyone touched a label.
+name: tier-1 guard
+
+on:
+  pull_request:
+    # The first three are the default set, which is replaced rather than
+    # extended once `types:` is written down at all.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # This name is reported to GitHub as the check name. Adding it to trunk's
+  # required-check ruleset freezes it — see CLAUDE.md on `bare install (no
+  # rich)`, where renaming would orphan a required check and block merges
+  # until the ruleset is edited to match.
+  guard:
+    name: tier-1 guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The three-dot diff below needs both endpoints, and the default
+          # shallow clone has neither.
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      # No `uv sync`: the guard is stdlib-only on purpose, so it keeps
+      # working when the environment it is judging does not.
+      - name: Check the diff
+        env:
+          # Passed through the environment, never interpolated into the
+          # script below. A label is text anyone with triage rights can
+          # write, and `${{ }}` splices it into the shell before bash sees a
+          # single quote — which is how a workflow gets hijacked by a label.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Three dots: changes on this branch since it diverged, never the
+          # base branch's own commits, so a stale branch is not accused of
+          # editing files someone else touched.
+          git diff --name-only "$BASE_SHA...HEAD" \
+            | python scripts/tier1_guard.py

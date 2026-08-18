@@ -90,7 +90,7 @@ flush disabled, the record count is only knowable then, which the tier-1
 `@pytest.mark.slow` is orthogonal to the tiers — a test can be tier 1 and
 slow, and conflating "how important" with "how long" is how a tiering scheme
 rots. `pyproject.toml` deselects `slow` from the default run, so `pytest` stays
-around eleven seconds; the `slow tests` CI job selects them with `-m slow`.
+around eleven seconds; the `slow-tests` CI job selects them with `-m slow`.
 
 `tests/tier1/test_slow_shapes.py` is the whole of it today, and everything in
 it is slow irreducibly: `MIN_LEGIBLE_PERIOD` is 1.0s and deliberately not
@@ -148,3 +148,27 @@ entire value of a tier: it is the one place where "make CI green" is not a
 licence to edit the assertion. If you believe a tier-1 test is genuinely wrong,
 say so in the pull request and change it as its own commit with its own
 argument — never in the commit that made it fail.
+
+That is an instruction, and an instruction is the weakest of the three things
+available: instruct, gate the merge, detect after the fact. The middle one is
+`.github/workflows/tier1-guard.yml`, which fails any pull request whose diff
+touches **both** `tests/tier1/**` and `src/**` unless it carries the
+`tier-1 change` label. The rule and its reasoning live in
+`scripts/tier1_guard.py`; `tests/test_tier1_guard.py` drives it.
+
+**The label is the mechanism, not the check.** Applying one needs triage
+rights on the repository, so the way past the gate is outside the working
+tree — an agent can write any file it likes and cannot label its own pull
+request. The check is only a check; adding it to trunk's required-check
+ruleset is what makes it binding, and until someone does that it is
+advisory. Its `name:` is frozen from that moment, for the reason CLAUDE.md
+records about `bare install (no rich)`.
+
+Editing tier 1 is not forbidden by any of this. It is made visible, and
+routed through a second pair of eyes.
+
+**Two things it does not catch, stated so nobody mistakes it for complete.**
+A pull request that hollows out a tier-1 assertion and touches nothing under
+`src/` passes — rarer, and the purest form of the attack. And nothing in the
+repository stops someone with triage rights from labelling their own change;
+that is what the label being a *record* rather than a lock is for.
