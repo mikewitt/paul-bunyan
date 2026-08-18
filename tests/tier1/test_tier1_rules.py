@@ -32,6 +32,34 @@ _SCRIPTS = _TIER1 / "scripts"
 #: import means reaching past the public surface, which is what tier 2 is for.
 _ALLOWED_ROOTS = frozenset({"lumberjack"}) | frozenset(sys.stdlib_module_names)
 
+#: Calls that start a child process, and the helpers that give it an
+#: environment which keeps coverage measuring it.
+_LAUNCHERS = frozenset({"run_script", "subprocess.run"})
+_ENV_HELPERS = frozenset({"child_env", "subprocess_env"})
+
+
+def _argument_names(call: ast.Call) -> set[str]:
+    """Every name this call passes, whether handed over bare or invoked.
+
+    `run_script(..., child_env)` passes it bare; `subprocess.run(..., env=child_env())`
+    invokes it. Both count.
+    """
+    names: set[str] = set()
+    for value in [*call.args, *(kw.value for kw in call.keywords)]:
+        names.add(_called_name(value))
+        if isinstance(value, ast.Call):
+            names.add(_called_name(value.func))
+    return names
+
+
+def _called_name(func: ast.expr) -> str:
+    """`run_script` or `subprocess.run`, as written at the call site."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return f"{func.value.id}.{func.attr}"
+    return ""
+
 
 def _modules(directory: Path) -> list[Path]:
     return sorted(p for p in directory.glob("*.py") if p.name != "__init__.py")
@@ -42,13 +70,21 @@ def _parents() -> list[Path]:
 
 
 def _imported_names(tree: ast.AST) -> list[str]:
-    """Every module named by an import, as written."""
+    """Every module named by an import, as written.
+
+    A relative import comes back as `.` repeated — it names no module the
+    allowlist could contain, which is the point. Skipping them instead (an
+    earlier version tested `node.level == 0`) left a hole: `from . import x`
+    named nothing, matched nothing, and passed every check. It would fail at
+    runtime here, since neither directory is a package, but a guard that
+    relies on the thing it guards being broken anyway is not a guard.
+    """
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.append(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            names.append("." * node.level + (node.module or ""))
     return names
 
 
@@ -122,13 +158,23 @@ def test_a_parent_test_does_not_monkeypatch(path: Path) -> None:
 @pytest.mark.parametrize("path", _parents(), ids=lambda p: p.name)
 def test_a_parent_test_launches_through_the_shared_rig(path: Path) -> None:
     """`child_env()` is what sets `COVERAGE_PROCESS_START`, and a parent that
-    builds its own environment instead stops measuring the child — silently,
-    because the run still passes and only the coverage number moves.
+    builds its own environment stops measuring the child — silently, because
+    the run still passes and only the coverage number moves.
 
-    `test_tier1_rules.py` launches nothing, so it is exempt by construction:
-    the rule is that a file which runs a script does it through the rig.
+    Checked per *call*, not per file. A file-level check ("the name appears
+    somewhere") passes a file whose second launch quietly builds its own
+    environment while its first is correct — found by writing exactly that
+    and watching the check stay green. Reading the AST also means the name
+    has to be passed, not merely mentioned in a comment.
+
+    A file that launches nothing never reaches the assertion, which is why
+    `test_tier1_rules.py` needs no special-casing.
     """
-    source = path.read_text(encoding="utf-8")
-    if "run_script" not in source and "subprocess.run" not in source:
-        pytest.skip("launches no child process")
-    assert "child_env" in source or "subprocess_env" in source, path.name
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _called_name(node.func) not in _LAUNCHERS:
+            continue
+        assert _argument_names(node) & _ENV_HELPERS, (
+            f"{path.name}:{node.lineno} launches a child process without "
+            f"one of {sorted(_ENV_HELPERS)}"
+        )

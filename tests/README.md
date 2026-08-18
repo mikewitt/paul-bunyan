@@ -38,7 +38,7 @@ Enforced, with a deliberate violation of each proven to fail:
   wearing acceptance clothing — asserting on objects instead of on what a user
   would see — and the tier stops meaning anything.
 - **Nothing private** on either side; **no `monkeypatch`** in a parent.
-- **Launch through `subprocess_rig.child_env()`**, which sets
+- **Launch through `script_runner.child_env()`**, which sets
   `COVERAGE_PROCESS_START`. A parent that builds its own environment stops
   measuring the child, silently: the run still passes and only the coverage
   number moves.

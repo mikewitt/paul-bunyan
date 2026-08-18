@@ -1,5 +1,12 @@
 """Launching a real child process, shared by the suites that need one.
 
+Named `script_runner` rather than anything starting with `subprocess`:
+bandit's B404 matches the *module name* by prefix, so `subprocess_rig` made
+every `from subprocess_rig import ...` line a security finding — seven of
+them, none of which imports `subprocess` at all. Suppressing those would
+have put `# nosec B404` on seven lines that would then each claim something
+untrue. The name is also more accurate; this runs scripts.
+
 Extracted from `test_exit_paths.py` when `tests/tier1/` started launching
 the same way. A plain module rather than `conftest.py` for the reason
 `fixture_sources.py` and `rich_rig.py` already establish: these are helpers

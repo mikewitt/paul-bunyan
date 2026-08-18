@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from subprocess_rig import child_env, needs_rich, run_script
+from script_runner import child_env, needs_rich, run_script
 
 _SCRIPTS = Path(__file__).parent / "scripts"
 

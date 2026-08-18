@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from subprocess_rig import ANSI_RE as _ANSI_RE
-from subprocess_rig import child_env
-from subprocess_rig import needs_rich as _needs_rich
-from subprocess_rig import run_script as _run_script
+from script_runner import ANSI_RE as _ANSI_RE
+from script_runner import child_env
+from script_runner import needs_rich as _needs_rich
+from script_runner import run_script as _run_script
 
 
 @pytest.fixture(scope="module")

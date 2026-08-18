@@ -24,7 +24,7 @@ import lumberjack
 from lumberjack import static, tracking
 from lumberjack.schema import LogRecordRow, StoredRecord, TaskEvent
 from lumberjack.store import RecordStore, SQLiteRecordStore
-from subprocess_rig import child_env
+from script_runner import child_env
 
 
 def _available_backends() -> dict[str, Callable[[], RecordStore]]:
@@ -358,7 +358,7 @@ def root_sentinel() -> Iterator[logging.Handler]:
 def subprocess_env() -> Callable[..., dict[str, str]]:
     """The environment a child process needs to exercise lumberjack from src.
 
-    The fixture form of `subprocess_rig.child_env`, which is where the
+    The fixture form of `script_runner.child_env`, which is where the
     reasoning lives — it is a plain function there because module-scoped
     fixtures need it too and cannot request this one.
     """
