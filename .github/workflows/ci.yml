@@ -107,7 +107,14 @@ jobs:
       # Report every combination: a failure on one OS/version shouldn't hide
       # whether the others are healthy.
       fail-fast: false
-      # One leg at a time: the jobs are chained, so the matrix is chained too.
+      # One leg at a time, because the owner asked for serial CI and accepted
+      # the wall-clock. Be clear about what this does *not* buy, so nobody
+      # re-derives it as a saving: with `fail-fast: false` above, all six legs
+      # run whether or not one fails, so serializing them cannot skip any —
+      # and on a public repository GitHub-hosted minutes are free anyway. The
+      # chain of `needs:` between *jobs* does prevent work from starting; this
+      # line only spaces it out. `fail-fast: true` is the lever if the matrix
+      # should ever stop early, at the cost of hiding which other legs failed.
       max-parallel: 1
       matrix:
         os: [ubuntu-latest, windows-latest]

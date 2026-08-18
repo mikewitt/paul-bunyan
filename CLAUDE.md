@@ -369,7 +369,9 @@ So **a sub-5% change is invisible to a single before/after pair** on this class 
 
 ### CI
 
-**Jobs run in a chain, one at a time.** `lint` → `typecheck` → `test` (with `max-parallel: 1`, so the six legs are serial too) → `slow-tests` → `bare` → `package` → `coverage`. This reverses the original decision, which was "jobs are independent — knowing *which* is broken beats making one wait on another", and the reversal is deliberate: a fan-out spends roughly twelve billed minutes before reporting what a nine-second `lint` already knew. Wall-clock is longer and that is accepted.
+**Jobs run in a chain, one at a time.** `lint` → `typecheck` → `test` (with `max-parallel: 1`, so the six legs are serial too) → `slow-tests` → `bare` → `package` → `coverage`. This reverses the original decision, which was "jobs are independent — knowing *which* is broken beats making one wait on another". Wall-clock is longer — 6.7 minutes against about 2.5 — and that is accepted; it is what the owner asked for.
+
+Be precise about what each half buys, because the two are easy to conflate. The **`needs:` chain between jobs** genuinely prevents work from starting: a failing nine-second `lint` now stops twelve jobs that would otherwise all run. **`max-parallel: 1` buys nothing measurable** — `fail-fast: false` means all six legs run whether or not one fails, so serializing them skips none of them, and on a public repository GitHub-hosted minutes are free regardless. It is there because serial execution was the request, not because it saves anything. `fail-fast: true` is the lever if the matrix should ever stop early.
 
 The cost is real and is the thing the old note was protecting: a red run now names one broken job, so a second failure only surfaces after the first is fixed. `fail-fast: false` stays on the matrix, so a failing leg does not cancel its siblings — the serialization is about not *starting* work that a earlier failure has already invalidated, not about hiding results that exist.
 
