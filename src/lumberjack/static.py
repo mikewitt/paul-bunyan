@@ -211,7 +211,15 @@ class Loop:
         different sequence depending on which branch runs, and a determinate
         sub-iteration bar built on it would show a wrong percentage rather
         than an imprecise one.
+
+        Under-detects, and fails *open* when it does — see issue #81. This
+        reads `conditional`, which the walk sets for statement-level branches
+        only, while the module docstring above already records `break`,
+        `continue` and `return` as making textual order an upper bound. A
+        guard clause, a `for`/`else`, `cond and log(...)` and
+        `contextlib.suppress` all return True here and should not.
         """
+        # lumberjack: see issue #81
         return all(not site.conditional for site in self.call_sites)
 
 
@@ -384,15 +392,24 @@ def _nested_statements(node: ast.AST) -> int:
 def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     """The context a node's children are visited with.
 
-    Every node that changes what its children inherit does so here, and
-    nothing else does — so the walk decides what a node *is* and this decides
-    what it *encloses*. A node matching none of these hands its own context
-    straight down.
+    Every node that changes what its children inherit does so here — so the
+    walk decides what a node *is* and this decides what it *encloses*. A node
+    matching none of these hands its own context straight down.
 
     Loops are the deliberate omission: only part of a loop statement repeats,
     so `_Walker._visit_loop` splits the children itself rather than giving
     them all one context.
+
+    One node, one child context — which is the shape, and is *not* enough for
+    a scope node. A decorator, a parameter default, an annotation and a class
+    base all execute in the enclosing scope at definition time, but they are
+    children of the node that introduces the new one, so they receive the
+    reset here along with the body that does belong to it. That claims the
+    wrong `func_name` and, worse, an empty loop chain for something that
+    really does repeat. See issue #82 for the measurement and for why the
+    fix has to move `loops` and `conditional` together.
     """
+    # lumberjack: see issue #82
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
         # A scope boundary resets the loop chain: a closure defined inside
         # a loop body is not called once per iteration, and `funcName` on
