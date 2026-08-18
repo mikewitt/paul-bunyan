@@ -299,9 +299,9 @@ class SQLiteRecordStore(RecordStore):
             sql += " LIMIT ?"
             params.append(n)
         with self._lock:
-            # nosemgrep: every fragment concatenated into `sql` above is a
-            # string literal; all values go through `?` placeholders.
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return [self._row_to_stored(r) for r in reversed(rows)]
 
     def count_by_template(
@@ -314,9 +314,9 @@ class SQLiteRecordStore(RecordStore):
             params.append(time.time() - window_seconds)
         sql += " GROUP BY template_id"
         with self._lock:
-            # nosemgrep: every fragment concatenated into `sql` above is a
-            # string literal; all values go through `?` placeholders.
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return {r["template_id"]: r["cnt"] for r in rows}
 
     def count_by_source(
@@ -333,9 +333,9 @@ class SQLiteRecordStore(RecordStore):
             params.append(time.time() - window_seconds)
         sql += " GROUP BY pathname, lineno, func_name"
         with self._lock:
-            # nosemgrep: every fragment concatenated into `sql` above is a
-            # string literal; all values go through `?` placeholders.
-            rows = self._conn.execute(sql, params).fetchall()
+            # Every fragment concatenated into `sql` above is a string
+            # literal; all values go through `?` placeholders.
+            rows = self._conn.execute(sql, params).fetchall()  # nosemgrep
         return {
             SourceKey(r["pathname"], r["lineno"], r["func_name"]): r["cnt"]
             for r in rows
