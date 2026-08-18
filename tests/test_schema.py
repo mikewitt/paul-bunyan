@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 import pytest
 
-from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord
+from lumberjack.schema import EXTRA_KEY, LogRecordRow, SourceKey, StoredRecord
 from lumberjack.store import _COLUMNS, SQLiteRecordStore
 
 
@@ -128,3 +128,22 @@ def test_insert_columns_and_created_table_agree():
     finally:
         sqlite_store.close()
     assert {r["name"] for r in rows} == set(_COLUMNS) | {"id"}
+
+
+# A record's `pathname` is whatever the process that emitted it wrote down,
+# so a store read back on another platform holds paths of the other flavour.
+# The host's `os.path` splits on the host's separator only, which is why the
+# label is built with `ntpath` on every platform.
+
+
+@pytest.mark.parametrize(
+    ("pathname", "expected"),
+    [
+        ("/home/me/proj/worker.py", "worker.py:42 process()"),
+        ("C:\\Users\\me\\proj\\worker.py", "worker.py:42 process()"),
+        ("worker.py", "worker.py:42 process()"),
+    ],
+    ids=["posix", "windows", "bare"],
+)
+def test_source_key_format_truncates_either_flavour_of_path(pathname, expected):
+    assert SourceKey(pathname, 42, "process").format() == expected

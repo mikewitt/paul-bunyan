@@ -11,7 +11,7 @@ import asyncio
 import dataclasses
 import itertools
 import logging
-import os
+import ntpath
 from typing import Literal, NamedTuple
 
 #: The single `extra=` key the tracking API attaches its payload under.
@@ -170,14 +170,15 @@ class SourceKey(NamedTuple):
         """`worker.py:42 process()` — the source location a human reads.
 
         The one label every identity-layer fallback shares: a bar or a row
-        with no template to name it by falls back to this. `os.path.basename`
+        with no template to name it by falls back to this: the basename
         rather than the full path, because a bar column is not where a reader
         wants to see where the checkout lives.
         """
-        # `os.path.basename`, never `PurePath.name`: `pathname` arrives on a
+        # `ntpath.basename` on **every** platform, deliberately, and neither
+        # `os.path.basename` nor `PurePath.name`: `pathname` arrives on a
         # LogRecord and may name a foreign platform — a row captured on
         # Windows and read back on Linux, which this store makes possible.
-        # `ntpath.basename` splits on both separators; `PurePosixPath` hands
-        # `C:\a\b.py` back whole. The rule is a behaviour change here, not style.
-        base = os.path.basename(self.pathname)  # noqa: PTH119 - foreign pathnames
+        # `ntpath` splits on both separators; the other two are host-flavoured
+        # and hand `C:\a\b.py` back whole on POSIX. A behaviour choice, not style.
+        base = ntpath.basename(self.pathname)
         return f"{base}:{self.lineno} {self.func_name}()"

@@ -45,7 +45,7 @@ whatever nesting depth the child sits at.
 from __future__ import annotations
 
 import dataclasses
-import os
+import ntpath
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -437,8 +437,8 @@ class LoopRowModel:
         """
         template = self._templates.template(source)
         described = describe_template(template) if template else ""
-        # `os.path.basename`, not `PurePath.name` — see `SourceKey.format`.
-        where = os.path.basename(source.pathname)  # noqa: PTH119 - foreign paths
+        # `ntpath.basename`, on every platform — see `SourceKey.format`.
+        where = ntpath.basename(source.pathname)
         return described or f"{where}:{source.lineno}"
 
     def _parent_row(self, key: SourceKey, clock: BarState) -> SourceKey | None:
@@ -556,9 +556,9 @@ class LoopRowModel:
             if group is not None and group.kind == "loop":
                 label = group.at.format()
             else:
-                # `os.path.basename` — see `SourceKey.format` for why not
-                # `PurePath.name`: a record's pathname may be a foreign one.
-                base = os.path.basename(key.pathname)  # noqa: PTH119 - foreign paths
+                # `ntpath.basename` on every platform — see `SourceKey.format`
+                # for why not `os.path`: a record's pathname may be foreign.
+                base = ntpath.basename(key.pathname)
                 label = f"{base} {key.func_name}()"
         else:
             template = self._templates.template(key)
