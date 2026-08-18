@@ -88,6 +88,31 @@ def make_log_record() -> Callable[..., logging.LogRecord]:
 
 
 @pytest.fixture
+def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the renderer's console believe it is talking to a real terminal.
+
+    Here rather than beside the rest of the rich rig in `tests/rich_rig.py`,
+    because a fixture body runs only when a test requests it: the rich import
+    below never executes under the `bare install (no rich)` job, which imports
+    this file unconditionally. A module-scope import could not say that.
+    """
+    import lumberjack.renderers.rich_renderer as rich_renderer_module
+
+    real_console = rich_renderer_module.Console
+    monkeypatch.setattr(
+        rich_renderer_module,
+        "Console",
+        # legacy_windows pinned off: on a Windows runner rich detects it and
+        # swaps its own `━` for `-`, so an assertion about a bar's shape would
+        # fail there for a reason that has nothing to do with the display.
+        # What rich does on a legacy console has its own tests.
+        lambda **kwargs: real_console(
+            force_terminal=True, width=100, legacy_windows=False, **kwargs
+        ),
+    )
+
+
+@pytest.fixture
 def make_row() -> Callable[..., LogRecordRow]:
     """Build a LogRecordRow with sane defaults; override any field by keyword."""
 
