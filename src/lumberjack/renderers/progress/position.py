@@ -46,6 +46,11 @@ Three ways it declines to draw, and each is a refusal rather than a guess:
 * **No source on disk, or a template that failed the drift guard.** Then there
   is no ordinal to look up. The loop row is unaffected and draws exactly as it
   did before, which is what the bare-install and generated-code paths need.
+* **Fewer than two members a record can reach.** A body member with no
+  template — an f-string — never becomes a stage, so counting it toward the
+  minimum admits a row on the strength of something that can never fill it.
+  The ordinals it occupies stay truthful and the column still reserves room
+  for it; only the admission gate stops believing in it.
 """
 
 from __future__ import annotations
@@ -229,11 +234,20 @@ class CyclePositionModel:
         found = structure.loops.get(loop.lineno)
         if found is None:  # pragma: no cover - likewise
             return None
-        # `call_sites` counts what the AST recognised, which is not the same
-        # as what a record can match — a member refused downstream by the
-        # `funcName` check still admits the row here. See issue #83.
-        # lumberjack: see issue #83
-        if not found.stable_order or len(found.call_sites) < MIN_BODY_SITES:
+        # The gate counts only members a record can *reach*, which is not
+        # every member the AST found. A site with no template — an f-string,
+        # or a message passed by variable — never becomes a stage, because
+        # `record.msg` for it is rendered text and the drift guard refuses
+        # it. Counting one toward the minimum admitted a row on the strength
+        # of a member that could never fill it, and `1 of 2` forever fails
+        # the legibility criterion the row exists to satisfy (issue #83).
+        #
+        # The *width* below still spans every site, and deliberately: it
+        # reserves the column so a long stage arriving late does not drag
+        # the bars sideways. Admission asks "can this fill?", width asks
+        # "how wide might this get?", and only the first is a claim.
+        reachable = sum(1 for site in found.call_sites if site.template is not None)
+        if not found.stable_order or reachable < MIN_BODY_SITES:
             return None
         width = max(
             (

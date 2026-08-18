@@ -13,7 +13,14 @@ from __future__ import annotations
 
 import pytest
 
-from fixture_sources import BRANCHING, FSTRING, LONE, SEQUENCE, STAGES
+from fixture_sources import (
+    BRANCHING,
+    FSTRING,
+    LONE,
+    ONE_NAMEABLE,
+    SEQUENCE,
+    STAGES,
+)
 from lumberjack import static
 from lumberjack.renderers.progress import (
     MIN_LEGIBLE_PERIOD,
@@ -220,6 +227,35 @@ def test_a_body_with_one_call_site_gets_no_position_row(store, make_row, write_m
                 lineno=8,
                 func_name="run",
                 msg="stage %d",
+                created=100.0 + i * 3.0,
+            )
+            for i in range(4)
+        ]
+    )
+    (row,) = LoopRowModel(store, min_repeats=3).poll()
+    assert row.position is None
+
+
+def test_a_body_whose_second_member_can_never_be_named_gets_no_row(
+    store, make_row, write_module
+):
+    """`LONE` wearing a second line, and the gap issue #83 reported.
+
+    The AST counts two call sites, so the minimum was satisfied and the row
+    was admitted — but an f-string leaves `record.msg` holding rendered text,
+    which the drift guard refuses, so that member can never be the stage on
+    show. The result was `1 of 2` forever: a determinate bar that cannot
+    reach its own total, which fails the legibility criterion that admitted
+    it exactly as `1 of 1` does.
+    """
+    path = str(write_module(ONE_NAMEABLE, name="one_nameable.py", strip=False))
+    store.append(
+        [
+            make_row(
+                pathname=path,
+                lineno=8,
+                func_name="run",
+                msg="batch %d: opening connection",
                 created=100.0 + i * 3.0,
             )
             for i in range(4)

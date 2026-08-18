@@ -26,6 +26,8 @@ being retyped.
 - `FSTRING` — the same shape again, with the last stage written as an
   f-string, which destroys its template at the call site.
 - `LONE` — a single call site inside a loop: `1 of 1` forever.
+- `ONE_NAMEABLE` — two call sites, one of them an f-string, so only one can
+  ever be the stage on show.
 """
 
 from __future__ import annotations
@@ -160,6 +162,20 @@ def run():
         log.debug("batch %d: opening connection", batch)
         log.debug("batch %d: fetching manifest", batch)
         log.debug(f"batch {batch}: far wider than any real template in this body")
+"""
+
+# Two call sites of which only one can ever be named, which is `LONE` wearing
+# a second line. The AST counts two and the display can reach one.
+ONE_NAMEABLE = """\
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def run():
+    for batch in range(6):
+        log.debug("batch %d: opening connection", batch)
+        log.debug(f"batch {batch}: committing")
 """
 
 # `phases`' announcement line: one call site, so position is 1 of 1 forever.

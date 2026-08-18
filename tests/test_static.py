@@ -1046,3 +1046,103 @@ def test_a_conditionally_defined_decorator_stays_conditional(
     assert decorating.loop_chain != ()
     assert decorating.conditional
     assert not loop.stable_order
+
+
+GENERATOR_SCOPE = """
+def run(items):
+    for item in items:
+        log.debug("item %s: opening", item)
+        total = sum(
+            log.debug("element %s", x) or 1
+            for x in (log.debug("first iterable") or item)
+        )
+        log.debug("item %s: total %s", item, total)
+"""
+
+
+def test_a_generator_expression_is_its_own_scope(
+    write_module: Callable[..., Path],
+) -> None:
+    """`funcName` really is `<genexpr>`, and saying otherwise contradicted it.
+
+    Generator expressions were left out of PEP 709, so unlike a list or set
+    comprehension they still compile to a frame of their own on every version
+    this package supports. Static used to report the enclosing function, and
+    the consumer's `funcName` check then refused the site — while still
+    counting it toward the body size a position row draws against. One real
+    member and one unmatchable one satisfied `MIN_BODY_SITES`, and the row
+    read `1 of 2` forever. See issue #83.
+
+    The outermost iterable is the exception, and it is `For.iter`'s split one
+    level down: it is evaluated eagerly, where it is written.
+    """
+    path = write_module(GENERATOR_SCOPE, name="generator_scope.py")
+    logger = logging.getLogger("test_static.generator_scope")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    capture = _Capture()
+    logger.addHandler(capture)
+    try:
+        namespace: dict[str, object] = {"log": logger}
+        source = path.read_text(encoding="utf-8")
+        exec(compile(source, str(path), "exec"), namespace)  # noqa: S102 # nosec B102
+        run = namespace["run"]
+        assert callable(run)
+        run([[1, 2]])
+    finally:
+        logger.removeHandler(capture)
+
+    structure = static.analyze_file(str(path))
+    assert structure is not None
+    for record in capture.records:
+        site = structure.call_sites.get(record.lineno)
+        assert site is not None, f"no call site at line {record.lineno}"
+        assert site.func_name == record.funcName, record.msg
+
+    by_template = {site.template: site for site in structure.call_sites.values()}
+    inside = by_template["element %s"]
+    assert inside.func_name == "<genexpr>"
+    # Not modelled as a loop, so it claims no chain rather than the enclosing
+    # one — when the generator is consumed is not knowable from the source.
+    assert inside.loop_chain == ()
+    assert (inside.position, inside.body_size) == (None, None)
+
+    # The body keeps the eager iterable, which really does run once per
+    # iteration in `run`, and loses only the element expression.
+    eager = by_template["first iterable"]
+    assert eager.func_name == "run"
+    (loop,) = structure.loops.values()
+    assert [site.template for site in loop.call_sites] == [
+        "item %s: opening",
+        "first iterable",
+        "item %s: total %s",
+    ]
+
+
+_COMPREHENSIONS = {
+    "list": "[log.debug('element %s', x) or 1 for x in item]",
+    "set": "{log.debug('element %s', x) or 1 for x in item}",
+    "dict": "{x: log.debug('element %s', x) for x in item}",
+}
+
+
+@pytest.mark.parametrize(
+    "comprehension", _COMPREHENSIONS.values(), ids=list(_COMPREHENSIONS)
+)
+def test_a_comprehension_stays_in_the_enclosing_scope(
+    analyze: Callable[..., static.FileStructure], comprehension: str
+) -> None:
+    """PEP 709 inlines list, set and dict comprehensions from 3.12, which is
+    this package's floor — so the enclosing name and loop chain are simply
+    correct there, and treating them like generator expressions would throw
+    away structure that is real."""
+    structure = analyze(f"""
+        def run(log, items):
+            for item in items:
+                log.debug('opening')
+                _ = {comprehension}
+        """)
+    by_template = {site.template: site for site in structure.call_sites.values()}
+    inside = by_template["element %s"]
+    assert inside.func_name == "run"
+    assert inside.loop_chain != ()

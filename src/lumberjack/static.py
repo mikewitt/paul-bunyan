@@ -24,9 +24,13 @@ What it cannot see, and why each silence is the correct failure:
   asserting something untrue is worse than one asserting less.
 - **Log calls it does not recognise** — see `_MESSAGE_ARG` for the exact rule
   and the false positive it accepts in exchange.
-- **Comprehensions and generator expressions**, which are modelled neither as
-  loops nor as scopes: a call site inside one is attributed to the enclosing
-  function and to the enclosing loops.
+- **That a generator expression is a loop.** It is modelled as a *scope*
+  (`funcName` really is `<genexpr>`) but not as a loop, so a call inside one
+  reports an empty loop chain although it repeats. Modelling it properly needs
+  a `Loop` of its own, and when the generator is consumed — here, elsewhere,
+  never — is not knowable from the source. Comprehensions need none of this:
+  PEP 709 inlines them from 3.12, so the enclosing name and loop chain are
+  simply correct.
 - **Whether an annotation is evaluated at all.** Under
   `from __future__ import annotations` it never is, and 3.14's `__annotate__`
   defers it further, but it is attributed to the enclosing scope as though it
@@ -412,12 +416,19 @@ def _nested_statements(node: ast.AST) -> int:
 #: belongs to it rather than to the loop body that lexically contains it, and
 #: a `break` cannot cross one at all; and only a scope node's *body* runs in
 #: the scope it introduces, which is what `_Walker._visit_scope` is for.
-_Scope = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+_Scope = (
+    ast.FunctionDef
+    | ast.AsyncFunctionDef
+    | ast.ClassDef
+    | ast.Lambda
+    | ast.GeneratorExp
+)
 _SCOPES: Final = (
     ast.FunctionDef,
     ast.AsyncFunctionDef,
     ast.ClassDef,
     ast.Lambda,
+    ast.GeneratorExp,
 )
 
 _LOOP_NODES: Final = (ast.For, ast.AsyncFor, ast.While)
@@ -526,11 +537,24 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
             # forwarding anything.
             params=frozenset(),
         )
-    if isinstance(node, ast.Lambda):
+    if isinstance(node, ast.Lambda | ast.GeneratorExp):
+        # Both compile to a code object of their own, and stdlib's
+        # `findCaller` reads its name — so a call inside a generator
+        # expression reports `funcName='<genexpr>'`, measured on 3.13.
+        # Saying `run` here made static *contradict* the records, which is
+        # worse than saying nothing: consumers use static as a veto.
+        #
+        # A generator expression is a loop and is deliberately not modelled
+        # as one. It would need a `Loop` of its own before its body could be
+        # ordered, and when it runs is not knowable from the source — it may
+        # be consumed here, elsewhere, or never. An empty loop chain claims
+        # less; the enclosing chain would have claimed something untrue.
         return _Ctx(
-            func_name="<lambda>",
+            func_name="<lambda>" if isinstance(node, ast.Lambda) else "<genexpr>",
             func_lineno=node.lineno,
-            params=_params(node),
+            # A generator expression takes no parameters, so nothing in one
+            # can be a wrapper forwarding a caller's message.
+            params=_params(node) if isinstance(node, ast.Lambda) else frozenset(),
             loops=(),
             conditional=False,
         )
@@ -604,10 +628,37 @@ class _Walker:
         these want, and nothing recognisable has ever been found in one.
         """
         inner = _child_ctx(node, ctx)
+        if isinstance(node, ast.GeneratorExp):
+            self._visit_genexpr(node, ctx, inner)
+            return
         body = node.body if isinstance(node.body, list) else [node.body]
         belongs = {id(stmt) for stmt in body}
         for child in ast.iter_child_nodes(node):
             self.visit(child, inner if id(child) in belongs else ctx)
+
+    def _visit_genexpr(self, node: ast.GeneratorExp, ctx: _Ctx, inner: _Ctx) -> None:
+        """The outermost iterable is evaluated eagerly, in the enclosing scope.
+
+        Exactly `For.iter`'s split, one level down: `sum(f(x) for x in g())`
+        calls `g()` where it is written and everything else inside the
+        generator's own frame. Measured — the eager part reports the
+        enclosing `funcName` and the rest report `<genexpr>` — and it is a
+        grandchild rather than a child, which is why this cannot be the
+        set-of-ids shape `_visit_scope` uses for every other scope.
+
+        Comprehensions are not here on purpose: PEP 709 inlines list, set
+        and dict comprehensions from 3.12, which is this package's floor, so
+        a call in one really does report the enclosing name and really does
+        run in the enclosing loop. Generator expressions were left out of
+        that change.
+        """
+        first = node.generators[0]
+        for child in ast.iter_child_nodes(node):
+            if child is not first:
+                self.visit(child, inner)
+                continue
+            for part in ast.iter_child_nodes(child):
+                self.visit(part, ctx if part is first.iter else inner)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor | ast.While, ctx: _Ctx) -> None:
         inner = (*ctx.loops, node.lineno)
