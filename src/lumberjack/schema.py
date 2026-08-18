@@ -174,4 +174,10 @@ class SourceKey(NamedTuple):
         rather than the full path, because a bar column is not where a reader
         wants to see where the checkout lives.
         """
-        return f"{os.path.basename(self.pathname)}:{self.lineno} {self.func_name}()"
+        # `os.path.basename`, never `PurePath.name`: `pathname` arrives on a
+        # LogRecord and may name a foreign platform — a row captured on
+        # Windows and read back on Linux, which this store makes possible.
+        # `ntpath.basename` splits on both separators; `PurePosixPath` hands
+        # `C:\a\b.py` back whole. The rule is a behaviour change here, not style.
+        base = os.path.basename(self.pathname)  # noqa: PTH119 - foreign pathnames
+        return f"{base}:{self.lineno} {self.func_name}()"

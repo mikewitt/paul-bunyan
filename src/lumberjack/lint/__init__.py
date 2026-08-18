@@ -31,8 +31,8 @@ import lint; lint.check(...)`, `lint.Finding`, `lint.format_report(...)` and
 from __future__ import annotations
 
 import dataclasses
-import os
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Final
 
 from lumberjack import static
@@ -202,15 +202,16 @@ def python_files(paths: Iterable[str]) -> list[str]:
     """
     found: list[str] = []
     for path in paths:
-        if os.path.isdir(path):
-            for root, dirs, names in os.walk(path):
+        # A walked file is reported the way `Path` spells it, so `./src` comes
+        # back as `src/x.py`. A named file is appended exactly as given.
+        top = Path(path)
+        if top.is_dir():
+            for parent, dirs, names in top.walk():
                 dirs[:] = sorted(
                     d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS
                 )
                 found.extend(
-                    os.path.join(root, name)
-                    for name in sorted(names)
-                    if name.endswith(".py")
+                    str(parent / name) for name in sorted(names) if name.endswith(".py")
                 )
         else:
             found.append(path)

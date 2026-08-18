@@ -31,13 +31,15 @@ def _available_backends() -> dict[str, Callable[[], RecordStore]]:
     backends: dict[str, Callable[[], RecordStore]] = {
         "sqlite": lambda: SQLiteRecordStore(":memory:"),
     }
-    try:
+    try:  # noqa: SIM105 - suppress() has no `else:` to hang the block below on
         import duckdb  # noqa: F401
     except ImportError:
         pass
     # else: a future DuckDBRecordStore slots in here, e.g.:
-    #     from lumberjack.store import DuckDBRecordStore
-    #     backends["duckdb"] = lambda: DuckDBRecordStore(":memory:")
+    # ERA001 on the next two: this is the worked example of where a second
+    # backend slots in, not code someone forgot to delete.
+    #     from lumberjack.store import DuckDBRecordStore  # noqa: ERA001
+    #     backends["duckdb"] = lambda: DuckDBRecordStore(":memory:")  # noqa: ERA001
     return backends
 
 
@@ -72,15 +74,15 @@ def make_log_record() -> Callable[..., logging.LogRecord]:
     """
 
     def _make(**overrides: object) -> logging.LogRecord:
-        kwargs: dict[str, object] = dict(
-            name="test.logger",
-            level=logging.INFO,
-            pathname="/nonexistent/foo.py",
-            lineno=42,
-            msg="hello %s",
-            args=("world",),
-            exc_info=None,
-        )
+        kwargs: dict[str, object] = {
+            "name": "test.logger",
+            "level": logging.INFO,
+            "pathname": "/nonexistent/foo.py",
+            "lineno": 42,
+            "msg": "hello %s",
+            "args": ("world",),
+            "exc_info": None,
+        }
         kwargs.update(overrides)
         return logging.LogRecord(**kwargs)  # type: ignore[arg-type]
 
@@ -117,34 +119,34 @@ def make_row() -> Callable[..., LogRecordRow]:
     """Build a LogRecordRow with sane defaults; override any field by keyword."""
 
     def _make(**overrides: object) -> LogRecordRow:
-        fields: dict[str, object] = dict(
-            logger_name="test",
-            level_name="INFO",
-            level_no=20,
-            msg="msg",
-            message="hello world",
-            pathname="/nonexistent/foo.py",
-            filename="foo.py",
-            module="foo",
-            func_name="bar",
-            lineno=10,
-            created=time.time(),
-            thread=1,
-            thread_name="MainThread",
-            process=100,
-            process_name="MainProcess",
-            exc_text=None,
-            stack_text=None,
-            asyncio_task_name=None,
-            asyncio_task_id=None,
-            task_id=None,
-            parent_task_id=None,
-            task_label=None,
-            task_event=None,
-            progress_current=None,
-            progress_total=None,
-            template_id=None,
-        )
+        fields: dict[str, object] = {
+            "logger_name": "test",
+            "level_name": "INFO",
+            "level_no": 20,
+            "msg": "msg",
+            "message": "hello world",
+            "pathname": "/nonexistent/foo.py",
+            "filename": "foo.py",
+            "module": "foo",
+            "func_name": "bar",
+            "lineno": 10,
+            "created": time.time(),
+            "thread": 1,
+            "thread_name": "MainThread",
+            "process": 100,
+            "process_name": "MainProcess",
+            "exc_text": None,
+            "stack_text": None,
+            "asyncio_task_name": None,
+            "asyncio_task_id": None,
+            "task_id": None,
+            "parent_task_id": None,
+            "task_label": None,
+            "task_event": None,
+            "progress_current": None,
+            "progress_total": None,
+            "template_id": None,
+        }
         fields.update(overrides)
         return LogRecordRow(**fields)  # type: ignore[arg-type]
 
@@ -239,14 +241,14 @@ def make_task_event() -> Callable[..., TaskEvent]:
     """A TaskEvent with every progress column populated; override by keyword."""
 
     def _make(**overrides: object) -> TaskEvent:
-        fields: dict[str, object] = dict(
-            label="reindex",
-            kind="update",
-            task_id=7,
-            parent_task_id=3,
-            current=40,
-            total=100,
-        )
+        fields: dict[str, object] = {
+            "label": "reindex",
+            "kind": "update",
+            "task_id": 7,
+            "parent_task_id": 3,
+            "current": 40,
+            "total": 100,
+        }
         fields.update(overrides)
         return TaskEvent(**fields)  # type: ignore[arg-type]
 
@@ -296,7 +298,7 @@ def make_session() -> Callable[..., contextlib.AbstractContextManager[TrackingSe
     @contextlib.contextmanager
     def _make(**init_kwargs: object) -> Iterator[TrackingSession]:
         store = SQLiteRecordStore(":memory:")
-        kwargs: dict[str, object] = dict(output_mode="plain", flush_interval=0)
+        kwargs: dict[str, object] = {"output_mode": "plain", "flush_interval": 0}
         kwargs.update(init_kwargs)
         lumberjack.init(store=store, **kwargs)  # type: ignore[arg-type]
         try:

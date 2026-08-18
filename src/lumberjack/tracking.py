@@ -17,6 +17,7 @@ lumberjack: see issue #31 for the opt-in version.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import itertools
 import logging
@@ -24,7 +25,7 @@ import sys
 import threading
 import time
 from collections.abc import Sized
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from lumberjack import otel
 from lumberjack.schema import EXTRA_KEY, TaskEvent, TaskEventKind
@@ -180,7 +181,7 @@ class TaskHandle:
             )
         self._emit("start", self._current, self._total)
 
-    def __enter__(self) -> TaskHandle:
+    def __enter__(self) -> Self:
         # Check and claim under the lock. Unsynchronized this is a
         # check-then-act: two threads entering the same handle both passed
         # the test and both "entered", one silently clobbering the other's
@@ -238,15 +239,14 @@ class TaskHandle:
             # A later handle is still ambient. Its own exit restores the
             # chain; ours would evict a live task.
             return
-        try:
+        # `ValueError` here means the handle was entered in one
+        # `contextvars.Context` and exited in another: reachable by entering
+        # here and exiting inside an asyncio task, which runs on a copy.
+        # Raising out of a `finally` would replace the user's in-flight
+        # exception with our bookkeeping error, and there is nothing to
+        # repair — the copy dies with the task.
+        with contextlib.suppress(ValueError):
             _current_task.reset(token)
-        except ValueError:
-            # Entered in one `contextvars.Context` and exited in another:
-            # reachable by entering here and exiting inside an asyncio task,
-            # which runs on a copy. Raising out of a `finally` would replace
-            # the user's in-flight exception with our bookkeeping error, and
-            # there is nothing to repair — the copy dies with the task.
-            pass
 
     def subtask(self, name: str, *, total: int | None = None) -> TaskHandle:
         """A child task parented to this one explicitly.

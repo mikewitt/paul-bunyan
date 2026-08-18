@@ -192,10 +192,10 @@ def _nested_rows(make_row, outer_period, inner_period, *, cycles, start=100.0):
     per_cycle = round(outer_period / inner_period)
     for _ in range(cycles):
         rows.append(make_row(lineno=4, func_name="outer", created=at))
-        for i in range(per_cycle):
-            rows.append(
-                make_row(lineno=6, func_name="inner", created=at + i * inner_period)
-            )
+        rows.extend(
+            make_row(lineno=6, func_name="inner", created=at + i * inner_period)
+            for i in range(per_cycle)
+        )
         at += outer_period
     return rows
 

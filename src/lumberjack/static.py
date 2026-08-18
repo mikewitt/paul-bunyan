@@ -556,7 +556,11 @@ def _finalize(pathname: str, walker: _Walker) -> FileStructure:
 
 def _parse(pathname: str) -> FileStructure | None:
     try:
-        with open(pathname, "rb") as handle:
+        # `open`, not `Path.open`: a pathname here is a record's, and this
+        # module keeps it the opaque string the store round-trips rather than
+        # asserting local-platform semantics over it. `analyze_file` measures
+        # `os.stat` by name, so both file calls stay in the same vocabulary.
+        with open(pathname, "rb") as handle:  # noqa: PTH123 - str in, str out
             source = handle.read()
         # Bytes rather than text: `ast.parse` then honours a PEP 263 encoding
         # declaration and a BOM exactly as the import machinery did, where
@@ -617,7 +621,7 @@ def analyze_file(pathname: str) -> FileStructure | None:
     rest of the analysis, this belongs on the poll.
     """
     try:
-        stat = os.stat(pathname)
+        stat = os.stat(pathname)  # noqa: PTH116 - the docstring measures this call
     except OSError:
         return None
     token = (stat.st_mtime_ns, stat.st_size)

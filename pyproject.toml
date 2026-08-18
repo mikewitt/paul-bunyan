@@ -73,7 +73,28 @@ src = ["src", "tests"]
 # `.codacy.yaml` records for silently-ignored engine keys. `SLF001` and `BLE001`
 # are selected for exactly that reason: they were already being suppressed by
 # hand, so either they are real rules or the comments were decoration.
-select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
+# `C901` is the ceiling. Everything above is archaeology on code already
+# written; this is what stops the next method regressing. max-complexity=10 is
+# chosen rather than defaulted: it admits the two blocks deliberately kept
+# after measurement (`from_log_record`, `_display_order`, both C-grade for
+# reasons argued at the code) and refuses anything worse. 8 would reopen those.
+#
+# `SIM`, `PTH`, `ISC`, `C4`, `ERA`, `PERF`, `RUF` and the singletons are the
+# cheap tier: about thirty findings, nearly all mechanical. The sets left out
+# are left out because they fight decisions already recorded — `ANN` against
+# "commented `-> None` on 150 test functions is bookkeeping", `EM`/`TRY003`
+# against this project's long, explanatory exception messages, `T201` against
+# teardown's deliberate stderr diagnostics, `COM812` against black itself.
+select = [
+    "E", "F", "I", "B", "UP", "G", "S", "SIM",
+    "C901", "PTH", "ISC", "C4", "ERA", "PERF", "N", "PYI", "FBT", "RUF",
+    "SLF001", "BLE001",
+]
+
+# RUF002/RUF003 call en and em dashes "ambiguous". They are this repository's
+# prose style, in every docstring and comment it has; the rule is answering a
+# question nobody here is asking.
+ignore = ["RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 # S101: in a pytest suite the assert IS the test, and S101's actual concern —
@@ -104,6 +125,9 @@ select = ["E", "F", "I", "B", "UP", "G", "S", "RUF100", "SLF001", "BLE001"]
 # reformatting accepted findings, and it applies whether or not this entry
 # exists.
 "src/lumberjack/store.py" = ["S608"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.black]
 target-version = ["py312"]

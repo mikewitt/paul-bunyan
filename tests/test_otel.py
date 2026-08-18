@@ -99,7 +99,7 @@ def test_an_indeterminate_task_omits_the_total_attribute(spans):
 
 
 def test_nested_with_blocks_produce_a_parent_and_a_child(spans):
-    with lumberjack.task("outer"):
+    with lumberjack.task("outer"):  # noqa: SIM117 - the nesting is the subject
         with lumberjack.task("inner"):
             pass
     by_name = _named(spans)
@@ -125,7 +125,7 @@ def test_subtask_parents_the_span_across_a_thread(spans):
 
 
 def test_a_failing_task_marks_its_span(spans):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: SIM117 - the raise must cross __exit__
         with lumberjack.task("doomed"):
             raise ValueError("boom")
     (span,) = spans()

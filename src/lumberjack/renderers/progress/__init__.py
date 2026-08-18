@@ -98,8 +98,6 @@ __all__ = [
     "DEFAULT_REFRESH_INTERVAL",
     "HEARTBEAT_FRAMES",
     "HEARTBEAT_FRAMES_ASCII",
-    "ascii_fallback",
-    "heartbeat_frames",
     "IDLE_PERIODS",
     "LOOKBACKS",
     "MAX_LABEL",
@@ -123,6 +121,8 @@ __all__ = [
     "TaskBarState",
     "TaskProgressModel",
     "TemplateIndex",
+    "ascii_fallback",
     "depth_first_order",
     "describe_template",
+    "heartbeat_frames",
 ]

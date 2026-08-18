@@ -114,7 +114,7 @@ def test_a_task_event_travels_extra_through_the_handler_to_the_store(
     assert row.message == "task progress: reindex 40/100"
 
 
-def test_a_record_that_cannot_be_converted_goes_to_handleError():
+def test_a_record_that_cannot_be_converted_goes_to_handleError():  # noqa: N802 - names stdlib's handleError; the casing is stdlib's
     """stdlib's contract for a bad record, and the one path `emit()` swallows.
 
     A broken record must not take down the `log.info()` that produced it, and

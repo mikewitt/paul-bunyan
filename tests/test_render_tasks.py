@@ -116,7 +116,7 @@ def test_a_container_task_shows_no_count_at_all(task_rig, strip_ansi):
 
 
 def test_subtasks_are_indented_under_their_parent(task_rig, strip_ansi):
-    with lumberjack.task("outer") as outer:
+    with lumberjack.task("outer") as outer:  # noqa: SIM117 - nesting is the hierarchy
         with outer.subtask("inner"):
             task_rig.tick()
     out = strip_ansi(task_rig.output())

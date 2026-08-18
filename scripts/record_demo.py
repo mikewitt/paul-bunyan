@@ -180,6 +180,42 @@ def _snapshot(screen: pyte.Screen) -> str:
     return "".join(out)
 
 
+def _collapse_runs(
+    frames: list[tuple[float, str]], fps: int
+) -> list[tuple[str, float]]:
+    """Collapse runs of identical screens.
+
+    Hold the one frame for longer rather than writing the same pixels again. A
+    display that is mostly static between ticks would otherwise dominate the
+    file size.
+    """
+    kept: list[tuple[str, float]] = []
+    for i, (at, snap) in enumerate(frames):
+        nxt = frames[i + 1][0] if i + 1 < len(frames) else at + 1.0 / fps
+        hold = max(nxt - at, 1.0 / fps)
+        if kept and kept[-1][0] == snap:
+            kept[-1] = (snap, kept[-1][1] + hold)
+        else:
+            kept.append((snap, hold))
+    return kept
+
+
+def _used_rows(kept: list[tuple[str, float]], rows: int) -> int:
+    """The rows anything ever occupied, to crop the recording down to.
+
+    The pty needs enough height that rich does not crop the display itself,
+    but a fixed height then leaves a band of dead background under a short
+    run — and how tall the display gets is a property of the scenario, not
+    something to guess at per invocation.
+    """
+    used = 0
+    for snap, _ in kept:
+        for y, line in enumerate(snap.split("\n")[:rows]):
+            if "".join(line.split("\x00")[0::4]).strip():
+                used = max(used, y + 1)
+    return max(used, 1)
+
+
 def _load_faces() -> tuple[list[tuple[ImageFont.FreeTypeFont, ...]], list[set[int]]]:
     """The fallback chain, each face paired with the codepoints it covers."""
     from fontTools.ttLib import TTFont
@@ -373,29 +409,8 @@ def main(argv: list[str] | None = None) -> int:
         # The frame that first showed the marker is the one to drop.
         frames = frames[:-1] or frames
 
-    # Collapse runs of identical screens: hold the one frame for longer rather
-    # than writing the same pixels again. A display that is mostly static
-    # between ticks would otherwise dominate the file size.
-    kept: list[tuple[str, float]] = []
-    for i, (at, snap) in enumerate(frames):
-        nxt = frames[i + 1][0] if i + 1 < len(frames) else at + 1.0 / args.fps
-        hold = max(nxt - at, 1.0 / args.fps)
-        if kept and kept[-1][0] == snap:
-            kept[-1] = (snap, kept[-1][1] + hold)
-        else:
-            kept.append((snap, hold))
-
-    # Crop to the rows anything ever occupied. The pty needs enough height
-    # that rich does not crop the display itself, but a fixed height then
-    # leaves a band of dead background under a short run — and how tall the
-    # display gets is a property of the scenario, not something to guess at
-    # per invocation.
-    used = 0
-    for snap, _ in kept:
-        for y, line in enumerate(snap.split("\n")[: args.rows]):
-            if "".join(line.split("\x00")[0::4]).strip():
-                used = max(used, y + 1)
-    height = max(used, 1)
+    kept = _collapse_runs(frames, args.fps)
+    height = _used_rows(kept, args.rows)
 
     fonts, coverage = _load_faces()
     images = [
