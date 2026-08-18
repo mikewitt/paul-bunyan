@@ -381,6 +381,44 @@ def _nested_statements(node: ast.AST) -> int:
     return total
 
 
+def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
+    """The context a node's children are visited with.
+
+    Every node that changes what its children inherit does so here, and
+    nothing else does — so the walk decides what a node *is* and this decides
+    what it *encloses*. A node matching none of these hands its own context
+    straight down.
+
+    Loops are the deliberate omission: only part of a loop statement repeats,
+    so `_Walker._visit_loop` splits the children itself rather than giving
+    them all one context.
+    """
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        # A scope boundary resets the loop chain: a closure defined inside
+        # a loop body is not called once per iteration, and `funcName` on
+        # its records reads the inner name, not the enclosing one.
+        return _Ctx(
+            func_name=node.name,
+            func_lineno=node.lineno,
+            # A class body has no parameters, and a call in one is not a
+            # wrapper forwarding anything.
+            params=frozenset() if isinstance(node, ast.ClassDef) else _params(node),
+            loops=(),
+            conditional=False,
+        )
+    if isinstance(node, ast.Lambda):
+        return _Ctx(
+            func_name="<lambda>",
+            func_lineno=node.lineno,
+            params=_params(node),
+            loops=(),
+            conditional=False,
+        )
+    if isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
+        return ctx._replace(conditional=True)
+    return ctx
+
+
 class _Walker:
     """Depth-first, source-order collection of call sites and loops.
 
@@ -405,30 +443,8 @@ class _Walker:
         elif isinstance(node, ast.For | ast.AsyncFor | ast.While):
             self._visit_loop(node, ctx)
             return
-        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            # A scope boundary resets the loop chain: a closure defined inside
-            # a loop body is not called once per iteration, and `funcName` on
-            # its records reads the inner name, not the enclosing one.
-            ctx = _Ctx(
-                func_name=node.name,
-                func_lineno=node.lineno,
-                # A class body has no parameters, and a call in one is not a
-                # wrapper forwarding anything.
-                params=frozenset() if isinstance(node, ast.ClassDef) else _params(node),
-                loops=(),
-                conditional=False,
-            )
-        elif isinstance(node, ast.Lambda):
-            ctx = _Ctx(
-                func_name="<lambda>",
-                func_lineno=node.lineno,
-                params=_params(node),
-                loops=(),
-                conditional=False,
-            )
-        elif isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
-            ctx = ctx._replace(conditional=True)
 
+        ctx = _child_ctx(node, ctx)
         for child in ast.iter_child_nodes(node):
             self.visit(child, ctx)
 
@@ -473,42 +489,59 @@ class _Walker:
 # --------------------------------------------------------------------------
 
 
-def _finalize(pathname: str, walker: _Walker) -> FileStructure:
-    # Two log calls on one line (`log.debug("a"); log.debug("b")`) produce
-    # records that are indistinguishable from each other, so neither can be
-    # identified and both are dropped. Refusing an ambiguous site is the same
-    # instinct as the drift guard: the display may claim less, never wrong.
-    per_line = Counter(item.log_call.lineno for item in walker.found)
-    usable = [item for item in walker.found if per_line[item.log_call.lineno] == 1]
+def _unambiguous(found: list[_Found]) -> list[_Found]:
+    """The finds whose line carries exactly one recognised call.
 
+    Two log calls on one line (`log.debug("a"); log.debug("b")`) produce
+    records that are indistinguishable from each other, so neither can be
+    identified and both are dropped. Refusing an ambiguous site is the same
+    instinct as the drift guard: the display may claim less, never wrong.
+    """
+    per_line = Counter(item.log_call.lineno for item in found)
+    return [item for item in found if per_line[item.log_call.lineno] == 1]
+
+
+def _body_sites(innermost: int | None, body: list[_Found]) -> tuple[CallSite, ...]:
+    """One body's finds as `CallSite`s, numbered `position` of `body_size`.
+
+    `body` already arrives in textual order — see `_Walker` for why that is
+    free — so the ordinal is just the enumeration index. `innermost` is None
+    for the one bucket that is in no loop at all, which is exactly the case
+    with no ordinal to report; see `CallSite.position`.
+    """
+    size = len(body) if innermost is not None else None
+    return tuple(
+        CallSite(
+            lineno=item.log_call.lineno,
+            func_name=item.ctx.func_name,
+            func_lineno=item.ctx.func_lineno,
+            method=item.log_call.method,
+            template=_template(item.log_call.message),
+            message_kind=_message_kind(item.log_call.message, item.ctx.params),
+            has_stacklevel=item.log_call.has_stacklevel,
+            loop_chain=item.ctx.loops,
+            conditional=item.ctx.conditional,
+            position=position if innermost is not None else None,
+            body_size=size,
+        )
+        for position, item in enumerate(body, start=1)
+    )
+
+
+def _finalize(pathname: str, walker: _Walker) -> FileStructure:
     bodies: dict[int | None, list[_Found]] = {}
-    for item in usable:
+    for item in _unambiguous(walker.found):
         innermost = item.ctx.loops[-1] if item.ctx.loops else None
         bodies.setdefault(innermost, []).append(item)
 
-    sites: dict[int, CallSite] = {}
-    by_loop: dict[int, list[CallSite]] = {}
-    for innermost, body in bodies.items():
-        for position, item in enumerate(body, start=1):
-            site = CallSite(
-                lineno=item.log_call.lineno,
-                func_name=item.ctx.func_name,
-                func_lineno=item.ctx.func_lineno,
-                method=item.log_call.method,
-                template=_template(item.log_call.message),
-                message_kind=_message_kind(item.log_call.message, item.ctx.params),
-                has_stacklevel=item.log_call.has_stacklevel,
-                loop_chain=item.ctx.loops,
-                conditional=item.ctx.conditional,
-                position=position if innermost is not None else None,
-                body_size=len(body) if innermost is not None else None,
-            )
-            sites[site.lineno] = site
-            if innermost is not None:
-                by_loop.setdefault(innermost, []).append(site)
-
+    by_body = {
+        innermost: _body_sites(innermost, body) for innermost, body in bodies.items()
+    }
+    sites = {site.lineno: site for body in by_body.values() for site in body}
     loops = {
-        lineno: dataclasses.replace(loop, call_sites=tuple(by_loop.get(lineno, ())))
+        # `by_body`'s None bucket holds the sites in no loop at all, and no
+        # loop's lineno is None, so reading a loop's own key never finds it.
+        lineno: dataclasses.replace(loop, call_sites=by_body.get(lineno, ()))
         for lineno, loop in sorted(walker.loops.items())
     }
     return FileStructure(
