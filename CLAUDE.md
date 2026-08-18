@@ -375,7 +375,7 @@ Be precise about what each half buys, because the two are easy to conflate. The 
 
 The cost is real and is the thing the old note was protecting: a red run now names one broken job, so a second failure only surfaces after the first is fixed. `fail-fast: false` stays on the matrix, so a failing leg does not cancel its siblings — the serialization is about not *starting* work that a earlier failure has already invalidated, not about hiding results that exist.
 
-Worth knowing before touching the runner budget: the suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and bills at 2×, where ubuntu spends 1 second — so windows is 55% of the bill from 3 of 14 jobs, and trimming *tests* saves almost nothing. The lever is which legs run, never which tests.
+Worth knowing before touching the runner budget, and worth knowing *first* that there is no budget: standard GitHub-hosted runners are free on public repositories, on every plan, and stayed free through the 2026 pricing change. Nothing here is billed, so no CI change on this repo can save money and none should be argued for on that basis. The shape is still real if the repo ever goes private, or if anyone reaches for larger runners, which are charged even on a public repo. The suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and carries a 2× multiplier where charging applies, against ubuntu's 1 second — so windows would be 55% of the notional cost from 3 of 14 jobs, and trimming *tests* would save almost nothing. The lever is which legs run, never which tests.
 
 | Job | Guards |
 |---|---|
