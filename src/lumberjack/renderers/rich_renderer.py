@@ -51,14 +51,19 @@ except ImportError as exc:  # pragma: no cover - exercised only without rich ins
 
 from lumberjack.detect import resolve_max_bars
 from lumberjack.pump import FlushPump
+from lumberjack.renderers.plan import (
+    Frame,
+    FrameCounts,
+    HeartbeatLine,
+    RowKey,
+    plan_frame,
+)
 from lumberjack.renderers.progress import (
     DEFAULT_MIN_REPEATS,
     DEFAULT_REFRESH_INTERVAL,
     HEARTBEAT_FRAMES_ASCII,
     PASSTHROUGH_LEVEL,
     BarState,
-    CyclePosition,
-    HeartbeatState,
     LoopRow,
     LoopRowModel,
     SessionHeartbeat,
@@ -67,22 +72,24 @@ from lumberjack.renderers.progress import (
     heartbeat_frames,
 )
 from lumberjack.renderers.rich_compat import (
-    _COLLAPSED,
     _COLLAPSED_BAR,
     _COLLAPSED_BAR_ASCII,
     _SUBROW,
+    _plan_fields,
     _relayout,
-    _row_fields,
     _RowBarColumn,
     _RowElapsedColumn,
     _RowTextColumn,
     _set_total,
 )
-from lumberjack.schema import LogRecordRow, SourceKey
+from lumberjack.schema import LogRecordRow
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rich.console import RenderableType
 
+    from lumberjack.renderers.plan import PlanRow
     from lumberjack.store import RecordStore
 
 _LEVEL_STYLES = {
@@ -92,27 +99,6 @@ _LEVEL_STYLES = {
     "ERROR": "bold red",
     "CRITICAL": "bold white on red",
 }
-
-
-def _format_rate(row: LoopRow) -> str:
-    """How fast a loop is iterating, or what stopped it.
-
-    Rate rather than period because "12/s" is what a reader wants from a
-    loop, and sub-1/s loops are the ones where the period is the readable
-    form instead. Blank until two records have been seen: one record
-    establishes no interval, and a made-up number is worse than none.
-
-    "idle" rather than "done", because idleness is what was measured — no log
-    line announces the end of a loop, so a silence long enough to retire the
-    bar is the whole of the evidence.
-    """
-    if row.idle:
-        return "idle"
-    if row.rate is None:
-        return ""
-    if row.rate >= 1:
-        return f"{row.rate:,.0f}/s"
-    return f"{1 / row.rate:,.1f}s each"
 
 
 #: Separates the facts inside one cell — the heartbeat's count from its rate,
@@ -130,7 +116,7 @@ _SEPARATOR_ASCII = "-"
 _HEARTBEAT_SUMMARY_WIDTH = 26
 
 
-def _format_heartbeat(state: HeartbeatState, frames: str, separator: str) -> Text:
+def _format_heartbeat(line: HeartbeatLine) -> Text:
     """The session row: is anything arriving, how fast, and what was it.
 
     Three facts and no fourth. There is deliberately no elapsed clock and no
@@ -138,56 +124,16 @@ def _format_heartbeat(state: HeartbeatState, frames: str, separator: str) -> Tex
     stream said nothing, and the row's whole value is that it goes still when
     the records do.
 
-    The rate carries one decimal where a source bar's carries none. A loop at
-    121/s does not need the tenth, but a session ticking over at 2.4/s does:
-    rounding that to "2/s" throws away the difference between a program
-    creeping along and one that has nearly stopped.
+    Assembly only: every string here was decided by `plan_frame()`, including
+    the glyph, which had to be resolved against the console's encoding before
+    the frame could be planned.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{state.glyph(frames)}  ", style="progress.spinner")
-    plural = "" if state.events == 1 else "s"
-    summary = f"{state.events:,} event{plural}"
-    if state.rate is not None:
-        summary += (
-            f" {separator} {state.rate:,.1f}/s"
-            if state.rate >= 1
-            else f" {separator} {1 / state.rate:,.1f}s each"
-        )
-    text.append(f"{summary:<{_HEARTBEAT_SUMMARY_WIDTH}}", style="progress.description")
-    if state.message:
-        text.append(state.message, style="dim")
+    text.append(f"{line.glyph}  ", style="progress.spinner")
+    text.append(line.summary, style="progress.description")
+    if line.message:
+        text.append(line.message, style="dim")
     return text
-
-
-def _format_source_detail(row: LoopRow, separator: str) -> str:
-    """The count column: iterations always, cycle position when inferred.
-
-    **Iterations, not records.** `siblings` reads 400 and not the 1600 log
-    calls behind it — every call site there says `row %d`, so the row is the
-    unit of work and how many lines narrate each one is the author's choice.
-    Record count is an identity-layer number, and the store and the exit
-    summary are where it is asked for.
-
-    Both numbers earn their place. The iteration count is the one thing here
-    that is certainly true; the cycle position is the inferred part and is what
-    the bar's fill is showing, so a reader can see the guess beside the fact.
-    """
-    iterations = f"{row.count:,} iterations"
-    if not row.is_determinate:
-        return iterations
-    return f"{row.cycle_current}/{row.total} {separator} {iterations}"
-
-
-def _format_position_detail(position: CyclePosition) -> str:
-    """The count column for a position row: which stage of how many.
-
-    "of" rather than the loop row's slash, because the two numbers mean
-    different things and should not look alike. `3/5` on a loop row is an
-    inferred cycle position — a guess. `3 of 5` here is the AST's count of the
-    call sites in a body and the ordinal of the one that just fired, which is
-    read rather than measured.
-    """
-    return f"{position.current} of {position.total}"
 
 
 def _format_record(row: LogRecordRow) -> Text:
@@ -298,15 +244,26 @@ class RichProgressRenderer:
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
         passthrough_level: int = PASSTHROUGH_LEVEL,
         max_bars: int | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         if Progress is None:
             raise RuntimeError("rich is not installed") from _RICH_IMPORT_ERROR
+        # `clock` is threaded to the models rather than held here: nothing in
+        # the renderer reads a clock, and a test that needs to cross the idle
+        # threshold has to drive the one the models measure against. It exists
+        # because the alternative was a test *writing* `renderer._model`, which
+        # rebuilt it without the heartbeat and silently lost that row (#71).
+        extra = {} if clock is None else {"clock": clock}
         self._model = LoopRowModel(
             store,
             min_repeats=min_repeats,
+            **extra,
             # The heartbeat rides on this model's poll, but what it echoes is
             # this renderer's business: it must not repeat a line this
             # renderer already printed above the bars in full.
+            # No clock here, deliberately: the heartbeat derives its period
+            # from record timestamps rather than from wall time, so there is
+            # nothing for a test to drive.
             heartbeat=SessionHeartbeat(store, passthrough_level=passthrough_level),
         )
         self._task_model = TaskProgressModel(store)
@@ -316,6 +273,10 @@ class RichProgressRenderer:
         # this only bounds what gets drawn.
         self._max_bars = resolve_max_bars(max_bars)
         self._suppressed_bars = 0
+        #: What the last `refresh()` decided. None before the first one, which
+        #: is the state `close()` draws its final frame from when nothing was
+        #: ever logged.
+        self._frame: Frame | None = None
         self._console = Console(file=stream if stream is not None else sys.stderr)
         # What this terminal can actually take, decided once and from rich's
         # own answers rather than from the raw stream. A Windows console on
@@ -401,12 +362,12 @@ class RichProgressRenderer:
             # above the bars — the same treatment a WARNING record gets.
             redirect_stderr=True,
         )
-        self._tasks: dict[SourceKey, TaskID] = {}
-        # Keyed on the *loop row's* key rather than the position row's own
-        # anything: a position row has no identity of its own, and the loop
-        # key is the one thing the model guarantees never migrates.
-        self._position_tasks: dict[SourceKey, TaskID] = {}
-        self._task_bars: dict[int, TaskID] = {}
+        # Both keyed on `PlanRow.key`, a `(RowKind, …)` pair. The kind is what
+        # separates a loop row from the position row beneath it: a position
+        # row has no identity of its own and borrows the loop's `SourceKey`,
+        # which the model guarantees never migrates.
+        self._tasks: dict[RowKey, TaskID] = {}
+        self._task_bars: dict[RowKey, TaskID] = {}
         self._closed = False
         self._live.start()
         # A timer, not a record counter: log volume must not drive redraws.
@@ -445,224 +406,136 @@ class RichProgressRenderer:
         return self._suppressed_bars
 
     def refresh(self) -> None:
-        """Re-read the store and redraw. Timer-driven, never per record."""
+        """Re-read the store, plan the frame, map it onto rich. Timer-driven.
+
+        Two steps that used to be one. `plan_frame()` decides every row, its
+        label, its numbers and its state; `_sync()` below only registers and
+        updates rich `Task`s from that answer. Nothing between the two makes a
+        display decision, which is what lets `tests/test_display_parity.py`
+        assert that rich holds exactly what the frame planned — and what stops
+        the test recorder from being a second implementation that agrees with
+        itself while disagreeing with the screen.
+        """
         if self._closed:
             return
-        self._refresh_task_bars()
-        rows = self._model.poll()
-        if self._max_bars is not None and len(rows) > self._max_bars:
-            self._suppressed_bars = len(rows) - self._max_bars
-            # Not `Task.visible = False`: rich skips invisible rows cheaply
-            # enough, but `add_task()` refreshes the display on every call, so
-            # registering the ones we will never draw costs a redraw each.
-            rows = rows[: self._max_bars]
-        drawn: list[TaskID] = []
-        for row in rows:
-            drawn += self._draw_loop_row(row)
-        # Structure, then position. `_draw_loop_row` registers a row wherever
-        # the model first reported it, which for a nested loop is always before
-        # its parent exists — an inner line logs N times per outer iteration,
-        # so it qualifies first every time. Re-laying-out here is what stops
-        # that row being indented under whichever unrelated loop happened to
-        # precede it. The model's order is a function of structure alone, so
+        frame = plan_frame(
+            rows=self._model.poll(),
+            tasks=self._task_model.poll(),
+            heartbeat=self._model.heartbeat,
+            frames=self._frames,
+            separator=self._separator,
+            summary_width=_HEARTBEAT_SUMMARY_WIDTH,
+            max_bars=self._max_bars,
+        )
+        self._frame = frame
+        self._suppressed_bars = frame.counts.suppressed_loops
+        for row in frame.tasks:
+            self._sync(self._task_progress, self._task_bars, row)
+        drawn = [
+            self._sync(self._source_progress, self._tasks, row) for row in frame.rows
+        ]
+        # Structure, then position. A row is registered wherever the model
+        # first reported it, which for a nested loop is always before its
+        # parent exists — an inner line logs N times per outer iteration, so
+        # it qualifies first every time. Re-laying-out here is what stops that
+        # row being indented under whichever unrelated loop happened to
+        # precede it. The frame's order is a function of structure alone, so
         # this is a no-op on every poll where nothing structural moved.
         _relayout(self._source_progress, drawn)
         # `update()` and not `refresh()`: the frame is drawn once, below.
         self._live.update(self._compose())
         self._live.refresh()
 
+    @property
+    def frame(self) -> Frame | None:
+        """What the last `refresh()` decided to draw, or None before the first.
+
+        The decisions, rather than the pixels. Reading it is how a test asks
+        "what was this told to draw" without rendering and parsing text back —
+        which cannot distinguish a pulse from a full bar, since rich clamps a
+        stale `completed > total` and the two render identically.
+        """
+        return self._frame
+
+    def counts(self) -> FrameCounts:
+        """How many bars there are, counted off **rich's own tasks**.
+
+        Deliberately not `self._frame.counts`, and the difference is the whole
+        point: computed from what rich actually holds, this answers "is the
+        screen what the plan said" rather than "does the plan agree with
+        itself". `tests/test_display_parity.py` asserts the two are equal, and
+        that assertion is worth nothing the moment this becomes a delegation.
+
+        Do not "simplify" this into `return self._frame.counts`.
+        """
+        frame = self._frame
+        source_tasks = self._source_progress.tasks
+        subrows = sum(1 for task in source_tasks if task.fields.get(_SUBROW))
+        return FrameCounts(
+            sources=frame.counts.sources if frame is not None else 0,
+            loops=frame.counts.loops if frame is not None else 0,
+            drawn_loops=len(source_tasks) - subrows,
+            suppressed_loops=self._suppressed_bars,
+            positions=subrows,
+            tasks=len(self._task_progress.tasks),
+            heartbeat=1 if self._model.heartbeat.events else 0,
+        )
+
+    def _sync(
+        self,
+        progress: Progress,
+        registry: dict[RowKey, TaskID],
+        row: PlanRow,
+    ) -> TaskID:
+        """Register or update one rich `Task` from one planned row.
+
+        The only place a `Task` is created, so the key freezing that
+        `plan_frame()` does is what keeps an elapsed clock alive: a key that
+        moved would be a new `Task`, and a new `Task` silently restarts the
+        clock of a loop that has been running for ten minutes.
+        """
+        task_id = registry.get(row.key)
+        if task_id is None:
+            # Splatted, not passed as `fields=`: `add_task` collects `**fields`
+            # itself, so a literal `fields=` kwarg stores one entry named
+            # "fields" — the trap `_plan_fields` documents — and
+            # `task.fields["count"]` reads nothing until an `update()` happens
+            # to set it.
+            task_id = progress.add_task(row.label, total=row.total, **_plan_fields(row))
+            registry[row.key] = task_id
+        # Via `_set_total` rather than `update(total=...)`, which cannot
+        # withdraw a total. Both directions matter: a promoted bar that
+        # overruns has to go back to pulsing, a collapsed row that resumes has
+        # to shed the total that filling it in implied, and a task that
+        # overshoots does the same.
+        _set_total(progress, task_id, row.total)
+        progress.update(
+            task_id,
+            description=row.label,
+            completed=row.completed,
+            **_plan_fields(row),
+        )
+        if row.done:
+            # Freezes the elapsed column. rich only latches it when
+            # `completed >= total`, which an under-delivering task never
+            # reaches.
+            progress.stop_task(task_id)
+        return task_id
+
     def _compose(self) -> Group:
         """The frame: heartbeat, then named bars, then inferred ones.
 
-        The heartbeat appears only once something has arrived. A row reading
-        "0 events" is true and worth nothing — it earns its place by carrying
-        a number that moves, and before the first record there is none. A
-        session whose only records are task events therefore shows no
-        heartbeat either, which is right: those have exact bars of their own.
+        The heartbeat appears only once something has arrived — `plan_frame()`
+        decides that, and hands back None when it has not. A row reading
+        "0 events" is true and worth nothing. A session whose only records are
+        task events therefore shows no heartbeat either, which is right: those
+        have exact bars of their own.
         """
-        heartbeat = self._model.heartbeat
         rows: list[RenderableType] = []
-        if heartbeat.events:
-            rows.append(_format_heartbeat(heartbeat, self._frames, self._separator))
+        if self._frame is not None and self._frame.heartbeat is not None:
+            rows.append(_format_heartbeat(self._frame.heartbeat))
         rows += [self._task_progress, self._source_progress]
         return Group(*rows)
-
-    def _draw_loop_row(self, row: LoopRow) -> list[TaskID]:
-        """One inferred loop: pulsing, determinate, or collapsed.
-
-        Three states, and which one applies is entirely the model's call:
-
-        * **Pulsing** (`total=None`) while nothing bounds the loop. That is
-          the permanent state of an outermost loop — nothing encloses it, so
-          nothing says how long it is — and the starting state of every other
-          one until containment analysis has held an answer for two polls.
-        * **Determinate** once an enclosing loop gives the cycle a length.
-          The fill shows position *within the current cycle*, so a nested bar
-          fills, resets and fills again, while the count column keeps the
-          cumulative iteration count.
-        * **Collapsed**, when the loop has been quiet for long enough to be
-          presumed over. The row is filled and marked: idleness is the only
-          completion signal this data has, so acting on it is the claim being
-          made, and the rate column says "idle" rather than a stale rate so
-          the claim is legible rather than implied. The row stays where it is
-          — deleting it would empty the final frame.
-
-        The rich `Task` is keyed on `row.key`, which the model freezes at the
-        row's first sighting and never migrates. That is load-bearing rather
-        than tidy: a key that moved would be a new `Task`, and a new `Task`
-        silently restarts the elapsed clock of a loop that has been running for
-        ten minutes.
-
-        Returns the tasks it drew, in the order they belong on screen — the
-        loop, then the position row where the loop earned one. The caller
-        collects those into the re-layout, which is why this reports them
-        rather than being asked again afterwards: a position row is not a row
-        of the model's and has no place in the containment order, so nothing
-        downstream could work out where it goes.
-        """
-        label = f"{'  ' * row.depth}{row.label}"
-        if row.idle:
-            total: int | None = row.count
-            completed = row.count
-        elif row.is_determinate:
-            total, completed = row.total, row.cycle_current
-        else:
-            total, completed = None, row.count
-        task_id = self._tasks.get(row.key)
-        if task_id is None:
-            task_id = self._source_progress.add_task(
-                label, total=total, **_row_fields()
-            )
-            self._tasks[row.key] = task_id
-        # Via `_set_total` rather than `update(total=...)`, which cannot
-        # withdraw a total. Both directions matter here: a promoted bar that
-        # overruns has to go back to pulsing, and a collapsed row that resumes
-        # has to shed the total that filling it in implied.
-        _set_total(self._source_progress, task_id, total)
-        self._source_progress.update(
-            task_id,
-            description=label,
-            completed=completed,
-            rate=_format_rate(row),
-            detail=_format_source_detail(row, self._separator),
-            **{_COLLAPSED: row.idle},
-        )
-        if row.position is None:
-            return [task_id]
-        return [task_id, self._draw_position_row(row, row.position)]
-
-    def _draw_position_row(self, row: LoopRow, position: CyclePosition) -> TaskID:
-        """The second row: how far through its body this iteration has got.
-
-        Determinate always, and that is the difference between it and every
-        other inferred row here. The loop row pulses because nothing bounds a
-        loop; this one is bounded by construction — the body has as many call
-        sites as the source says it has, and the ordinal of the one that just
-        fired is read from the same place. There is no ratio, no confirmation
-        count and nothing to withdraw, so it starts full-width and stays that
-        way.
-
-        It exists only because the row above it is too slow to answer "is this
-        still running?" — the model decides that, once, and never unmakes it
-        (see `position.CyclePositionModel`). So this never has to remove a
-        task, which is just as well: removing one would take its slot with it.
-
-        Indented one level past its loop, and collapsing with it. A finished
-        loop's last stage is a fact worth keeping on screen — it says where the
-        work stopped — but it should stop shouting, exactly as the bar above
-        it does.
-        """
-        # Padded to the widest stage this body can ever show, so the column
-        # holds still: a grid column is as wide as its widest cell, and a label
-        # that changes length five times an iteration would slide every bar in
-        # the display sideways with it.
-        label = f"{'  ' * (row.depth + 1)}{position.label:<{position.width}}"
-        task_id = self._position_tasks.get(row.key)
-        if task_id is None:
-            task_id = self._source_progress.add_task(
-                label, total=position.total, **_row_fields(subrow=True)
-            )
-            self._position_tasks[row.key] = task_id
-        self._source_progress.update(
-            task_id,
-            description=label,
-            completed=position.current,
-            detail=_format_position_detail(position),
-            **{_COLLAPSED: row.idle, _SUBROW: True},
-        )
-        return task_id
-
-    def _refresh_task_bars(self) -> None:
-        """Draw what `task()` and `track()` reported. No inference.
-
-        `total=None` gives rich an indeterminate, pulsing bar, which is the
-        honest rendering of a task that never said how much work there was.
-        A task that did say gets a real percentage.
-
-        A task that *overshoots* its total goes back to pulsing — the
-        withdrawal rule, and `_set_total()` is what makes it reach the screen.
-        The count column keeps showing the real numbers, so the overshoot is
-        visible rather than merely implied.
-
-        A task that *ends* is filled, whatever it claimed on the way. Its
-        `end` row is an exact completion signal — the one kind of bar here
-        that has one — so leaving an indeterminate task pulsing after it
-        would say "still working" about work that is provably over, and would
-        leave the elapsed clock running with it.
-        """
-        for bar in self._task_model.poll():
-            label = f"{'  ' * bar.depth}{bar.label}"
-            if bar.total is not None:
-                count = f"{bar.current}/{bar.total}"
-            elif bar.current:
-                count = str(bar.current)
-            else:
-                # A task that never reported progress — usually a container
-                # for subtasks. A bare "0" beside a pulsing bar reads as
-                # "stuck at zero" rather than "no count was claimed".
-                count = ""
-            completed: int = bar.current
-            drawn_total: int | None
-            if bar.done and bar.total is None:
-                # Nothing was ever claimed, so completion can only be
-                # expressed as "all of whatever it did". Floored at 1 because
-                # a container task — one that only held subtasks and reported
-                # no count of its own — is 0 of 0, which rich renders as a
-                # full bar labelled 0% and which reads as a failure.
-                drawn_total = max(bar.current, 1)
-                completed = drawn_total
-            elif bar.total is not None and bar.current > bar.total:
-                drawn_total = None
-            else:
-                # A task that ended *short* of a total it claimed keeps both
-                # numbers: stopping at 5/10 is a fact, and filling the bar
-                # would overwrite it with a claim of 10.
-                drawn_total = bar.total
-            rich_id = self._task_bars.get(bar.task_id)
-            if rich_id is None:
-                # Splatted, not passed as `fields=`: `add_task` collects
-                # `**fields` itself, so a literal `fields=` kwarg stores one
-                # entry literally named "fields" — the exact trap
-                # `_row_fields` documents — and `task.fields["count"]` reads
-                # nothing until the `update()` below happens to set it.
-                rich_id = self._task_progress.add_task(
-                    label, total=drawn_total, count=count
-                )
-                self._task_bars[bar.task_id] = rich_id
-            # See `_set_total`: `update(total=None)` would leave a stale total
-            # in place, so every withdrawal has to go through it.
-            _set_total(self._task_progress, rich_id, drawn_total)
-            self._task_progress.update(
-                rich_id,
-                description=label,
-                completed=completed,
-                count=count,
-            )
-            if bar.done:
-                # Freezes the elapsed column. rich only latches it when
-                # `completed >= total`, which an under-delivering task never
-                # reaches.
-                self._task_progress.stop_task(rich_id)
 
     def bars(self) -> list[BarState]:
         """Every *source location* the model is tracking, drawn or not.

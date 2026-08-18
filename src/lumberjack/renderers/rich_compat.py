@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from rich.console import RenderableType
     from rich.progress import Task
 
+    from lumberjack.renderers.plan import PlanRow
+
 
 def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
     """Set a rich task's total, including *back* to None.
@@ -135,6 +137,24 @@ def _row_fields(
     trap everywhere else, so the bundle is built in one place and splatted.
     """
     return {"rate": rate, "detail": detail, _COLLAPSED: collapsed, _SUBROW: subrow}
+
+
+def _plan_fields(row: PlanRow) -> dict[str, Any]:
+    """The same bundle, taken off a planned row rather than named by hand.
+
+    One mapping for both populations: a task bar carries `count` and blank
+    loop cells, a loop row carries `rate` and `detail` and a blank count. They
+    share a shape so the mapper has one code path, and so a column added to
+    one is a column the other explicitly blanks rather than silently omits —
+    an omitted key reads as `None` in a column and renders as "None".
+    """
+    return {
+        "rate": row.rate,
+        "detail": row.detail,
+        "count": row.count,
+        _COLLAPSED: row.collapsed,
+        _SUBROW: row.subrow,
+    }
 
 
 #: The mark a collapsed row shows where a running one shows a bar, and its

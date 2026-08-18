@@ -30,7 +30,9 @@ pytest.importorskip("rich")
 import lumberjack.renderers.rich_renderer as rich_renderer_module
 from fixture_sources import SEQUENCE, STAGES
 from lumberjack.handler import LumberjackHandler
-from lumberjack.renderers.progress import LoopRow, LoopRowModel
+from lumberjack.renderers import plan
+from lumberjack.renderers.plan import RowKind
+from lumberjack.renderers.progress import LoopRow
 from lumberjack.renderers.rich_renderer import RichProgressRenderer
 from lumberjack.schema import SourceKey
 from lumberjack.store import RecordStore
@@ -477,11 +479,12 @@ def test_a_rows_clock_survives_growth_a_move_and_a_collapse(
     """
     clock = [1_000.0]
     stream = io.StringIO()
-    renderer = make_renderer(stream=stream)
-    # The renderer's own model, rebuilt against a clock this test drives:
-    # retirement is measured against wall time and the sequence has to cross
-    # it. Nothing else about the renderer changes.
-    renderer._model = LoopRowModel(store, min_repeats=3, clock=lambda: clock[0])
+    # `clock=` rather than writing `renderer._model`: retirement is measured
+    # against wall time and the sequence has to cross it. The write was the
+    # only place any test mutated renderer internals, and it rebuilt the model
+    # without a `heartbeat=`, silently dropping that row for the rest of the
+    # test (issue #71).
+    renderer = make_renderer(stream=stream, clock=lambda: clock[0])
     store.append(
         [make_row(lineno=6, msg="parsed %d", created=990.0 + i) for i in range(4)]
     )
@@ -498,7 +501,7 @@ def test_a_rows_clock_survives_growth_a_move_and_a_collapse(
     (row,) = renderer.rows()
     assert len(row.members) == 2, "the sibling did not merge"
     assert len(renderer._tasks) == 1
-    assert renderer._tasks[row.key] == task_id, "the row's key migrated"
+    assert renderer._tasks[(RowKind.LOOP, row.key)] == task_id, "the key migrated"
 
     # An unrelated loop on another thread appears, and the first row goes
     # quiet: a live subtree sorts above a collapsed one, so the row moves.
@@ -907,7 +910,7 @@ def test_the_cycle_column_takes_the_separator_it_is_given():
         cycle_current=3,
     )
     assert row.is_determinate, "the fixture must exercise the determinate branch"
-    detail = rich_renderer_module._format_source_detail(row, "-")
+    detail = plan.format_source_detail(row, "-")
     assert detail == "3/20 - 7 iterations"
     assert detail.isascii()
 
