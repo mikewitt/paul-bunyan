@@ -46,6 +46,21 @@ def _isoformat(created: float) -> str:
 
 
 class PlainTextRenderer:
+    """One line per record, as text or as JSON, written and flushed at once.
+
+    Both non-TTY output modes are this one class — `json_lines` picks the
+    encoding and nothing else differs — and teardown borrows it again for the
+    exit dump, since replaying a lossy display's tail wants exactly this
+    format.
+
+    Write-through is the cost model, and it is the opposite of the live bar's:
+    a bar repaints on its own timer, so what it costs the calling thread is
+    almost nothing, while the write and the flush here are paid for inside the
+    `log.debug()` that reached them. Off a terminal there is no frame to
+    collapse a record into — nothing is redrawn in place — so every record has
+    to become a line, and batching would delay the line without saving it.
+    """
+
     write_through = True
 
     def __init__(
@@ -55,6 +70,15 @@ class PlainTextRenderer:
         self.json_lines = json_lines
 
     def render(self, row: LogRecordRow) -> None:
+        """Write the row out whole — every field in JSON mode, a line in text.
+
+        Nothing is filtered by level and nothing is collapsed, which is what
+        `write_through` promises and why teardown's exit dump must not replay
+        on top of this. Text mode carries the four fields a person scans and
+        drops the rest; a traceback follows on its own lines rather than
+        being flattened into the message, and in JSON mode it is `exc_text`
+        like any other field.
+        """
         if self.json_lines:
             # asdict() deepcopies every field, per record.
             # lumberjack: see issue #18
@@ -75,4 +99,14 @@ class PlainTextRenderer:
         self.stream.flush()
 
     def close(self) -> None:
-        pass
+        """Nothing to release: the stream is borrowed, never opened here.
+
+        `sys.stderr` by default, otherwise whatever the caller passed —
+        closing either would take down output this renderer does not own, and
+        every record has already been flushed as it arrived.
+
+        No closed flag either, unlike the rich renderers: records can still
+        arrive after this (`shutdown()` closes before it removes the handler),
+        and writing one more line to a borrowed stream is harmless whenever it
+        happens.
+        """

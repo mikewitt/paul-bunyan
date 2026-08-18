@@ -6,6 +6,7 @@ import collections
 import logging
 import threading
 from collections.abc import Callable
+from typing import override
 
 from lumberjack.schema import LogRecordRow
 
@@ -55,7 +56,21 @@ class LumberjackHandler(logging.Handler):
         with self._lock:
             return self._dropped
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:
+        """Never raises, whatever the record or a write-through renderer does.
+
+        The only writer in the system, reached from every thread the program
+        logs on and from inside a `logging` call that has never heard of
+        lumberjack, so either failure is reported through stdlib's own
+        `handleError()` rather than handed back to the caller.
+
+        Buffered, not stored: `drain()` moves rows on from here, so the store
+        costs the calling thread one conversion and a `deque.append` under a
+        lock held for no longer than that. `on_record` is charged to it as
+        well, outside that lock — a write-through renderer's line is paid for
+        by the call that logged it, where a live bar's redraw is not.
+        """
         try:
             row = LogRecordRow.from_log_record(record)
         except Exception:  # noqa: BLE001 - stdlib's own contract for a bad record

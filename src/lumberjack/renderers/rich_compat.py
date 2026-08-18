@@ -23,7 +23,7 @@ bare install.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 try:
     from rich.progress import (
@@ -178,6 +178,7 @@ class _RowBarColumn(ProgressColumn):
         self._collapsed_mark = collapsed_mark
         super().__init__()
 
+    @override
     def render(self, task: Task) -> RenderableType:
         if task.fields.get(_COLLAPSED):
             return Text(self._collapsed_mark, style="bar.finished")
@@ -201,6 +202,7 @@ class _RowTextColumn(ProgressColumn):
         # screen.
         super().__init__(table_column=Column(no_wrap=True))
 
+    @override
     def render(self, task: Task) -> Text:
         value = (
             task.description
@@ -227,6 +229,7 @@ class _RowElapsedColumn(ProgressColumn):
         self._elapsed = TimeElapsedColumn()
         super().__init__()
 
+    @override
     def render(self, task: Task) -> RenderableType:
         if task.fields.get(_SUBROW):
             return Text("")

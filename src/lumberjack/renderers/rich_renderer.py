@@ -191,6 +191,15 @@ def _format_record(row: LogRecordRow) -> Text:
 
 
 class RichTerminalRenderer:
+    """One styled line per record — rich's colour, without rich's bars.
+
+    A Phase 1 vestige. `create_renderer()` reaches it only where there is no
+    store to read counts from, and `init()` always passes one, so nothing in
+    the package selects it and direct construction — which is tests and
+    nothing else — is the only way in. Whether it earns its place at all is
+    issue #45.
+    """
+
     # One line per record — no in-place redraw, so nothing is lost and
     # teardown must not replay. The live bar below is the lossy one.
     write_through = True
@@ -202,6 +211,12 @@ class RichTerminalRenderer:
         self._closed = False
 
     def render(self, row: LogRecordRow) -> None:
+        """Print the record, with any traceback on its own lines beneath it.
+
+        The level picks a style and decides nothing else: nothing is filtered
+        and nothing is collapsed, which is what `write_through` promises and
+        why teardown's exit dump must not replay on top of this.
+        """
         if self._closed:
             return
         self._console.print(_format_record(row))
@@ -209,6 +224,14 @@ class RichTerminalRenderer:
             self._console.print(row.exc_text, style="red")
 
     def close(self) -> None:
+        """Stop accepting records. Idempotent.
+
+        Nothing was drawn in place, so there is no cursor state to restore and
+        no frame to bring down ahead of a traceback — the whole of closing is
+        that `render()` returns early afterwards. The stream stays open: it is
+        the caller's, borrowed rather than owned, as it is for every renderer
+        here.
+        """
         self._closed = True
 
 

@@ -79,6 +79,21 @@ src = ["src", "tests"]
 # after measurement (`from_log_record`, `_display_order`, both C-grade for
 # reasons argued at the code) and refuses anything worse. 8 would reopen those.
 #
+# `D101`/`D102`/`D103` are the missing-docstring rules, and they are here to
+# close #15: `RecordStore` is the contract every backend implements against,
+# and the module docstring tells implementers not to read the SQLite class as
+# the spec — so the ABC having no docstrings at all made the spec unwritten.
+# The rule now says so mechanically instead of an issue saying it.
+#
+# The rest of `D` is deliberately not selected, and D401 is why: 53 of its 89
+# findings are "first line should be in imperative mood" against docstrings
+# like "The installed handler, or None if `init()` hasn't run." Those are
+# properties, the noun phrase is the correct form for them, and "Return the
+# installed handler" carries strictly less. Same call as RUF002/RUF003 — a
+# rule answering a question nobody here is asking. D107 (`__init__`) and D105
+# (magic methods) are out for the weaker reason that the class docstring
+# already covers them.
+#
 # `LOG` is flake8-logging, and it is here for the same dogfooding reason as
 # `G` above — `G` governs how a message is *built*, `LOG` governs how the
 # logging API is *used*: LOG002 (`__name__`, not `__file__`), LOG007, LOG009
@@ -96,7 +111,7 @@ src = ["src", "tests"]
 select = [
     "E", "F", "I", "B", "UP", "G", "LOG", "S", "SIM",
     "C901", "PTH", "ISC", "C4", "ERA", "PERF", "N", "PYI", "FBT", "RUF",
-    "SLF001", "BLE001",
+    "D101", "D102", "D103", "SLF001", "BLE001",
 ]
 
 # RUF002/RUF003 call en and em dashes "ambiguous". They are this repository's
@@ -136,7 +151,20 @@ ignore = ["RUF002", "RUF003"]
 # are not renderer internals, and #45's item on this was closed when the ceiling
 # tests moved to the public `suppressed_bars`. The exemption is still right; the
 # argument for it was not.
-"tests/**" = ["S101", "SLF001"]
+"tests/**" = ["S101", "SLF001", "D101", "D102", "D103"]
+# D101/D102/D103 are scoped to `src/`, which is the package that ships
+# `py.typed` and whose ABC is the contract #15 is about. The 277 findings
+# outside it are 261 in `tests/`, 10 in `examples/`, 5 in `benchmarks/` and 1
+# in `scripts/` — and 258 of the 261 are D103 on test functions, where the
+# name *is* the documentation: `test_a_task_gets_a_bar_on_its_start_row` says
+# more than a docstring restating it would. Tests here already carry a
+# docstring wherever there is a reason to (`test_evict_keep_last`, the
+# mutation-testing note on the 7.6 ratio), and a blanket rule would replace
+# that judgement with 258 lines of filler — the exact thing selecting D was
+# meant to prevent.
+"examples/**" = ["D101", "D102", "D103"]
+"benchmarks/**" = ["D101", "D102", "D103"]
+"scripts/**" = ["D101", "D102", "D103"]
 # S608 on `_INSERT_SQL`, exempted here rather than with a `# noqa` on the line,
 # for one plain reason: the line cannot carry both markers. `_COLUMNS` is a
 # module-level tuple of literal column names, values go through `?`
@@ -154,6 +182,22 @@ ignore = ["RUF002", "RUF003"]
 # reformatting accepted findings, and it applies whether or not this entry
 # exists.
 "src/lumberjack/store.py" = ["S608"]
+
+[tool.ruff.lint.pydocstyle]
+# PEP 698's `@override` marks a method that restates a base's contract rather
+# than declaring one, so D102 has nothing to ask of it — the docstring it
+# would demand is the one already on the abstract method. Verified: with this
+# set, D102 flags the ABC's abstract method and a genuinely new public method,
+# and skips the override. Without it the rule would demand boilerplate on
+# every implementation, which is what kept #15 open rather than enforced.
+#
+# `@override` is not free elsewhere, and the constraint is worth recording:
+# `Renderer` is a `Protocol` and nothing inherits it, so the renderers satisfy
+# it structurally and cannot carry the decorator — `mypy --strict` rejects it
+# with "no base method was found". Only real inheritance qualifies, which here
+# is `SQLiteRecordStore`, `LumberjackHandler.emit` and `rich_compat`'s three
+# `ProgressColumn` subclasses.
+ignore-decorators = ["typing.override"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

@@ -84,6 +84,12 @@ class Finding:
 
     @property
     def sort_key(self) -> tuple[int, str, int]:
+        """Rank within `RULE_ORDER`, then path, then line.
+
+        A rule missing from `RULE_ORDER` raises `KeyError` here rather than
+        sorting quietly to one end — a new rule has to state its value before
+        anything will print it.
+        """
         return (_RULE_RANK[self.rule], self.pathname, self.lineno)
 
 
@@ -111,6 +117,13 @@ class Report:
 
     @property
     def gating(self) -> tuple[Finding, ...]:
+        """The subset of `findings` that should fail a build.
+
+        Empty while `findings` is not is a legitimate outcome rather than a
+        bug: the extra loops `--all-loops` asks for are reported on request,
+        and `nothing-repeating` describes a one-shot script correctly, so
+        neither gates.
+        """
         return tuple(finding for finding in self.findings if finding.gates)
 
 

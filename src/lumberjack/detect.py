@@ -42,12 +42,31 @@ MAX_BARS_ENV_VAR = "LUMBERJACK_MAX_BARS"
 
 
 class OutputMode(enum.Enum):
+    """Which shape of output a run gets: live redraw, plain text, JSON lines.
+
+    The values double as the accepted spellings of both overrides — `_coerce`
+    resolves each through `OutputMode(...)`, and the warning for an
+    unrecognised environment variable lists them — so this is the whole
+    vocabulary either override accepts, stated once.
+    """
+
     RICH = "rich"
     PLAIN = "plain"
     JSON = "json"
 
 
 class OutputModeDetector:
+    """Interactive or not, and the two ways a caller can say so outright.
+
+    Split across construction and `detect()`, which is where the module
+    docstring's two failure modes land in practice. `override=` is resolved in
+    `__init__`, so a misspelled one raises from the constructor and never
+    reaches a resolution at all; the environment is read afresh inside every
+    `detect()` call, where a misspelling only warns. `stream` is captured at
+    construction too, defaulting to `sys.stderr` as it stands then — a stream
+    swapped in afterwards is not the one asked whether it is a TTY.
+    """
+
     def __init__(
         self,
         *,
@@ -65,6 +84,17 @@ class OutputModeDetector:
         return OutputMode(value.strip().lower())
 
     def detect(self) -> OutputMode:
+        """The mode to render in: `override`, then the environment, then the stream.
+
+        First answer wins, and only the last of the three is inference. A
+        misspelled environment value stops at plain rather than falling
+        through to TTY detection, so a typo cannot end up starting a live
+        display — an *empty* one is the exception, read as unset rather than
+        as a bad mode, so `LUMBERJACK_OUTPUT_MODE=` defers to the stream like
+        no variable at all. The stream yields `RICH` only when it is a TTY
+        *and* `rich` is importable; without the package its answer is plain
+        too.
+        """
         if self.override is not None:
             return self.override
 

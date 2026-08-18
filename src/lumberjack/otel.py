@@ -77,6 +77,12 @@ def attach(span: Span) -> object | None:
 
 
 def detach(token: object | None) -> None:
+    """Undo the `attach()` that produced `token`; None is a no-op.
+
+    `TaskHandle.__exit__` calls this from a `finally` whatever happened, and
+    the token is None both when OTel is absent and when the handle held no
+    span to attach — so the guard lives here rather than at the call site.
+    """
     if otel_context is None or token is None:
         return
     otel_context.detach(token)  # type: ignore[arg-type]
