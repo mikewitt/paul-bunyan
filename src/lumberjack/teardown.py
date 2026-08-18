@@ -171,6 +171,10 @@ def _dump_diagnostics() -> None:
 
 
 def _flush_buffer() -> None:
+    # The last chance the buffered records have: if `append()` raises here
+    # they are already out of the buffer and nothing holds them.
+    # lumberjack: see issue #77.
+    #
     # Deliberately a duplicate of `lumberjack.flush()`, not a call to it:
     # `flush()` takes `session.registry_lock()` around the same read-then-write
     # so a concurrent `shutdown()` cannot close the store between them, but

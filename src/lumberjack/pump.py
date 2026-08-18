@@ -54,7 +54,9 @@ class FlushPump:
         while not self._stop.wait(self.interval):
             # A store write failing must not kill the pump: the next tick
             # still runs. It does not re-deliver the rows that failed, though —
-            # `drain()` empties the buffer before `append()` is attempted.
+            # `drain()` empties the buffer before `append()` is attempted, so
+            # they are gone, silently, against Principle 6.
+            # lumberjack: see issue #77.
             with contextlib.suppress(Exception):
                 self._flush()
 
