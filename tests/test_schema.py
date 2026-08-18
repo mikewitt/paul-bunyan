@@ -3,27 +3,16 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sys
+from collections.abc import Callable
+
+import pytest
 
 from lumberjack.schema import EXTRA_KEY, LogRecordRow, StoredRecord
 from lumberjack.store import _COLUMNS, SQLiteRecordStore
 
 
-def _make_record(**overrides: object) -> logging.LogRecord:
-    kwargs: dict[str, object] = dict(
-        name="test.logger",
-        level=logging.INFO,
-        pathname=__file__,
-        lineno=42,
-        msg="hello %s",
-        args=("world",),
-        exc_info=None,
-    )
-    kwargs.update(overrides)
-    return logging.LogRecord(**kwargs)  # type: ignore[arg-type]
-
-
-def test_from_log_record_basic_fields():
-    record = _make_record()
+def test_from_log_record_basic_fields(make_log_record):
+    record = make_log_record()
     row = LogRecordRow.from_log_record(record)
     assert row.logger_name == "test.logger"
     assert row.level_name == "INFO"
@@ -32,8 +21,8 @@ def test_from_log_record_basic_fields():
     assert row.lineno == 42
 
 
-def test_from_log_record_reserved_fields_default_to_none():
-    record = _make_record()
+def test_from_log_record_reserved_fields_default_to_none(make_log_record):
+    record = make_log_record()
     row = LogRecordRow.from_log_record(record)
     assert row.asyncio_task_name is None
     assert row.asyncio_task_id is None
@@ -45,25 +34,34 @@ def test_from_log_record_reserved_fields_default_to_none():
 # --- the `extra=` seam the tracking API writes through ----------------------
 
 
-def _record_carrying(payload: object) -> logging.LogRecord:
+@pytest.fixture
+def record_carrying(
+    make_log_record: Callable[..., logging.LogRecord],
+) -> Callable[[object], logging.LogRecord]:
     """A record with `payload` under the extra key.
 
     `setattr` after construction is precisely what `logging` does with
     `extra=` — `Logger.makeRecord` copies the mapping onto `record.__dict__`.
     """
-    record = _make_record()
-    setattr(record, EXTRA_KEY, payload)
-    return record
+
+    def _carrying(payload: object) -> logging.LogRecord:
+        record = make_log_record()
+        setattr(record, EXTRA_KEY, payload)
+        return record
+
+    return _carrying
 
 
-def test_a_task_event_populates_the_progress_columns(make_task_event):
-    row = LogRecordRow.from_log_record(_record_carrying(make_task_event()))
+def test_a_task_event_populates_the_progress_columns(make_task_event, record_carrying):
+    row = LogRecordRow.from_log_record(record_carrying(make_task_event()))
     assert (row.task_label, row.task_event) == ("reindex", "update")
     assert (row.task_id, row.parent_task_id) == (7, 3)
     assert (row.progress_current, row.progress_total) == (40, 100)
 
 
-def test_a_task_event_without_progress_leaves_those_columns_null(make_task_event):
+def test_a_task_event_without_progress_leaves_those_columns_null(
+    make_task_event, record_carrying
+):
     """An indeterminate task is the common case: `task()` with no total."""
     event = make_task_event(
         label="migrate",
@@ -73,33 +71,33 @@ def test_a_task_event_without_progress_leaves_those_columns_null(make_task_event
         current=None,
         total=None,
     )
-    row = LogRecordRow.from_log_record(_record_carrying(event))
+    row = LogRecordRow.from_log_record(record_carrying(event))
     assert (row.task_label, row.task_event) == ("migrate", "start")
     assert (row.progress_current, row.progress_total) == (None, None)
     assert row.parent_task_id is None
 
 
-def test_a_foreign_attribute_under_our_key_is_ignored():
+def test_a_foreign_attribute_under_our_key_is_ignored(record_carrying):
     """Somebody else's `extra={"lumberjack": ...}` must not crash `emit()` for
     every record in the process — it degrades to a record with no task data."""
-    row = LogRecordRow.from_log_record(_record_carrying({"label": "not ours"}))
+    row = LogRecordRow.from_log_record(record_carrying({"label": "not ours"}))
     assert row.task_label is None
     assert row.task_event is None
     assert row.task_id is None
 
 
-def test_from_log_record_captures_exception_text():
+def test_from_log_record_captures_exception_text(make_log_record):
     try:
         raise ValueError("bad")
     except ValueError:
-        record = _make_record(msg="failed", args=(), exc_info=sys.exc_info())
+        record = make_log_record(msg="failed", args=(), exc_info=sys.exc_info())
     row = LogRecordRow.from_log_record(record)
     assert row.exc_text is not None
     assert "ValueError: bad" in row.exc_text
 
 
-def test_stored_record_adds_id():
-    record = _make_record()
+def test_stored_record_adds_id(make_log_record):
+    record = make_log_record()
     row = LogRecordRow.from_log_record(record)
     field_values = {f.name: getattr(row, f.name) for f in dataclasses.fields(row)}
     stored = StoredRecord(id=1, **field_values)

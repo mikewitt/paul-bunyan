@@ -54,6 +54,31 @@ def scripts_dir() -> Path:
 
 
 @pytest.fixture
+def make_log_record() -> Callable[..., logging.LogRecord]:
+    """Build a raw stdlib `LogRecord` with sane defaults; override by keyword.
+
+    The input side of `make_row`'s output: what `LogRecordRow.from_log_record`
+    is handed, for the tests that exercise that conversion rather than
+    starting from a row.
+    """
+
+    def _make(**overrides: object) -> logging.LogRecord:
+        kwargs: dict[str, object] = dict(
+            name="test.logger",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=42,
+            msg="hello %s",
+            args=("world",),
+            exc_info=None,
+        )
+        kwargs.update(overrides)
+        return logging.LogRecord(**kwargs)  # type: ignore[arg-type]
+
+    return _make
+
+
+@pytest.fixture
 def make_row() -> Callable[..., LogRecordRow]:
     """Build a LogRecordRow with sane defaults; override any field by keyword."""
 
