@@ -739,3 +739,182 @@ def test_a_call_in_a_while_condition_belongs_to_the_loop(
     assert by_template["checking %d"].loop_chain != (), "while-test repeats"
     assert by_template["item %s"].loop_chain != (), "a body always repeats"
     assert by_template["starting %s"].loop_chain == (), "for-iter runs once"
+
+
+# --------------------------------------------------------------------------
+# `stable_order`, which used to fail open
+# --------------------------------------------------------------------------
+#
+# The table from issue #81, verbatim, plus the shapes that must *not* be
+# caught. Each body has three sites and would draw a determinate `n of 3`
+# sub-iteration row if `stable_order` said yes; where the middle one can be
+# skipped, the row would show a percentage that is wrong rather than
+# imprecise, which Principle 10 does not license.
+#
+# The unstable cases are written so the *middle* site is the skippable one,
+# because a body whose last site is conditional is unstable for a reason that
+# is easy to get right by accident.
+
+_UNSTABLE = {
+    "an if statement": """
+                if flag:
+                    log.warning('bad')""",
+    "an and": "                _ = flag and log.warning('bad')",
+    "an or": "                _ = flag or log.warning('bad')",
+    "a conditional expression": (
+        "                _ = log.warning('bad') if flag else None"
+    ),
+    "an assert message": "                assert flag, log.warning('bad')",
+    "a try": """
+                try:
+                    log.warning('bad')
+                except ValueError:
+                    pass""",
+    # The sharp pair: semantically identical to the `try` above, and the two
+    # used to give opposite answers.
+    "a suppressing with": """
+                with suppress(ValueError):
+                    log.warning('bad')""",
+    "a plain with": """
+                with open(flag) as fh:
+                    log.warning('bad')""",
+}
+
+
+_JUMPS = {"continue": "continue", "break": "break", "return": "return"}
+
+
+@pytest.mark.parametrize("body", _UNSTABLE.values(), ids=list(_UNSTABLE))
+def test_a_body_that_can_skip_a_line_has_no_stable_order(
+    analyze: Callable[..., static.FileStructure], body: str
+) -> None:
+    structure = analyze(f"""
+        from contextlib import suppress
+
+        def work(log, items, flag):
+            for item in items:
+                log.debug('opening')
+{body}
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    assert len(loop.call_sites) == 3
+    assert not loop.stable_order
+
+
+@pytest.mark.parametrize("jump", _JUMPS.values(), ids=list(_JUMPS))
+def test_everything_after_a_jump_is_conditional(
+    analyze: Callable[..., static.FileStructure], jump: str
+) -> None:
+    """The everyday shape, and the one that made this fail open.
+
+    A guard clause skips the rest of the iteration, so the position row used
+    to pin at 1 of 3 for the whole of a skipped item while the loop row above
+    it advanced.
+    """
+    structure = analyze(f"""
+        def work(log, items):
+            for item in items:
+                log.debug('item %s: opening', item)
+                if item:
+                    {jump}
+                log.debug('item %s: validating', item)
+                log.debug('item %s: committing', item)
+        """)
+    (loop,) = structure.loops.values()
+    opening, validating, committing = loop.call_sites
+
+    assert not opening.conditional, "before the jump, order is still a promise"
+    assert validating.conditional and committing.conditional
+    assert not loop.stable_order
+
+
+def test_a_jump_in_the_last_statement_costs_nothing(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """Nothing follows it, so nothing is skippable and the row survives.
+
+    Without this the rule would be "any jump anywhere", which is the cheaper
+    reading issue #81 offered and a strictly worse one: it withholds rows
+    that are correct.
+    """
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+                log.debug('committing')
+                if item:
+                    break
+        """)
+    (loop,) = structure.loops.values()
+    assert loop.stable_order
+
+
+_NOT_OURS = {
+    # A nested loop's `break` binds to the nested loop.
+    "a nested loop's break": """
+                for other in items:
+                    if other:
+                        break""",
+    # A nested function's `return` returns from the function.
+    "a nested def's return": """
+                def helper():
+                    return 1""",
+    "a lambda's body": "                _ = lambda: 1",
+}
+
+
+@pytest.mark.parametrize("middle", _NOT_OURS.values(), ids=list(_NOT_OURS))
+def test_a_jump_belonging_to_something_else_is_not_ours(
+    analyze: Callable[..., static.FileStructure], middle: str
+) -> None:
+    """Over-suppression is cheap but not free, and these are the boundaries.
+
+    Each of these contains a jump keyword that cannot reach our body, so the
+    row must survive — otherwise the rule degenerates into "any `break` in
+    the file", and the position row disappears from code it is correct for.
+    """
+    structure = analyze(f"""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+{middle}
+                log.debug('committing')
+        """)
+    loop = structure.loops[min(structure.loops)]
+    assert loop.stable_order
+
+
+def test_a_break_in_a_nested_loops_else_clause_is_ours(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """The exception to the exception, and the reason `_jumps_out` cannot
+    simply stop descending at a nested loop: a `for`/`else` clause is not
+    part of that loop, so a `break` there binds to ours."""
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+                for other in items:
+                    pass
+                else:
+                    break
+                log.debug('committing')
+        """)
+    outer = structure.loops[min(structure.loops)]
+    assert not outer.stable_order
+
+
+def test_the_first_operand_of_a_boolop_always_runs(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """`a and b` defers `b`, never `a` — so a per-child split is the point,
+    and marking the whole expression conditional would be over-suppression."""
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                _ = log.debug('opening') and item
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    assert loop.stable_order
