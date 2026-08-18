@@ -289,3 +289,45 @@ def test_a_store_init_created_is_closed_when_teardown_refuses(monkeypatch):
     with pytest.raises(RuntimeError, match="teardown already installed"):
         lumberjack.init(output_mode="plain")
     assert closed == [True], "init() leaked the store it created"
+
+
+class _FailOnceStore(SQLiteRecordStore):
+    """Refuses the first `append()` and takes every one after it.
+
+    A subclass rather than a stub, so the retry lands in a real store and the
+    assertion is that the records are *there* rather than that a mock was
+    called.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(":memory:")
+        self.failures = 0
+
+    def append(self, rows):
+        if self.failures == 0:
+            self.failures += 1
+            raise RuntimeError("store is unwritable")
+        super().append(rows)
+
+
+def test_a_failed_write_keeps_the_records_for_the_next_flush():
+    """Principle 6's lossless half, at the buffer→store seam (#77).
+
+    `drain()` empties the buffer before `append()` is attempted, so a raising
+    store used to lose the batch with nothing holding it and nothing counting
+    it. The exception still propagates: the pump swallows it and tries again,
+    and a caller flushing by hand deserves to hear that the store is failing.
+    """
+    store = _FailOnceStore()
+    lumberjack.init(store=store, output_mode="plain", flush_interval=0)
+    try:
+        logging.getLogger("retry-test").info("survives a failed write")
+        with pytest.raises(RuntimeError, match="unwritable"):
+            lumberjack.flush()
+        assert store.recent() == [], "nothing was written by the failed attempt"
+
+        lumberjack.flush()
+        assert [r.message for r in store.recent()] == ["survives a failed write"]
+    finally:
+        lumberjack.shutdown()
+        store.close()

@@ -10,6 +10,7 @@ without changing test code.
 from __future__ import annotations
 
 import abc
+import contextlib
 import sqlite3
 import threading
 import time
@@ -158,6 +159,12 @@ class RecordStore(abc.ABC):
 
         An empty `rows` does nothing, which is the ordinary case: the pump
         ticks on a timer whether or not anything was logged.
+
+        **All-or-nothing per batch**, and a backend owes this rather than
+        merely offering it: a raising `append()` must leave the store exactly
+        as it found it. `LumberjackHandler.restore()` puts a failed batch back
+        for the next flush to retry, so a partial write would be replayed on
+        top of itself and duplicate every row the first attempt did manage.
         """
 
     @abc.abstractmethod
@@ -367,13 +374,29 @@ class SQLiteRecordStore(RecordStore):
 
     @override
     def append(self, rows: Sequence[LogRecordRow]) -> None:
-        """One `executemany` and one commit per call: the batch is the unit."""
+        """One `executemany` and one commit per call: the batch is the unit.
+
+        Rolled back on failure, which is what makes that sentence true in the
+        case it matters. `executemany` can raise partway through, leaving the
+        rows it did insert in an open transaction — a later `commit()` from
+        the next batch would then write them, and the retry in
+        `LumberjackHandler.restore()` would write them a second time. Explicit
+        rollback is what the interface's all-or-nothing promise costs.
+        """
         if not rows:
             return
         values = list(map(_GET_COLUMNS, rows))
         with self._lock:
-            self._conn.executemany(_INSERT_SQL, values)
-            self._conn.commit()
+            try:
+                self._conn.executemany(_INSERT_SQL, values)
+                self._conn.commit()
+            except Exception:
+                # A closed connection raises here too, and there is nothing
+                # to roll back on one — the original failure is what the
+                # caller needs to see.
+                with contextlib.suppress(Exception):
+                    self._conn.rollback()
+                raise
 
     def _row_to_stored(self, row: sqlite3.Row) -> StoredRecord:
         kwargs = {col: row[col] for col in _COLUMNS}

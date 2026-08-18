@@ -53,10 +53,11 @@ class FlushPump:
         # waiting out a full interval.
         while not self._stop.wait(self.interval):
             # A store write failing must not kill the pump: the next tick
-            # still runs. It does not re-deliver the rows that failed, though —
-            # `drain()` empties the buffer before `append()` is attempted, so
-            # they are gone, silently, against Principle 6.
-            # lumberjack: see issue #77.
+            # still runs, and it gets another shot at the same rows —
+            # `flush()` puts a failed batch back at the front of the buffer
+            # before re-raising, so a store that recovers loses nothing and
+            # one that does not eventually overflows into the counted,
+            # announced `dropped` path rather than a silent one.
             with contextlib.suppress(Exception):
                 self._flush()
 

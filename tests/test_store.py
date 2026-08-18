@@ -8,6 +8,7 @@ interface a second backend would also implement."""
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import sqlite3
 import time
@@ -219,6 +220,35 @@ def test_templates_returns_distinct_non_null(store, make_row):
 def test_append_empty_is_noop(store):
     store.append([])
     assert store.recent() == []
+
+
+def test_a_batch_that_fails_partway_writes_none_of_itself(make_row):
+    """All-or-nothing per batch, which the retry in `LumberjackHandler` needs.
+
+    `executemany` can raise on the third row after inserting the first two,
+    leaving them in an open transaction — where the *next* batch's commit
+    would write them. Then `flush()` retries the failed batch on top and every
+    row the first attempt managed is stored twice. Measured before the fix:
+    the retry below produced `['a', 'b', 'a', 'b']`.
+
+    SQLite-specific, and constructed directly for the reason the module
+    docstring gives: this is about that backend's transaction semantics, not
+    about an interface a second backend would satisfy the same way.
+    """
+    store = SQLiteRecordStore(":memory:")
+    try:
+        good = [make_row(message="a"), make_row(message="b")]
+        # NOT NULL on `func_name`, so the third row fails to bind after the
+        # first two have already been inserted into the transaction.
+        unwritable = dataclasses.replace(make_row(message="c"), func_name=None)
+        with pytest.raises(sqlite3.IntegrityError):
+            store.append([*good, unwritable])
+        assert store.recent() == [], "a failed batch left rows behind"
+
+        store.append(good)
+        assert [r.message for r in store.recent()] == ["a", "b"]
+    finally:
+        store.close()
 
 
 def test_a_store_file_from_an_older_schema_fails_loudly(tmp_path):
