@@ -11,6 +11,10 @@ from lumberjack.detect import (
     resolve_max_bars,
 )
 
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
+
 
 class _FakeStream(io.StringIO):
     def __init__(self, *, tty: bool) -> None:

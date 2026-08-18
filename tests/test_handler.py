@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from lumberjack.handler import LumberjackHandler
 from lumberjack.schema import EXTRA_KEY
 from lumberjack.store import SQLiteRecordStore
+
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
 
 
 def test_emit_appends_to_buffer(attached_logger):

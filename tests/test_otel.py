@@ -34,6 +34,11 @@ in_memory = pytest.importorskip(
 )
 
 
+#: Tier 2 — a component contract, driven through a public component API.
+#: See tests/README.md; `test_tier2_rules.py` checks what the mark claims.
+pytestmark = pytest.mark.tier2
+
+
 @pytest.fixture
 def spans(monkeypatch) -> Iterator[list]:
     """A real SDK tracer wired to an in-memory exporter, injected through the

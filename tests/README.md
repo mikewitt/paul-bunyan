@@ -96,6 +96,24 @@ Marked file-wide with `pytestmark = pytest.mark.tier2`, never per-function: the
 private-access check is per-file, so a half-marked file would be uncheckable.
 If half a file qualifies, the file is tier 3 until someone splits it.
 
+`test_tier2_rules.py` runs `ruff --select SLF001 --isolated` over every marked
+file. **`--isolated` is load-bearing**: `pyproject.toml` exempts SLF001 for
+`tests/**` — rightly, since tier 3 unit-tests private functions on purpose —
+and `per-file-ignores` applies even to a CLI `--select`, so without it the
+check reports zero and proves nothing. That is not hypothetical; it reported
+"all checks passed" over 31 real findings while they were being counted.
+
+Currently marked: `test_store`, `test_handler`, `test_detect`,
+`test_render_plain`, `test_otel`, `test_tracking`.
+
+**`test_schema.py` is a deliberate omission.** Its
+`test_insert_columns_and_created_table_agree` reads the real table through
+`sqlite_store._conn` to run `PRAGMA table_info`, and there is no public way to
+ask a store what its table looks like. That is a genuine contract test wearing
+a private access, and the honest options are to split the file or to leave it
+tier 3. It is tier 3 until someone wants to split it — which is the rule
+working, not an exception to it.
+
 ## Tier 3
 
 Everything else. Private access is allowed and expected — `test_benchmark.py`
