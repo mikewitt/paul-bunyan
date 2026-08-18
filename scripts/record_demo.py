@@ -43,9 +43,19 @@ import select
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pyte
-from PIL import Image, ImageDraw, ImageFont
+if TYPE_CHECKING:  # pragma: no cover - annotations only, never imported at runtime
+    import pyte
+    from PIL import Image, ImageFont
+
+# `pyte`, `Pillow` and `fontTools` are none of them dependencies of this
+# project — the workflow installs them with `--with` for the one job that
+# records. Importing them at module scope therefore makes this file
+# unimportable anywhere else, which is why it went untested while a defect in
+# it silently changed the README's image. They are imported where they are
+# used instead, as `_load_faces` already did with `fontTools`, so the parts
+# that are pure Python can be driven from the suite.
 
 #: A fallback chain, because no single font on a stock box covers this
 #: display. DejaVu Sans Mono is the nicer face and has the box-drawing
@@ -103,6 +113,37 @@ def _colour(name: str, fallback: str) -> str:
     return fallback
 
 
+def _split_at(carry: str, text: str, marker: str) -> tuple[str, bool, str]:
+    """What to feed before `marker` arrives, whether it did, and the new carry.
+
+    Scanning the bytes rather than the rendered screen, which is the whole
+    point. `capture()` used to feed a chunk and then ask whether `marker` was
+    visible — correct only while output dribbles in slowly enough that the
+    loop gets to look between lines. The demo's post-shutdown summary is ~30
+    lines onto a 14-row screen, so when it lands in one `os.read` the marker
+    scrolls off inside a single `feed()` and is never seen. The recording then
+    runs to process exit, and one tall summary frame stretches every frame in
+    the gif, because the height is the maximum any frame occupied.
+
+    That is a race on how the writer's output happens to be chunked: the same
+    commit records a short gif on one machine and a tall one on another, which
+    is exactly what it did.
+
+    `carry` holds the last few characters already fed, so a marker split
+    across two reads is still found. Nothing before the marker is withheld,
+    so the frame this returns is the display as it stood the instant before
+    the summary began.
+    """
+    if not marker:
+        return text, False, ""
+    combined = carry + text
+    hit = combined.find(marker)
+    if hit != -1:
+        return text[: max(hit - len(carry), 0)], True, ""
+    keep = len(marker) - 1
+    return text, False, combined[-keep:] if keep else ""
+
+
 def capture(
     argv: list[str], cols: int, rows: int, fps: int, stop_at: str = ""
 ) -> list[tuple[float, str]]:
@@ -114,8 +155,13 @@ def capture(
     `stop_at` is checked here rather than over the finished list, and that is
     not an optimisation. The marker is on screen only until enough output
     scrolls past to push it off, so a post-hoc scan of the last frame finds
-    nothing and the recording runs to the end anyway.
+    nothing and the recording runs to the end anyway. `_split_at` checks the
+    incoming bytes for the same reason one step earlier — a scan of the
+    *screen* loses the marker just as readily when a chunk is big enough to
+    scroll it away before the loop looks.
     """
+    import pyte
+
     screen = pyte.Screen(cols, rows)
     stream = pyte.Stream(screen)
     frames: list[tuple[float, str]] = []
@@ -138,6 +184,7 @@ def capture(
         os.execvp(argv[0], argv)  # noqa: S606  # nosec B606
 
     start = last = time.monotonic()
+    carry = ""
     try:
         while True:
             ready, _, _ = select.select([fd], [], [], interval)
@@ -148,8 +195,11 @@ def capture(
                     break
                 if not data:
                     break
-                stream.feed(data.decode("utf-8", "replace"))
-                if stop_at and any(stop_at in line for line in screen.display):
+                head, reached, carry = _split_at(
+                    carry, data.decode("utf-8", "replace"), stop_at
+                )
+                stream.feed(head)
+                if reached:
                     frames.append((time.monotonic() - start, _snapshot(screen)))
                     return frames
             now = time.monotonic()
@@ -219,6 +269,7 @@ def _used_rows(kept: list[tuple[str, float]], rows: int) -> int:
 def _load_faces() -> tuple[list[tuple[ImageFont.FreeTypeFont, ...]], list[set[int]]]:
     """The fallback chain, each face paired with the codepoints it covers."""
     from fontTools.ttLib import TTFont
+    from PIL import ImageFont
 
     fonts, coverage = [], []
     for regular, bold in FACES:
@@ -266,6 +317,8 @@ def render(
     # drawn over the last one: the crop already sized `rows` to what the
     # display used, and provenance must not cover pixels it attests to.
     extra = ch + 4 if caption else 0
+    from PIL import Image, ImageDraw
+
     img = Image.new(
         "RGB", (int(cols * cw) + pad * 2, rows * ch + pad * 2 + extra), BACKGROUND
     )
