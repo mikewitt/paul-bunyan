@@ -115,6 +115,14 @@ def _format_rate(row: LoopRow) -> str:
     return f"{1 / row.rate:,.1f}s each"
 
 
+#: Separates the facts inside one cell — the heartbeat's count from its rate,
+#: and a loop row's cycle position from its iteration count. Chosen once at
+#: renderer construction against the console's encoding, exactly as the
+#: collapsed-row mark is, because a character lumberjack draws itself must
+#: degrade rather than raise on a stream that cannot carry it (issue #70).
+_SEPARATOR = "·"
+_SEPARATOR_ASCII = "-"
+
 #: How wide the heartbeat's count-and-rate field is padded to, so the message
 #: beside it holds one column instead of shuffling sideways every time the
 #: count gains a digit. A floor rather than a ceiling: a session busy enough
@@ -122,7 +130,7 @@ def _format_rate(row: LoopRow) -> str:
 _HEARTBEAT_SUMMARY_WIDTH = 26
 
 
-def _format_heartbeat(state: HeartbeatState, frames: str) -> Text:
+def _format_heartbeat(state: HeartbeatState, frames: str, separator: str) -> Text:
     """The session row: is anything arriving, how fast, and what was it.
 
     Three facts and no fourth. There is deliberately no elapsed clock and no
@@ -141,9 +149,9 @@ def _format_heartbeat(state: HeartbeatState, frames: str) -> Text:
     summary = f"{state.events:,} event{plural}"
     if state.rate is not None:
         summary += (
-            f" · {state.rate:,.1f}/s"
+            f" {separator} {state.rate:,.1f}/s"
             if state.rate >= 1
-            else f" · {1 / state.rate:,.1f}s each"
+            else f" {separator} {1 / state.rate:,.1f}s each"
         )
     text.append(f"{summary:<{_HEARTBEAT_SUMMARY_WIDTH}}", style="progress.description")
     if state.message:
@@ -151,7 +159,7 @@ def _format_heartbeat(state: HeartbeatState, frames: str) -> Text:
     return text
 
 
-def _format_source_detail(row: LoopRow) -> str:
+def _format_source_detail(row: LoopRow, separator: str) -> str:
     """The count column: iterations always, cycle position when inferred.
 
     **Iterations, not records.** `siblings` reads 400 and not the 1600 log
@@ -167,7 +175,7 @@ def _format_source_detail(row: LoopRow) -> str:
     iterations = f"{row.count:,} iterations"
     if not row.is_determinate:
         return iterations
-    return f"{row.cycle_current}/{row.total} · {iterations}"
+    return f"{row.cycle_current}/{row.total} {separator} {iterations}"
 
 
 def _format_position_detail(position: CyclePosition) -> str:
@@ -330,10 +338,14 @@ class RichProgressRenderer:
             # braille on the one console that cannot take it.
             self._frames = HEARTBEAT_FRAMES_ASCII
             collapsed_mark = _COLLAPSED_BAR_ASCII
+            self._separator = _SEPARATOR_ASCII
         else:
             self._frames = heartbeat_frames(self._console.encoding)
             collapsed_mark = ascii_fallback(
                 _COLLAPSED_BAR, _COLLAPSED_BAR_ASCII, self._console.encoding
+            )
+            self._separator = ascii_fallback(
+                _SEPARATOR, _SEPARATOR_ASCII, self._console.encoding
             )
         # markup=False throughout: labels carry file paths and user-supplied
         # task names, and a stray "[" in either must not parse as a rich tag.
@@ -471,7 +483,7 @@ class RichProgressRenderer:
         heartbeat = self._model.heartbeat
         rows: list[RenderableType] = []
         if heartbeat.events:
-            rows.append(_format_heartbeat(heartbeat, self._frames))
+            rows.append(_format_heartbeat(heartbeat, self._frames, self._separator))
         rows += [self._task_progress, self._source_progress]
         return Group(*rows)
 
@@ -532,7 +544,7 @@ class RichProgressRenderer:
             description=label,
             completed=completed,
             rate=_format_rate(row),
-            detail=_format_source_detail(row),
+            detail=_format_source_detail(row, self._separator),
             **{_COLLAPSED: row.idle},
         )
         if row.position is None:
