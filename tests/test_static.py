@@ -404,9 +404,7 @@ def test_an_encoding_declaration_is_honoured(tmp_path: Path) -> None:
     # machinery did. Reading text would guess UTF-8 and raise on this.
     path = tmp_path / "latin.py"
     path.write_bytes(
-        b"# -*- coding: latin-1 -*-\n"
-        b"def f(x):\n"
-        b"    log.debug('caf\xe9 %d', x)\n"
+        b"# -*- coding: latin-1 -*-\ndef f(x):\n    log.debug('caf\xe9 %d', x)\n"
     )
 
     structure = static.analyze_file(str(path))

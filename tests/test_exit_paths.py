@@ -92,9 +92,9 @@ def test_write_through_records_printed_once_on_clean_exit(
 
 
 def test_write_through_records_printed_once_after_traceback(raise_after_init_plain):
-    assert (
-        raise_after_init_plain.stderr.count(b"about to fail") == 1
-    ), raise_after_init_plain.stderr
+    assert raise_after_init_plain.stderr.count(b"about to fail") == 1, (
+        raise_after_init_plain.stderr
+    )
 
 
 def _store_count(db_path: Path) -> int:
