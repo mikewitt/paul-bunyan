@@ -201,8 +201,8 @@ def _run_block() -> str:
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(  # noqa: S603  # nosec B603
-        ["git", *args],  # noqa: S607  # nosec B607
+    subprocess.run(  # noqa: S603  # nosec B603 B607
+        ["git", *args],  # noqa: S607
         cwd=repo,
         check=True,
         capture_output=True,
@@ -240,8 +240,8 @@ def _scratch_repo(
         target.write_text(body, encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
-    base = subprocess.run(  # nosec B603
-        ["git", "rev-parse", "HEAD"],  # noqa: S607  # nosec B607
+    base = subprocess.run(  # nosec B603 B607
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
         cwd=repo,
         check=True,
         capture_output=True,
@@ -300,8 +300,8 @@ def _drive_the_workflow(
             "PR_LABELS": labels,
         }
     )
-    return subprocess.run(  # noqa: S603  # nosec B603
-        ["bash", "-c", _run_block()],  # noqa: S607  # nosec B607
+    return subprocess.run(  # noqa: S603  # nosec B603 B607
+        ["bash", "-c", _run_block()],  # noqa: S607
         cwd=repo,
         env=env,
         capture_output=True,
@@ -328,10 +328,37 @@ def _allowed(done: subprocess.CompletedProcess[str]) -> None:
     assert "No contract edit alongside" in done.stdout, done.stdout + done.stderr
 
 
+#: The workflow's `run:` block is a bash script, and the job it belongs to
+#: runs on `ubuntu-latest` — asserted below, so this skip is pinned to a fact
+#: in the tree rather than to convenience. On a GitHub Windows runner `bash`
+#: resolves to `C:\Windows\System32\bash.exe`, the WSL launcher, and with no
+#: distribution installed it prints a UTF-16 notice and exits non-zero. That
+#: is not a bash at all, so driving the block under it tests nothing about
+#: the guard.
+#:
+#: It hid a real defect for exactly one push. Every case here used to assert
+#: only an exit code, and WSL's failure is exit 1 — the same code a refusal
+#: returns — so three of the four reported success on Windows against a shell
+#: that never started. `_refused()` is what turned that into a visible
+#: failure; this marker is what stops it being a false one.
+_needs_posix_shell = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the guard runs on ubuntu-latest; Windows `bash` is the WSL stub",
+)
+
+
+def test_the_guard_runs_on_linux_which_is_what_the_skip_above_rests_on() -> None:
+    """If the job ever moves off Linux, `_needs_posix_shell` stops being a
+    statement about where the code runs and becomes a hole."""
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    assert workflow["jobs"]["guard"]["runs-on"] == "ubuntu-latest"
+
+
 _HOLLOWED = "def test_it():\n    assert True\n"
 _SURRENDERS = "import sys\n\n\ndef main():\n    return 0\n\n\nsys.exit(0)\n"
 
 
+@_needs_posix_shell
 def test_a_diff_that_rewrites_the_decider_does_not_get_to_judge_itself(
     tmp_path: Path,
 ) -> None:
@@ -352,6 +379,7 @@ def test_a_diff_that_rewrites_the_decider_does_not_get_to_judge_itself(
     _refused(_drive_the_workflow(repo, tmp_path))
 
 
+@_needs_posix_shell
 def test_a_rename_out_of_tier1_still_shows_the_side_it_left(
     tmp_path: Path,
 ) -> None:
@@ -369,6 +397,7 @@ def test_a_rename_out_of_tier1_still_shows_the_side_it_left(
     _refused(_drive_the_workflow(repo, tmp_path))
 
 
+@_needs_posix_shell
 def test_the_workflow_is_not_accused_of_edits_the_base_branch_made(
     tmp_path: Path,
 ) -> None:
