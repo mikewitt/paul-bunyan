@@ -81,6 +81,15 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     survive a Windows default of cp1252.
     """
     full_env = dict(os.environ)
+    # The child's lumberjack configuration comes from the test, never from
+    # whoever's shell is running it. `piped_is_plain.py` deliberately omits
+    # `output_mode` so that *detection* decides — and an inherited
+    # `LUMBERJACK_OUTPUT_MODE=plain` would satisfy it through the override
+    # branch instead, passing for the wrong reason and silently. `=rich`
+    # would fail loudly, so only the useless direction was quiet. `extra`
+    # is applied below, so a test that wants one still gets it.
+    for key in [k for k in full_env if k.startswith("LUMBERJACK_")]:
+        del full_env[key]
     full_env["PYTHONPATH"] = os.pathsep.join(
         [str(_REPO_ROOT / "src"), full_env.get("PYTHONPATH", "")]
     )

@@ -78,17 +78,34 @@ def test_sources_that_never_repeat_draw_no_loop_row(oneshot_run):
     assert rows == [], rows
 
 
+#: What the plain renderer writes: a timestamp, a padded level, the logger
+#: name, and the message. Matching the whole line rather than the message
+#: inside it is the point — `re.findall(rb"processing item \d+")` counted 20
+#: under `LUMBERJACK_OUTPUT_MODE=json` too, so the pair asserted "not rich"
+#: while claiming to assert "plain".
+_PLAIN_LINE = re.compile(rb"^\S+ INFO\s+ingest - processing item (\d+)$")
+
+
 def test_a_pipe_gets_write_through_text(piped_run):
     """Principle 5: never assume a human is watching. With no `output_mode`
     given and stderr a pipe, detection picks plain — every record printed in
     order, nothing redrawn in place.
 
+    All three of those are asserted: the *format* is plain rather than JSON
+    lines, every record is present, and they are in the order they were
+    logged. Equality on the sequence, as `test_logging_becomes_progress.py`
+    does for the other switch.
+
     Unmarked: this is what the *absence* of rich looks like too, so it holds
     on the bare install and is a degradation check there.
     """
     assert piped_run.returncode == 0, piped_run.stderr
-    rendered = re.findall(rb"processing item \d+", piped_run.stderr)
-    assert len(rendered) == 20, rendered
+    numbered = [
+        int(match.group(1))
+        for line in piped_run.stderr.splitlines()
+        if (match := _PLAIN_LINE.match(line))
+    ]
+    assert numbered == list(range(20)), piped_run.stderr
 
 
 def test_a_pipe_gets_no_cursor_control(piped_run):

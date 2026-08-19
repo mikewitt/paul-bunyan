@@ -412,8 +412,23 @@ required check and blocks every merge until the ruleset is edited to match.
 The label and the ruleset entry are both repository settings and cannot be
 created from the tree, so a fork or a fresh clone has the workflow without
 the gate. Why a label rather than
-CODEOWNERS, and the two cases it deliberately does not catch, are in
+CODEOWNERS, and the four cases it deliberately does not catch, are in
 `tests/README.md`.
+
+**It runs the base branch's copy of the decider, and the first version did
+not.** A `pull_request` event checks out `refs/pull/N/merge`, so the runner's
+workspace holds the *proposed* files — and `scripts/tier1_guard.py` was
+executed from there while `scripts/` was not a protected path. A diff could
+therefore change `src/`, hollow out a tier-1 assertion, and replace the
+decider with one that exits 0, and the required check reported success. It
+now runs `git show "$BASE_SHA:scripts/tier1_guard.py"`, asks git for the
+diff with `-z` (an unquoted non-ASCII path stops starting with `tests/`) and
+`--no-renames` (a rename out of `tests/tier1/` otherwise shows only where it
+landed), and diffs against the merge ref's first parent rather than
+`$BASE_SHA...HEAD`, which was charging the pull request for base commits
+that landed after it opened. The workflow file itself remains uncloseable
+from inside the repository, because GitHub runs the pull request's copy of
+it; that is now stated rather than denied.
 
 A separate workflow, `demo-gif.yml`, re-records the demo gif on every PR
 that touches `src/`, `examples/` or the recorder, and uploads it as an
@@ -453,7 +468,7 @@ Coverage is uploaded to Codacy from the `coverage` job. It comes from that one u
 
 **One job name is deliberately wrong.** `bare install (no rich)` guards three optional dependencies, not one. `name:` is the check name GitHub reports and trunk's branch protection lists this job, so renaming it orphans a required check and blocks merges until the ruleset is edited to match — worth doing only alongside that settings change. The `coverage` job used to have the same problem under its old name `coverage-badge`; it was renamed freely because the ruleset does *not* list it.
 
-**Trunk's required checks are `lint`, `typecheck`, the six `test` legs, `bare install (no rich)`, `package`, `tier-1 guard`, and CodeQL's `Analyze (actions)` / `Analyze (python)` — thirteen.** `package` and `tier-1 guard` were both added after this list was first written down. `package` earns its place: it is the only check exercising the artefact users actually install, building the wheel, installing it into a clean venv and asserting `py.typed` ships. `tier-1 guard` earns its place differently — it is the only check whose verdict a contributor cannot change from inside the repository, because the way past it is a label and labels are permission-gated. `coverage` is the one check that runs and is deliberately not required — a coverage upload failing, or being skipped on a fork PR with no token, is not a reason to block a merge.
+**Trunk's required checks are `lint`, `typecheck`, the six `test` legs, `bare install (no rich)`, `package`, `tier-1 guard`, and CodeQL's `Analyze (actions)` / `Analyze (python)` — thirteen.** `package` and `tier-1 guard` were both added after this list was first written down. `package` earns its place: it is the only check exercising the artefact users actually install, building the wheel, installing it into a clean venv and asserting `py.typed` ships. `tier-1 guard` earns its place differently — the way past it is a label, and labels are permission-gated, so a contributor cannot grant themselves passage by editing files. That is a narrower claim than the one that stood here first ("the only check whose verdict a contributor cannot change from inside the repository"), which was false: the check ran the pull request's own copy of the decider, and a diff that rewrote `scripts/tier1_guard.py` passed itself. Fixed by reading the decider from the base branch; the residue is that GitHub runs the *workflow file* from the merge ref, which nothing in the tree can close. `coverage` is the one check that runs and is deliberately not required — a coverage upload failing, or being skipped on a fork PR with no token, is not a reason to block a merge.
 
 **Bandit's ruleset lives in ruff, and `.codacy.yaml` has no bandit block.** It used to: 437 of bandit's 447 findings were `assert` used in a pytest suite, where the assert *is* the test, so `tests/**` was excluded wholesale — and every *other* finding bandit would have reported there went with it. What anyone actually meant was "an assert is fine in tests/ and nowhere else", and that is unsayable in `.codacy.yaml`, whose own comment records why: individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 
