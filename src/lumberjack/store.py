@@ -123,18 +123,11 @@ _COLUMNS = (
     "template_id",
 )
 _GET_COLUMNS = attrgetter(*_COLUMNS)
-# The parity tests pin `_COLUMNS` against the real table.
-_INSERT_SQL = (
-    "INSERT INTO records ("
-    "logger_name, level_name, level_no, msg, message, pathname, filename, "
-    "module, func_name, lineno, created, thread, thread_name, process, "
-    "process_name, exc_text, stack_text, asyncio_task_name, asyncio_task_id, "
-    "task_id, parent_task_id, task_label, task_event, progress_current, "
-    "progress_total, template_id"
-    ") VALUES ("
-    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
-    ")"
-)
+_COLS = ", ".join(_COLUMNS)
+_PLACEHOLDERS = ", ".join("?" for _ in _COLUMNS)
+# Both halves come from `_COLUMNS`, the literal tuple above; every *value*
+# goes through a `?`. The parity tests pin `_COLUMNS` against the real table.
+_INSERT_SQL = f"INSERT INTO records ({_COLS}) VALUES ({_PLACEHOLDERS})"  # nosec B608
 
 
 class RecordStore(abc.ABC):
