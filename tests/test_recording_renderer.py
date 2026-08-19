@@ -217,15 +217,35 @@ def test_it_records_what_the_rich_renderer_paints(store: RecordStore, make_row):
     It would be cheaper to assert this by construction — they call the same
     `plan_frame()` — but "the code is shared" is a claim about today's code,
     and this is a test about tomorrow's.
+
+    The console is pinned to a non-legacy one, and that is not a convenience.
+    Which glyphs a terminal can encode is rich's decision and not the plan's,
+    so on a Windows runner the real renderer picks the ASCII frame set and
+    separator while a recorder with no console to consult keeps the braille
+    defaults — and the two are *right* to differ. Fixing the terminal is what
+    leaves the comparison total rather than carved out; the resolution itself
+    has its own tests in `test_render_progress.py`.
     """
     pytest.importorskip("rich")
     import io
 
+    import lumberjack.renderers.rich_renderer as rich_renderer_module
     from lumberjack.renderers.rich_renderer import RichProgressRenderer
+
+    real_console = rich_renderer_module.Console
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        rich_renderer_module,
+        "Console",
+        lambda **kwargs: real_console(legacy_windows=False, **kwargs),
+    )
+
+    class _Utf8Stream(io.StringIO):
+        encoding = "utf-8"
 
     recorder = RecordingRenderer(store, min_repeats=3)
     rich = RichProgressRenderer(
-        store, stream=io.StringIO(), min_repeats=3, refresh_interval=0
+        store, stream=_Utf8Stream(), min_repeats=3, refresh_interval=0
     )
     try:
         for cycle in range(8):
@@ -249,3 +269,4 @@ def test_it_records_what_the_rich_renderer_paints(store: RecordStore, make_row):
             assert recorder.frame == rich.frame, f"cycle {cycle}"
     finally:
         rich.close()
+        monkeypatch.undo()

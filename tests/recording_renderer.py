@@ -73,6 +73,8 @@ class RecordingRenderer:
         passthrough_level: int = PASSTHROUGH_LEVEL,
         max_bars: int | None = None,
         clock: Callable[[], float] | None = None,
+        frames: str = HEARTBEAT_FRAMES,
+        separator: str = "·",
     ) -> None:
         extra = {} if clock is None else {"clock": clock}
         self._model = LoopRowModel(
@@ -83,6 +85,13 @@ class RecordingRenderer:
         )
         self._task_model = TaskProgressModel(store)
         self._max_bars = max_bars
+        # Passed in rather than resolved, because there is no console here to
+        # ask. Which glyphs a terminal can encode is rich's to decide — see
+        # `plan.py`'s docstring — so a recorder that guessed would disagree
+        # with the real display on any console that cannot take braille, and
+        # would be *right* to. The defaults are what a utf-8 console gets.
+        self._glyphs = frames
+        self._separator = separator
         self._frames: list[Frame] = []
         self._rendered: list[LogRecordRow] = []
         # `render()` is called from whichever thread logged, concurrently, so
@@ -113,10 +122,8 @@ class RecordingRenderer:
                 rows=self._model.poll(),
                 tasks=self._task_model.poll(),
                 heartbeat=self._model.heartbeat,
-                # A frame set and a separator this fixture can encode: it
-                # writes to nothing, so there is no terminal to consult.
-                frames=HEARTBEAT_FRAMES,
-                separator="·",
+                frames=self._glyphs,
+                separator=self._separator,
                 summary_width=26,
                 max_bars=self._max_bars,
             )
