@@ -273,24 +273,59 @@ def _write(repo: Path, changes: dict[str, str | None]) -> None:
         target.write_text(body, encoding="utf-8")
 
 
-def _drive_the_workflow(repo: Path, tmp_path: Path, labels: str = "[]") -> int:
-    """Run the workflow's own `run:` block, verbatim, against `repo`."""
+def _drive_the_workflow(
+    repo: Path, tmp_path: Path, labels: str = "[]"
+) -> subprocess.CompletedProcess[str]:
+    """Run the workflow's own `run:` block, verbatim, against `repo`.
+
+    The environment is inherited rather than built from four keys. A bare
+    dict is not a tighter test, it is a different one: on Windows a process
+    spawned without `SYSTEMROOT` and friends fails before it reaches
+    anything this is trying to check, and `set -euo pipefail` turns that
+    into exit 1 — which is the same code a refusal returns. Three of the
+    four cases here expect a refusal, so they would have gone green on a
+    shell that never ran. `_refused()` below is the other half of that.
+
+    `RUNNER_TEMP` is passed in POSIX form because its value is spliced into
+    a bash redirect, and on Windows `str()` yields a path full of
+    backslashes.
+    """
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir(exist_ok=True)
-    done = subprocess.run(  # noqa: S603  # nosec B603
+    env = dict(os.environ)
+    env.update(
+        {
+            "BASE_SHA": (repo / "BASE_SHA").read_text(encoding="utf-8").strip(),
+            "RUNNER_TEMP": runner_temp.as_posix(),
+            "PR_LABELS": labels,
+        }
+    )
+    return subprocess.run(  # noqa: S603  # nosec B603
         ["bash", "-c", _run_block()],  # noqa: S607  # nosec B607
         cwd=repo,
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "BASE_SHA": (repo / "BASE_SHA").read_text(encoding="utf-8").strip(),
-            "RUNNER_TEMP": str(runner_temp),
-            "PR_LABELS": labels,
-        },
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    return done.returncode
+
+
+def _refused(done: subprocess.CompletedProcess[str]) -> None:
+    """Exit 1 *and* the guard's own words.
+
+    The code alone proves nothing: `set -euo pipefail` gives 1 for a missing
+    binary, an unreadable base commit, or a bash that never started. Every
+    refusal case asserts the message so that a run which fell over cannot be
+    read as a run which decided.
+    """
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "edits the acceptance contract" in done.stderr, done.stdout + done.stderr
+
+
+def _allowed(done: subprocess.CompletedProcess[str]) -> None:
+    """Exit 0 *and* the guard's own words, for the same reason."""
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "No contract edit alongside" in done.stdout, done.stdout + done.stderr
 
 
 _HOLLOWED = "def test_it():\n    assert True\n"
@@ -314,7 +349,7 @@ def test_a_diff_that_rewrites_the_decider_does_not_get_to_judge_itself(
             "scripts/tier1_guard.py": _SURRENDERS,
         },
     )
-    assert _drive_the_workflow(repo, tmp_path) == 1
+    _refused(_drive_the_workflow(repo, tmp_path))
 
 
 def test_a_rename_out_of_tier1_still_shows_the_side_it_left(
@@ -331,7 +366,7 @@ def test_a_rename_out_of_tier1_still_shows_the_side_it_left(
             "tests/test_contract.py": "def test_it():\n    assert VALUE == 1\n",
         },
     )
-    assert _drive_the_workflow(repo, tmp_path) == 1
+    _refused(_drive_the_workflow(repo, tmp_path))
 
 
 def test_the_workflow_is_not_accused_of_edits_the_base_branch_made(
@@ -353,7 +388,7 @@ def test_the_workflow_is_not_accused_of_edits_the_base_branch_made(
             "src/mod.py": "VALUE = 3\n",
         },
     )
-    assert _drive_the_workflow(repo, tmp_path) == 0
+    _allowed(_drive_the_workflow(repo, tmp_path))
 
 
 def test_a_quoted_path_is_refused_rather_than_read(guard: Any) -> None:
