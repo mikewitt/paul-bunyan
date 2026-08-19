@@ -36,8 +36,11 @@ or of rich's own object model rather than of the frame:
   frame-text assertion catches it.
 - **Cropping.** `vertical_overflow="ellipsis"` is rich's.
 
-The first three are covered by `tests/test_display_parity.py`; the last three
-only by the rich-gated frame tests, which is why none of those may be thinned.
+Withdrawal and re-layout are covered by `tests/test_display_parity.py`. The
+other four — glyph choice, the elapsed clock, the one-`Live` rule and cropping
+— only by the rich-gated frame tests, which is why none of those may be
+thinned. (This paragraph said "the first three" and named glyph choice among
+them; `test_display_parity.py` does not mention encoding at all.)
 """
 
 from __future__ import annotations
@@ -70,6 +73,26 @@ if TYPE_CHECKING:
 #: which is the plan's own business — and passing it in meant two callers
 #: naming the same number, which is a drift waiting to happen.
 HEARTBEAT_SUMMARY_WIDTH = 26
+
+#: The widest fixed-point second count either rate cell will print before
+#: switching to exponential. Not a claim about which periods are meaningful —
+#: only about what fits. `rate` guarantees a positive finite float and nothing
+#: more, so a corrupted timestamp yielding `period=1e308` gives `rate=1e-308`,
+#: which passed every guard and rendered as **419 characters**, dragging every
+#: other row sideways with it. 15 holds `999,999,999.9s`, which is eleven days
+#: an iteration; past that the exact digits say nothing the exponent does not.
+MAX_SECONDS_WIDTH = 15
+
+
+def _seconds(value: float) -> str:
+    """`value` seconds, in a form that fits a column.
+
+    Fixed-point normally, exponential once fixed-point would outgrow the
+    cell. The bound is on *width*, not on meaning: there is no period this
+    refuses to state, only a point past which it states it compactly.
+    """
+    plain = f"{value:,.1f}"
+    return plain if len(plain) <= MAX_SECONDS_WIDTH else f"{value:.1e}"
 
 
 class RowKind(enum.Enum):
@@ -211,7 +234,7 @@ def format_rate(row: LoopRow) -> str:
         return ""
     if row.rate >= 1:
         return f"{row.rate:,.0f}/s"
-    return f"{1 / row.rate:,.1f}s each"
+    return f"{_seconds(1 / row.rate)}s each"
 
 
 def format_source_detail(row: LoopRow, separator: str) -> str:
@@ -263,7 +286,7 @@ def format_heartbeat_summary(state: HeartbeatState, separator: str) -> str:
         summary += (
             f" {separator} {state.rate:,.1f}/s"
             if state.rate >= 1
-            else f" {separator} {1 / state.rate:,.1f}s each"
+            else f" {separator} {_seconds(1 / state.rate)}s each"
         )
     return f"{summary:<{HEARTBEAT_SUMMARY_WIDTH}}"
 

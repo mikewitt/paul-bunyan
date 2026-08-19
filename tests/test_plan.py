@@ -29,6 +29,7 @@ import pytest
 
 from lumberjack.renderers.plan import (
     HEARTBEAT_SUMMARY_WIDTH,
+    MAX_SECONDS_WIDTH,
     Frame,
     RowKind,
     plan_frame,
@@ -401,3 +402,69 @@ def test_a_real_period_still_reports_a_rate():
     tightening one."""
     assert frame([loop(period=0.5)]).rows[0].rate == "2/s"
     assert frame([loop(period=2.0)]).rows[0].rate == "2.0s each"
+
+
+# --- the indent, which is the only visual cue for hierarchy -----------------
+
+
+def test_a_nested_row_is_indented_under_its_parent():
+    """Nothing pinned this, and deleting the indent passed all 721 tests.
+
+    That matters more here than a missing assertion usually would. CLAUDE.md
+    records that a row indented under the wrong parent is the display
+    *asserting something untrue*, and that this is worse than asserting
+    nothing — the whole re-layout exists to stop it. The cue carrying that
+    claim had no test.
+    """
+    planned = frame(
+        [
+            loop(key=key(1), members=(key(1),), label="reconciling …", depth=0),
+            loop(key=key(2), members=(key(2),), label="compared …", depth=1),
+        ]
+    ).rows
+    assert [row.depth for row in planned] == [0, 1]
+    assert planned[0].label == "reconciling …"
+    assert planned[1].label == "  compared …", "the child lost its indent"
+
+
+def test_a_task_row_is_indented_by_its_own_depth():
+    """Subtasks nest too, and by the depth `task()` reported rather than by
+    anything inferred."""
+    (row,) = frame(tasks=[task(label="fetching", depth=2)]).tasks
+    assert row.label == "    fetching"
+    assert row.depth == 2
+
+
+def test_a_position_row_is_indented_one_past_its_loop():
+    position = stage(1, 3, "open", 4)
+    planned = frame([loop(depth=2, position=position)]).rows
+    assert planned[0].depth == 2
+    assert planned[1].depth == 3
+    assert planned[1].label.startswith("      "), "three levels of indent"
+
+
+# --- and the width the seconds cell is bounded to --------------------------
+
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [
+        (2.0, "2.0s each"),
+        (1e12, "1.0e+12s each"),
+        # A corrupted timestamp can reach this, and it used to render 419
+        # characters into a fixed-width column.
+        (1e308, "1.0e+308s each"),
+    ],
+)
+def test_a_very_slow_loop_states_its_period_compactly(period, expected):
+    """The bound is on width, not on meaning — no period is refused, only
+    stated compactly once fixed-point would outgrow the cell."""
+    cell = frame([loop(period=period)]).rows[0].rate
+    assert cell == expected
+    assert len(cell) <= MAX_SECONDS_WIDTH + len("s each")
+
+
+def test_the_heartbeat_bounds_its_period_the_same_way():
+    line = frame(heartbeat=HeartbeatState(events=3, period=1e308)).heartbeat
+    assert line is not None
+    assert "1.0e+308s each" in line.summary
