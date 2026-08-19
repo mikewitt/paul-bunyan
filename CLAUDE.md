@@ -399,10 +399,13 @@ signature it catches is a change that alters behaviour and edits the
 assertion that noticed. Its own workflow because it needs the
 `labeled`/`unlabeled` triggers — applying the label has to re-run *it*, and
 would otherwise re-run the whole serial chain every time anyone touched a
-label. It is **not yet a required check**, which is the difference between a
-gate and a suggestion; making it one is a repository settings change that
-cannot be done from the tree, and doing so freezes its `name:` for the
-reason `bare install (no rich)` records below. Why a label rather than
+label. It **is** a required check on trunk, which is the difference between
+a gate and a suggestion — and it is why its `name:` is now frozen, for the
+reason `bare install (no rich)` records below: renaming the job orphans a
+required check and blocks every merge until the ruleset is edited to match.
+The label and the ruleset entry are both repository settings and cannot be
+created from the tree, so a fork or a fresh clone has the workflow without
+the gate. Why a label rather than
 CODEOWNERS, and the two cases it deliberately does not catch, are in
 `tests/README.md`.
 
@@ -444,7 +447,7 @@ Coverage is uploaded to Codacy from the `coverage` job. It comes from that one u
 
 **One job name is deliberately wrong.** `bare install (no rich)` guards three optional dependencies, not one. `name:` is the check name GitHub reports and trunk's branch protection lists this job, so renaming it orphans a required check and blocks merges until the ruleset is edited to match — worth doing only alongside that settings change. The `coverage` job used to have the same problem under its old name `coverage-badge`; it was renamed freely because the ruleset does *not* list it.
 
-**Trunk's required checks are `lint`, `typecheck`, the six `test` legs, `bare install (no rich)`, `package`, and CodeQL's `Analyze (actions)` / `Analyze (python)` — twelve.** `package` was added after this list was first written down, and it earns its place: it is the only check exercising the artefact users actually install, building the wheel, installing it into a clean venv and asserting `py.typed` ships. `coverage` is the one check that runs and is deliberately not required — a coverage upload failing, or being skipped on a fork PR with no token, is not a reason to block a merge.
+**Trunk's required checks are `lint`, `typecheck`, the six `test` legs, `bare install (no rich)`, `package`, `tier-1 guard`, and CodeQL's `Analyze (actions)` / `Analyze (python)` — thirteen.** `package` and `tier-1 guard` were both added after this list was first written down. `package` earns its place: it is the only check exercising the artefact users actually install, building the wheel, installing it into a clean venv and asserting `py.typed` ships. `tier-1 guard` earns its place differently — it is the only check whose verdict a contributor cannot change from inside the repository, because the way past it is a label and labels are permission-gated. `coverage` is the one check that runs and is deliberately not required — a coverage upload failing, or being skipped on a fork PR with no token, is not a reason to block a merge.
 
 **Bandit's ruleset lives in ruff, and `.codacy.yaml` has no bandit block.** It used to: 437 of bandit's 447 findings were `assert` used in a pytest suite, where the assert *is* the test, so `tests/**` was excluded wholesale — and every *other* finding bandit would have reported there went with it. What anyone actually meant was "an assert is fine in tests/ and nowhere else", and that is unsayable in `.codacy.yaml`, whose own comment records why: individual patterns can only be turned off in Codacy's web UI, so path scoping is all the file can do.
 

@@ -159,10 +159,16 @@ touches **both** `tests/tier1/**` and `src/**` unless it carries the
 **The label is the mechanism, not the check.** Applying one needs triage
 rights on the repository, so the way past the gate is outside the working
 tree — an agent can write any file it likes and cannot label its own pull
-request. The check is only a check; adding it to trunk's required-check
-ruleset is what makes it binding, and until someone does that it is
-advisory. Its `name:` is frozen from that moment, for the reason CLAUDE.md
-records about `bare install (no rich)`.
+request. The check alone is only a check; what makes it binding is its
+entry in trunk's required-check ruleset, which is there. Its `name:` is
+frozen from that moment, for the reason CLAUDE.md records about `bare
+install (no rich)` — renaming the job orphans a required check and blocks
+every merge until the ruleset is edited to match.
+
+Both halves live in repository settings rather than in the tree: the
+`tier-1 change` label and the ruleset entry. A fork, or a clone by anyone
+who is not the owner, gets the workflow and neither, so the guard runs and
+reports and nothing enforces it.
 
 Editing tier 1 is not forbidden by any of this. It is made visible, and
 routed through a second pair of eyes.
