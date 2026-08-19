@@ -34,7 +34,7 @@ concurrency:
 jobs:
   lint:
     # First in the chain. Every job below waits on the one before it, so a
-    # failure here costs nine seconds instead of the ~12 billed minutes a full
+    # failure here costs nine seconds instead of the ~12 runner-minutes a full
     # fan-out spends before reporting the same thing. The trade is real and
     # accepted: a red run now names one broken job rather than all of them, so
     # a second failure only surfaces after the first is fixed.

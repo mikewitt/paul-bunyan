@@ -375,7 +375,7 @@ Be precise about what each half buys, because the two are easy to conflate. The 
 
 The cost is real and is the thing the old note was protecting: a red run now names one broken job, so a second failure only surfaces after the first is fixed. `fail-fast: false` stays on the matrix, so a failing leg does not cancel its siblings — the serialization is about not *starting* work that a earlier failure has already invalidated, not about hiding results that exist.
 
-Worth knowing before touching the runner budget: the suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and bills at 2×, where ubuntu spends 1 second — so windows is 55% of the bill from 3 of 14 jobs, and trimming *tests* saves almost nothing. The lever is which legs run, never which tests.
+Worth knowing before touching the runner budget, and worth knowing *first* that there is no budget: standard GitHub-hosted runners are free on public repositories, on every plan, and stayed free through the 2026 pricing change. Nothing here is billed, so no CI change on this repo can save money and none should be argued for on that basis. The shape is still real if the repo ever goes private, or if anyone reaches for larger runners, which are charged even on a public repo. The suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and carries a 2× multiplier where charging applies, against ubuntu's 1 second — so windows would be 55% of the notional cost from 3 of 14 jobs, and trimming *tests* would save almost nothing. The lever is which legs run, never which tests.
 
 | Job | Guards |
 |---|---|
@@ -387,6 +387,20 @@ Worth knowing before touching the runner budget: the suite is about **13%** of r
 | `coverage` | One suite run with `--cov-report=xml`, uploaded to Codacy, which renders the README badge from it |
 
 CodeQL and Codacy also run, both configured outside this workflow.
+
+`tier1-guard.yml` is a separate workflow and a merge gate rather than a
+test: it fails any pull request whose diff touches both `tests/tier1/**` and
+`src/**` unless the pull request carries the `tier-1 change` label. The
+signature it catches is a change that alters behaviour and edits the
+assertion that noticed. Its own workflow because it needs the
+`labeled`/`unlabeled` triggers — applying the label has to re-run *it*, and
+would otherwise re-run the whole serial chain every time anyone touched a
+label. It is **not yet a required check**, which is the difference between a
+gate and a suggestion; making it one is a repository settings change that
+cannot be done from the tree, and doing so freezes its `name:` for the
+reason `bare install (no rich)` records below. Why a label rather than
+CODEOWNERS, and the two cases it deliberately does not catch, are in
+`tests/README.md`.
 
 A separate workflow, `demo-gif.yml`, re-records the demo gif on every PR
 that touches `src/`, `examples/` or the recorder, and uploads it as an
