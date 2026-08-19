@@ -145,8 +145,7 @@ def resolve_max_bars(override: int | None = None) -> int | None:
         value = 0  # falls into the warning below
     if value <= 0:
         warnings.warn(
-            f"{MAX_BARS_ENV_VAR}={raw!r} is not a positive integer; "
-            f"drawing every bar.",
+            f"{MAX_BARS_ENV_VAR}={raw!r} is not a positive integer; drawing every bar.",
             RuntimeWarning,
             stacklevel=2,
         )

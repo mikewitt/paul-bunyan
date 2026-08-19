@@ -319,9 +319,9 @@ def session(
 
 
 @pytest.fixture
-def attached_logger() -> (
-    Callable[..., contextlib.AbstractContextManager[logging.Logger]]
-):
+def attached_logger() -> Callable[
+    ..., contextlib.AbstractContextManager[logging.Logger]
+]:
     """A non-propagating DEBUG logger with `handler` attached, detached after."""
 
     @contextlib.contextmanager
