@@ -500,6 +500,10 @@ class SQLiteRecordStore(RecordStore):
         matters; the multiplier is how many workers actually touch a line,
         which for real code is small.
         """
+        rows = self._get_delta_rows(after_id)
+        return self._parse_delta_rows(rows, after_id)
+
+    def _get_delta_rows(self, after_id: int) -> list[sqlite3.Row]:
         sql = (
             "SELECT pathname, lineno, func_name, task_event IS NULL AS is_plain, "
             "process, thread, asyncio_task_id, "
@@ -510,7 +514,9 @@ class SQLiteRecordStore(RecordStore):
             "process, thread, asyncio_task_id"
         )
         with self._lock:
-            rows = self._conn.execute(sql, (after_id,)).fetchall()
+            return self._conn.execute(sql, (after_id,)).fetchall()
+
+    def _parse_delta_rows(self, rows: list[sqlite3.Row], after_id: int) -> SourceDelta:
         # Grouping by worker as well as by source splits each source into one
         # row per worker, so the per-source figures are refolded here. That is
         # cheaper than it looks — the extra groups are bounded by how many
