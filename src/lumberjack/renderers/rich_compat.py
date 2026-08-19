@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from rich.console import RenderableType
     from rich.progress import Task
 
+    from lumberjack.renderers.plan import PlanRow
+
 
 def _set_total(progress: Progress, task_id: TaskID, total: int | None) -> None:
     """Set a rich task's total, including *back* to None.
@@ -122,10 +124,8 @@ _COLLAPSED = "collapsed"
 _SUBROW = "subrow"
 
 
-def _row_fields(
-    *, rate: str = "", detail: str = "", collapsed: bool = False, subrow: bool = False
-) -> dict[str, Any]:
-    """The custom cells every loop-progress task carries.
+def _plan_fields(row: PlanRow) -> dict[str, Any]:
+    """The custom cells every progress task carries, taken off a planned row.
 
     Spread with `**` at the call site rather than handed over as `fields=`.
     `Progress.add_task` collects `**fields`, so `fields={...}` stores one entry
@@ -133,8 +133,20 @@ def _row_fields(
     `task.fields["subrow"]` then sees nothing until the first `update()`
     happens to set it. Harmless where an `update()` follows immediately and a
     trap everywhere else, so the bundle is built in one place and splatted.
+
+    One mapping for both populations: a task bar carries `count` and blank
+    loop cells, a loop row carries `rate` and `detail` and a blank count. They
+    share a shape so the mapper has one code path, and so a column added to
+    one is a column the other explicitly blanks rather than silently omits —
+    an omitted key reads as `None` in a column and renders as "None".
     """
-    return {"rate": rate, "detail": detail, _COLLAPSED: collapsed, _SUBROW: subrow}
+    return {
+        "rate": row.rate,
+        "detail": row.detail,
+        "count": row.count,
+        _COLLAPSED: row.collapsed,
+        _SUBROW: row.subrow,
+    }
 
 
 #: The mark a collapsed row shows where a running one shows a bar, and its
@@ -147,7 +159,7 @@ def _row_fields(
 #:
 #: Kept beside `_RowBarColumn` rather than in `rich_renderer.py`: `_COLLAPSED_BAR`
 #: is that column's default `collapsed_mark`, so the two live together the way
-#: `_row_fields`'s field constants do. `rich_renderer.py` imports both back to
+#: `_plan_fields`'s field constants do. `rich_renderer.py` imports both back to
 #: pick between them by encoding — see its `__init__`.
 _COLLAPSED_BAR = "▪"
 _COLLAPSED_BAR_ASCII = "#"
@@ -200,6 +212,11 @@ class _RowTextColumn(ProgressColumn):
         # As `TextColumn` does, and for the same reason: a label is a message
         # template and a wrapped one would push every row below it down the
         # screen.
+        #
+        # No maximum, so rich measures every cell at its full width and
+        # `BarColumn` — the only flexible one — absorbs the whole cost. A
+        # 56-character label leaves zero bar cells at 80 columns.
+        # lumberjack: see issue #99
         super().__init__(table_column=Column(no_wrap=True))
 
     @override

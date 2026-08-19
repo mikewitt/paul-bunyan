@@ -154,6 +154,10 @@ class TaskHandle:
         # `__enter__` rejects rather than serializes.
         self._lock = threading.Lock()
         self._current = 0
+        # Unvalidated: `total` is annotated `int | None` and nothing
+        # enforces it, so `inf` reaches the display as a determinate
+        # bar stuck at 0% forever.
+        # lumberjack: see issue #98
         self._total = total
         self._ended = False
         # Whether the `start` row was actually written — see `_emit()`, which

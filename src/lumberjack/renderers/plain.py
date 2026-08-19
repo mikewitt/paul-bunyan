@@ -38,6 +38,10 @@ def _isoformat(created: float) -> str:
     resolve. Untested, deliberately: reproducing it needs a fold in the
     *host's* zone, and the seam to inject one would exist only for the test.
     """
+    # A `created` outside the platform's `time_t` range raises here
+    # rather than degrading, which loses the whole line and not just
+    # its timestamp.
+    # lumberjack: see issue #97
     return (
         datetime.datetime.fromtimestamp(created, tz=datetime.UTC)
         .astimezone()

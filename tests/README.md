@@ -125,7 +125,34 @@ check reports zero and proves nothing. That is not hypothetical; it reported
 "all checks passed" over 31 real findings while they were being counted.
 
 Currently marked: `test_store`, `test_handler`, `test_detect`,
-`test_render_plain`, `test_otel`, `test_tracking`.
+`test_render_plain`, `test_otel`, `test_tracking`, `test_plan`,
+`test_recording_renderer`.
+
+### The display, in three layers
+
+Display coverage is split across three files and the split is load-bearing —
+each catches what the others structurally cannot:
+
+| file | claim | needs `rich` |
+|---|---|---|
+| `test_plan.py` | the decision is right | no |
+| `test_display_parity.py` | rich holds exactly what was decided | yes |
+| `test_render_progress.py`, `test_render_tasks.py` | rich *draws* it | yes |
+
+Parity cannot catch a wrong decision, because the painter faithfully applies
+whatever it is handed: filling a determinate row from the run count instead of
+the cycle position passes parity, and passed all 606 tests before the split.
+And no frame-text assertion can catch a lost total withdrawal, because
+`(completed=10, total=None)` and `(completed=10, total=5)` render byte-identically
+once rich clamps the second.
+
+`tests/recording_renderer.py` is a `Renderer` that keeps frames instead of
+drawing them, for tests that want the display's answer as a number. **It
+reimplements nothing** — same models, same `plan_frame()` — and
+`test_it_records_what_the_rich_renderer_paints` drives it and the real renderer
+over one store and compares, so a recorder that grew its own opinion fails.
+Nothing may move out of the rich-gated files onto it: six things are rich's
+alone, and `src/lumberjack/renderers/plan.py`'s docstring names them.
 
 **`test_schema.py` is a deliberate omission.** Its
 `test_insert_columns_and_created_table_agree` reads the real table through

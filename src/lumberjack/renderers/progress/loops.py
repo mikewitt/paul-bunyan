@@ -125,10 +125,42 @@ class LoopRow:
 
     @property
     def rate(self) -> float | None:
-        """Iterations per second, or None while the period is unknown."""
+        """Iterations per second, or None while the period is not a usable number.
+
+        "Usable" is doing real work here, and the guard is on the *result*
+        rather than only on the period. `period <= 0` alone lets three
+        unusable values through, all of which reach a display column:
+
+        | `period` | `rate` was | what it did |
+        |---|---|---|
+        | `inf` | `0.0` | `1 / rate` raised `ZeroDivisionError` |
+        | `nan` | `nan` | rendered the string `"nans each"` |
+        | `1e-320` | `inf` | overflowed the other way |
+
+        The first is the one that matters, because `FlushPump` wraps the
+        redraw in `contextlib.suppress(Exception)` — so a raise inside a
+        frame freezes the live display silently and forever rather than
+        reporting anything. The guard rejects all three, `nan` included,
+        since every comparison against `nan` is False.
+
+        **It does not bound magnitude, and must not be read as doing so.** A
+        `period` of 1e308 gives `rate=1e-308` — positive, finite, and past
+        every check here. That is a real number honestly reported; what it
+        used to do was render as 419 characters and drag the display
+        sideways, which is a *width* problem and belongs to the formatter.
+        `plan.MAX_SECONDS_WIDTH` is where it is solved.
+
+        None is the honest answer for all of them: a period nothing can be
+        computed from is a period that has not been measured, which is what
+        None already means here. Returning it keeps this property's contract
+        true — None, or a positive finite float — so consumers need no guard
+        of their own, which is why the fix is here and not at the two
+        formatters that happened to divide.
+        """
         if self.period is None or self.period <= 0:
             return None
-        return 1.0 / self.period
+        rate = 1.0 / self.period
+        return rate if rate > 0 and rate != float("inf") else None
 
     @property
     def is_determinate(self) -> bool:
@@ -548,6 +580,10 @@ class LoopRowModel:
         `foo.py bar()`. The absent number is the honest part — the row covers
         several lines and nothing here knows which one the `for` is on.
         """
+        # Only the `describe_template()` branch below is bounded by
+        # `MAX_LABEL`; the other three return an unbounded string, and a
+        # long one starves the bar it shares a line with.
+        # lumberjack: see issue #99
         cached = self._labels.get(key)
         if cached is not None and cached[0] == len(members):
             return cached[1]

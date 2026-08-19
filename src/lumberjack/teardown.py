@@ -103,6 +103,7 @@ def run() -> None:
     _stop_live_display()
     _report_dropped()
     _report_unwritten()
+    _report_display()
     _report_suppressed_bars()
     _dump_diagnostics()
 
@@ -154,6 +155,38 @@ def _report_unwritten() -> None:
             f"lumberjack: {_unwritten} record(s) never reached the store — "
             "the final write failed. The store was unwritable at exit; the "
             "records are lost.",
+            file=sys.stderr,
+        )
+
+
+def _report_display() -> None:
+    """Say what the display concluded, for a run nobody was watching.
+
+    A live bar is gone the moment the terminal scrolls, and a run in CI never
+    had one — so the last frame's own account of itself is the only durable
+    answer to "did lumberjack see my loops". Read by duck-typing, like
+    `write_through` below: only the live-bar renderer plans frames, and a
+    renderer-specific method does not earn a field on `Session`.
+
+    **Two numbers, because they answer different questions.** `sources` is
+    call sites, which is what the store would corroborate; `loops` is what a
+    reader saw. They disagree by design — four log lines narrating one loop
+    are four sources and one row — and reporting only one of them is how the
+    display's unit and its identity unit got conflated in the first place.
+
+    Silent when nothing repeated, which is the common case for a short script
+    and not worth a line.
+    """
+    if _session is None:
+        return
+    with contextlib.suppress(Exception):
+        counts = _session.renderer.counts()  # type: ignore[attr-defined]
+        if not counts.loops:
+            return
+        print(
+            f"lumberjack: {counts.loops} loop(s) inferred from "
+            f"{counts.sources} repeating log source(s); "
+            f"{counts.tasks} named task bar(s).",
             file=sys.stderr,
         )
 
