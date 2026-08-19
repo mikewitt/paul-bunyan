@@ -54,6 +54,7 @@ import dataclasses
 import os
 from collections import Counter
 from collections.abc import Mapping
+from functools import singledispatch
 from types import MappingProxyType
 from typing import Final, Literal, NamedTuple
 
@@ -493,6 +494,7 @@ def _jumps_out(node: ast.AST, *, nested_loop: bool = False) -> bool:
     )
 
 
+@singledispatch
 def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     """The context a node's children are visited with.
 
@@ -512,63 +514,78 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     claimed the wrong `func_name` and, worse, an empty loop chain for
     something that really does repeat (issue #82).
     """
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-        # A function boundary resets the loop chain: a closure defined inside
-        # a loop body is not called once per iteration, and `funcName` on its
-        # records reads the inner name, not the enclosing one.
-        return _Ctx(
-            func_name=node.name,
-            func_lineno=node.lineno,
-            params=_params(node),
-            loops=(),
-            conditional=False,
-        )
-    if isinstance(node, ast.ClassDef):
-        # A class body is the one scope that is not a deferral: it executes
-        # immediately, in place, once per pass of whatever encloses it. So it
-        # takes the new name — CPython reports `funcName='Row'` for a call in
-        # `class Row:`, and static agreeing is what lets the site through the
-        # consumer's name check — and *keeps* the loop chain and the branch
-        # flag, which describe when the statement runs rather than what it is.
-        return ctx._replace(
-            func_name=node.name,
-            func_lineno=node.lineno,
-            # No parameters, and a call in a class body is not a wrapper
-            # forwarding anything.
-            params=frozenset(),
-        )
-    if isinstance(node, ast.Lambda | ast.GeneratorExp):
-        # Both compile to a code object of their own, and stdlib's
-        # `findCaller` reads its name — so a call inside a generator
-        # expression reports `funcName='<genexpr>'`, measured on 3.13.
-        # Saying `run` here made static *contradict* the records, which is
-        # worse than saying nothing: consumers use static as a veto.
-        #
-        # A generator expression is a loop and is deliberately not modelled
-        # as one. It would need a `Loop` of its own before its body could be
-        # ordered, and when it runs is not knowable from the source — it may
-        # be consumed here, elsewhere, or never. An empty loop chain claims
-        # less; the enclosing chain would have claimed something untrue.
-        return _Ctx(
-            func_name="<lambda>" if isinstance(node, ast.Lambda) else "<genexpr>",
-            func_lineno=node.lineno,
-            # A generator expression takes no parameters, so nothing in one
-            # can be a wrapper forwarding a caller's message.
-            params=_params(node) if isinstance(node, ast.Lambda) else frozenset(),
-            loops=(),
-            conditional=False,
-        )
-    if isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
-        return ctx._replace(conditional=True)
-    if isinstance(node, ast.With | ast.AsyncWith):
-        # Whether the manager swallows is unknowable from the node type —
-        # `contextlib.suppress(E)` and `open(path)` are the same `With` — and
-        # the two differ in exactly the way this flag is about. Name-matching
-        # the known suppressors would catch the common case and miss a
-        # hand-rolled one, which is a *fail-open* miss and the class of defect
-        # this whole flag exists to close. So every `with` body is conditional.
-        return ctx._replace(conditional=True)
     return ctx
+
+
+@_child_ctx.register
+def _(node: ast.FunctionDef | ast.AsyncFunctionDef, ctx: _Ctx) -> _Ctx:
+    # A function boundary resets the loop chain: a closure defined inside
+    # a loop body is not called once per iteration, and `funcName` on its
+    # records reads the inner name, not the enclosing one.
+    return _Ctx(
+        func_name=node.name,
+        func_lineno=node.lineno,
+        params=_params(node),
+        loops=(),
+        conditional=False,
+    )
+
+
+@_child_ctx.register
+def _(node: ast.ClassDef, ctx: _Ctx) -> _Ctx:
+    # A class body is the one scope that is not a deferral: it executes
+    # immediately, in place, once per pass of whatever encloses it. So it
+    # takes the new name — CPython reports `funcName='Row'` for a call in
+    # `class Row:`, and static agreeing is what lets the site through the
+    # consumer's name check — and *keeps* the loop chain and the branch
+    # flag, which describe when the statement runs rather than what it is.
+    return ctx._replace(
+        func_name=node.name,
+        func_lineno=node.lineno,
+        # No parameters, and a call in a class body is not a wrapper
+        # forwarding anything.
+        params=frozenset(),
+    )
+
+
+@_child_ctx.register
+def _(node: ast.Lambda | ast.GeneratorExp, ctx: _Ctx) -> _Ctx:
+    # Both compile to a code object of their own, and stdlib's
+    # `findCaller` reads its name — so a call inside a generator
+    # expression reports `funcName='<genexpr>'`, measured on 3.13.
+    # Saying `run` here made static *contradict* the records, which is
+    # worse than saying nothing: consumers use static as a veto.
+    #
+    # A generator expression is a loop and is deliberately not modelled
+    # as one. It would need a `Loop` of its own before its body could be
+    # ordered, and when it runs is not knowable from the source — it may
+    # be consumed here, elsewhere, or never. An empty loop chain claims
+    # less; the enclosing chain would have claimed something untrue.
+    return _Ctx(
+        func_name="<lambda>" if isinstance(node, ast.Lambda) else "<genexpr>",
+        func_lineno=node.lineno,
+        # A generator expression takes no parameters, so nothing in one
+        # can be a wrapper forwarding a caller's message.
+        params=_params(node) if isinstance(node, ast.Lambda) else frozenset(),
+        loops=(),
+        conditional=False,
+    )
+
+
+@_child_ctx.register
+def _(node: ast.If | ast.Try | ast.TryStar | ast.Match, ctx: _Ctx) -> _Ctx:
+    return ctx._replace(conditional=True)
+
+
+@_child_ctx.register
+def _(node: ast.With | ast.AsyncWith, ctx: _Ctx) -> _Ctx:
+    # Whether the manager swallows is unknowable from the node type —
+    # `contextlib.suppress(E)` and `open(path)` are the same `With` — and
+    # the two differ in exactly the way this flag is about. Name-matching
+    # the known suppressors would catch the common case and miss a
+    # hand-rolled one, which is a *fail-open* miss and the class of defect
+    # this whole flag exists to close. So every `with` body is conditional.
+    return ctx._replace(conditional=True)
 
 
 class _Walker:
