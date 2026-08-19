@@ -46,6 +46,8 @@ import dataclasses
 import enum
 from typing import TYPE_CHECKING
 
+from lumberjack.schema import SourceKey
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -55,7 +57,6 @@ if TYPE_CHECKING:
         LoopRow,
         TaskBarState,
     )
-    from lumberjack.schema import SourceKey
 
 
 class RowKind(enum.Enum):
@@ -74,7 +75,7 @@ class RowKind(enum.Enum):
 #: What a renderer files its handle under. A loop row and the position row
 #: beneath it share a `SourceKey` — the position row has no identity of its
 #: own — so the kind is what separates them.
-RowKey = tuple[RowKind, "SourceKey | int"]
+RowKey = tuple[RowKind, SourceKey | int]
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -132,7 +133,11 @@ class FrameCounts:
     separate fields and there is deliberately no attribute named `bars`.
     """
 
-    #: Source locations folded into the drawn rows.
+    #: Every source location the model has folded into a loop row, **including
+    #: rows the ceiling kept off screen**. A ceiling is a display bound, and
+    #: this is not a display number: it says what was captured, which is the
+    #: question the store answers and the one the exit report asks. Scoping it
+    #: to the drawn rows made it quietly disagree with the sentence above.
     sources: int
     #: Inferred loops the model produced, before any ceiling.
     loops: int
@@ -438,7 +443,9 @@ def plan_frame(
             # Every qualified source is appended to exactly one row's members,
             # so summing them is the identity layer without re-asking `bars()`
             # — which would recompute idleness against a second clock reading.
-            sources=sum(len(row.members) for row in drawn),
+            # Over `loops` and not `drawn`: the ceiling bounds what is drawn,
+            # never what was captured.
+            sources=sum(len(row.members) for row in loops),
             loops=len(loops),
             drawn_loops=len(drawn),
             suppressed_loops=len(loops) - len(drawn),

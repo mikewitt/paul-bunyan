@@ -308,12 +308,19 @@ def test_the_ceiling_bounds_what_is_drawn_and_counts_what_it_hid():
     assert (counts.loops, counts.drawn_loops, counts.suppressed_loops) == (5, 2, 3)
 
 
-def test_the_ceiling_counts_only_the_sources_it_drew():
-    """`sources` describes the rows on screen, so it falls with them — the
-    unbounded identity-layer number is `RichProgressRenderer.bars()`, which is
-    what the exit summary reads."""
+def test_the_ceiling_does_not_change_what_was_captured():
+    """A ceiling is a *display* bound, and `sources` is not a display number.
+
+    It said 4 here — the two rows drawn — which contradicted its own
+    docstring: the identity layer is what the store would corroborate, and
+    the store does not stop counting because a terminal ran out of rows.
+    `teardown._report_display()` reads it, so the understatement reached the
+    one place that survives the terminal scrolling.
+    """
     rows = [loop(key=key(i), members=(key(i), key(i + 10))) for i in range(5)]
-    assert frame(rows, max_bars=2).counts.sources == 4
+    counts = frame(rows, max_bars=2).counts
+    assert counts.sources == 10
+    assert counts.drawn_loops == 2, "the ceiling still bounds what is drawn"
 
 
 def test_no_ceiling_suppresses_nothing():
