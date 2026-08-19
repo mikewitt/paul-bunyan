@@ -59,6 +59,19 @@ if TYPE_CHECKING:
     )
 
 
+#: How wide the heartbeat's count-and-rate cell is padded to, so the message
+#: beside it holds one column instead of shuffling sideways every time the
+#: count gains a digit. A floor rather than a ceiling: a session busy enough
+#: to outgrow it pushes the message right rather than losing any of it.
+#:
+#: A constant and not a `plan_frame()` argument, unlike `frames` and
+#: `separator`. Those two are what the *terminal* can encode and only a
+#: renderer holding a console can resolve them. This is a layout decision,
+#: which is the plan's own business — and passing it in meant two callers
+#: naming the same number, which is a drift waiting to happen.
+HEARTBEAT_SUMMARY_WIDTH = 26
+
+
 class RowKind(enum.Enum):
     """Which population a planned row belongs to.
 
@@ -232,7 +245,7 @@ def format_position_detail(position: CyclePosition) -> str:
     return f"{position.current} of {position.total}"
 
 
-def format_heartbeat_summary(state: HeartbeatState, separator: str, width: int) -> str:
+def format_heartbeat_summary(state: HeartbeatState, separator: str) -> str:
     """The heartbeat's count-and-rate cell, padded to hold its column.
 
     The rate carries one decimal where a source bar's carries none. A loop at
@@ -240,8 +253,9 @@ def format_heartbeat_summary(state: HeartbeatState, separator: str, width: int) 
     rounding that to "2/s" throws away the difference between a program
     creeping along and one that has nearly stopped.
 
-    `width` is a floor rather than a ceiling — a session busy enough to
-    outgrow it pushes the message right rather than losing any of it.
+    Padded to `HEARTBEAT_SUMMARY_WIDTH`, which is a floor rather than a
+    ceiling — a session busy enough to outgrow it pushes the message right
+    rather than losing any of it.
     """
     plural = "" if state.events == 1 else "s"
     summary = f"{state.events:,} event{plural}"
@@ -251,7 +265,7 @@ def format_heartbeat_summary(state: HeartbeatState, separator: str, width: int) 
             if state.rate >= 1
             else f" {separator} {1 / state.rate:,.1f}s each"
         )
-    return f"{summary:<{width}}"
+    return f"{summary:<{HEARTBEAT_SUMMARY_WIDTH}}"
 
 
 def _loop_row(row: LoopRow, separator: str) -> PlanRow:
@@ -397,7 +411,6 @@ def plan_frame(
     heartbeat: HeartbeatState,
     frames: str,
     separator: str,
-    summary_width: int,
     max_bars: int | None = None,
 ) -> Frame:
     """Decide everything one frame draws, from what `poll()` already returned.
@@ -429,7 +442,7 @@ def plan_frame(
     line = (
         HeartbeatLine(
             glyph=heartbeat.glyph(frames),
-            summary=format_heartbeat_summary(heartbeat, separator, summary_width),
+            summary=format_heartbeat_summary(heartbeat, separator),
             message=heartbeat.message or None,
         )
         if heartbeat.events

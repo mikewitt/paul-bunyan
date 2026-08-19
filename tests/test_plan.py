@@ -28,6 +28,7 @@ from __future__ import annotations
 import pytest
 
 from lumberjack.renderers.plan import (
+    HEARTBEAT_SUMMARY_WIDTH,
     Frame,
     RowKind,
     plan_frame,
@@ -45,7 +46,7 @@ from lumberjack.schema import SourceKey
 pytestmark = pytest.mark.tier2
 
 SEP = "·"
-WIDTH = 26
+WIDTH = HEARTBEAT_SUMMARY_WIDTH
 
 
 def key(lineno: int = 1) -> SourceKey:
@@ -98,7 +99,6 @@ def frame(
         heartbeat=heartbeat if heartbeat is not None else HeartbeatState(),
         frames="⠋⠙",
         separator=SEP,
-        summary_width=WIDTH,
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -358,3 +358,46 @@ def test_a_row_can_be_found_by_the_name_a_reader_would_use():
     assert found is not None
     assert found.depth == 2
     assert planned.of("nothing like this") is None
+
+
+# --- a period nothing can be computed from ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("period", "why"),
+    [
+        (float("inf"), "1/inf is 0.0, and 1/0.0 raised ZeroDivisionError"),
+        (float("nan"), "1/nan is nan, which rendered as the string 'nans each'"),
+        (1e-320, "a subnormal period whose reciprocal overflows to inf"),
+    ],
+)
+def test_an_unusable_period_reports_no_rate_rather_than_crashing(period, why):
+    """`rate` promises None or a positive finite float, and `period <= 0` alone
+    did not deliver that.
+
+    The crash is the one that matters: `FlushPump` wraps the redraw in
+    `contextlib.suppress(Exception)`, so a raise inside a frame freezes the
+    live display **silently and forever** rather than reporting anything. A
+    display that stops updating is indistinguishable from a program that
+    stopped working, which is the one question the display exists to answer.
+
+    Guarded on the result rather than at the two formatters that happened to
+    divide — the contract belongs to `rate`, and fixing it there means no
+    consumer needs a guard of its own.
+    """
+    row = loop(period=period)
+    assert row.rate is None, why
+    assert frame([row]).rows[0].rate == ""
+
+    state = HeartbeatState(events=3, period=period)
+    assert state.rate is None, why
+    line = frame(heartbeat=state).heartbeat
+    assert line is not None
+    assert line.summary.strip() == "3 events"
+
+
+def test_a_real_period_still_reports_a_rate():
+    """The guard must not swallow the ordinary case, which is the risk in
+    tightening one."""
+    assert frame([loop(period=0.5)]).rows[0].rate == "2/s"
+    assert frame([loop(period=2.0)]).rows[0].rate == "2.0s each"

@@ -125,10 +125,35 @@ class LoopRow:
 
     @property
     def rate(self) -> float | None:
-        """Iterations per second, or None while the period is unknown."""
+        """Iterations per second, or None while the period is not a usable number.
+
+        "Usable" is doing real work here, and the guard is on the *result*
+        rather than only on the period. `period <= 0` alone lets three
+        unusable values through, all of which reach a display column:
+
+        | `period` | `rate` was | what it did |
+        |---|---|---|
+        | `inf` | `0.0` | `1 / rate` raised `ZeroDivisionError` |
+        | `nan` | `nan` | rendered the string `"nans each"` |
+        | `1e308` | `1e-308` | rendered a 400-character number |
+
+        The first is the one that matters, because `FlushPump` wraps the
+        redraw in `contextlib.suppress(Exception)` — so a raise inside a
+        frame freezes the live display silently and forever rather than
+        reporting anything. `rate > 0` rejects all three, `nan` included,
+        since every comparison against `nan` is False.
+
+        None is the honest answer for all of them: a period nothing can be
+        computed from is a period that has not been measured, which is what
+        None already means here. Returning it keeps this property's contract
+        true — None, or a positive finite float — so consumers need no guard
+        of their own, which is why the fix is here and not at the two
+        formatters that happened to divide.
+        """
         if self.period is None or self.period <= 0:
             return None
-        return 1.0 / self.period
+        rate = 1.0 / self.period
+        return rate if rate > 0 and rate != float("inf") else None
 
     @property
     def is_determinate(self) -> bool:

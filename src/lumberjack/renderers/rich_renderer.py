@@ -109,12 +109,6 @@ _LEVEL_STYLES = {
 _SEPARATOR = "·"
 _SEPARATOR_ASCII = "-"
 
-#: How wide the heartbeat's count-and-rate field is padded to, so the message
-#: beside it holds one column instead of shuffling sideways every time the
-#: count gains a digit. A floor rather than a ceiling: a session busy enough
-#: to outgrow it pushes the message right rather than losing any of it.
-_HEARTBEAT_SUMMARY_WIDTH = 26
-
 
 def _format_heartbeat(line: HeartbeatLine) -> Text:
     """The session row: is anything arriving, how fast, and what was it.
@@ -424,7 +418,6 @@ class RichProgressRenderer:
             heartbeat=self._model.heartbeat,
             frames=self._frames,
             separator=self._separator,
-            summary_width=_HEARTBEAT_SUMMARY_WIDTH,
             max_bars=self._max_bars,
         )
         self._frame = frame

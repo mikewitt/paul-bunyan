@@ -124,7 +124,6 @@ class RecordingRenderer:
                 heartbeat=self._model.heartbeat,
                 frames=self._glyphs,
                 separator=self._separator,
-                summary_width=26,
                 max_bars=self._max_bars,
             )
         )
