@@ -60,6 +60,10 @@ def test_a_slow_loop_earns_a_position_row(slow_loop_run):
     so a second row counts position within the current iteration. The body has
     five stages and a stable order, so the ordinal is real, not estimated."""
     assert slow_loop_run.returncode == 0, slow_loop_run.stderr
+    # Both halves. The specified shape is "a loop row *plus* a second row",
+    # and only the second was ever asserted — so a change that stopped
+    # drawing the loop row and kept the position row passed.
+    assert _loop_rows(slow_loop_run), _frame(slow_loop_run)
     positions = [line for line in _frame(slow_loop_run) if re.search(r"\d+ of 5", line)]
     assert positions, _frame(slow_loop_run)
 
@@ -118,3 +122,52 @@ def test_two_threads_get_two_rows(workers_run):
     assert len(rows) == 2, rows
     assert any("fetched row" in line for line in rows), rows
     assert any("wrote batch" in line for line in rows), rows
+
+
+@pytest.fixture(scope="module")
+def phases_run() -> subprocess.CompletedProcess[bytes]:
+    return run_script(_SCRIPTS, "phases_pulse.py", child_env, env={"COLUMNS": "200"})
+
+
+@needs_rich
+def test_a_false_parent_claims_no_total_it_only_appears_to_have(phases_run):
+    """The one relationship logs cannot express, asserted from outside.
+
+    `log.info("stage %s: starting", …)` fires once per stage, so it is a slow
+    repeating source, and each stage's loop is a fast one. Period ordering
+    reads that as containment and offers the ratio as the inner loop's total
+    — a number for a relationship that does not exist, since the announcement
+    *precedes* each stage rather than enclosing it. Nothing in the event
+    stream distinguishes the two.
+
+    Static structure supplies a veto rather than an answer: the AST can see
+    the child loop is top-level in another function, which is enough to
+    withhold the number without being able to say what the right one is. So
+    every row here pulses, and `n/m` appears nowhere.
+
+    Asserting the *absence* of something is only worth anything if the thing
+    could have been there, which is why the test below runs beside this one.
+    Measured: disabling the veto puts `8/40` on the `joined row …` row — a
+    total of 40 for a loop that ran 40 times, drawn 20% full.
+    """
+    assert phases_run.returncode == 0, phases_run.stderr
+    rows = _loop_rows(phases_run)
+    assert len(rows) >= 3, rows
+    assert [line for line in rows if re.search(r"\b\d+/\d+\b", line)] == [], rows
+
+
+@needs_rich
+def test_the_false_parent_still_indents_what_follows_it(phases_run):
+    """The veto refuses the claim, not the relationship — and this is what
+    stops the test above passing for the wrong reason.
+
+    The stage function really is called from inside that loop; what static
+    cannot see is a *call graph*, so it says nothing about cross-function
+    containment rather than denying it. If containment were never inferred
+    at all, no total would appear either, and the absence asserted above
+    would prove nothing. The indent is the evidence that ordering did make
+    its claim and only the number was withheld.
+    """
+    assert [line for line in _loop_rows(phases_run) if line.startswith("  ")], _frame(
+        phases_run
+    )

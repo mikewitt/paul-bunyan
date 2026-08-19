@@ -9,7 +9,7 @@ does not.
 | Tier | Where | Claim | Checked by |
 |---|---|---|---|
 | **1 — acceptance** | `tests/tier1/` | This is what the package is *for*, and how a user gets it | `tests/tier1/test_tier1_rules.py` |
-| **2 — contract** | `pytestmark = pytest.mark.tier2`, files stay put | A component's public API behaves as specified | marker + SLF001-clean |
+| **2 — contract** | `pytestmark = pytest.mark.tier2`, files stay put | A component's public API behaves as specified | marker + no private access, by attribute or import |
 | **3 — internals** | everything else, unmarked | Whatever it says | nothing |
 
 **Unmarked is tier 3.** Only claims are validated, so drift runs downward: a
@@ -107,6 +107,17 @@ consecutive real polls. Its assertions are loose about numbers and strict
 about shape — the inferred total is asserted as a band around 20, not as 20,
 because Principle 10 licenses the display to be imprecise and a test
 demanding precision would fail for being right.
+
+`phases_pulse.py` is the odd one, and the reason it is here rather than in
+the fast batch: it asserts an **absence**. The once-per-stage announcement
+line is a slow repeating source, so period ordering reads it as enclosing
+each stage's loop and offers the ratio as a total for a relationship that
+does not exist. Static structure vetoes the number without being able to
+supply the right one, so every row pulses. An absence is only worth
+asserting if the thing could have been present, which is why the indent is
+asserted beside it: the indent staying is the evidence that ordering *did*
+make its claim and only the number was withheld. Measured with the veto
+disabled: `8/40` appears on a loop that ran 40 times.
 
 That job runs on one ubuntu leg rather than the matrix. Measured: a windows
 leg spends 65s provisioning before running anything and bills at double,
