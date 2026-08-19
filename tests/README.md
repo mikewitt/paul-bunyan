@@ -117,12 +117,48 @@ Marked file-wide with `pytestmark = pytest.mark.tier2`, never per-function: the
 private-access check is per-file, so a half-marked file would be uncheckable.
 If half a file qualifies, the file is tier 3 until someone splits it.
 
-`test_tier2_rules.py` runs `ruff --select SLF001 --isolated` over every marked
-file. **`--isolated` is load-bearing**: `pyproject.toml` exempts SLF001 for
-`tests/**` — rightly, since tier 3 unit-tests private functions on purpose —
-and `per-file-ignores` applies even to a CLI `--select`, so without it the
-check reports zero and proves nothing. That is not hypothetical; it reported
-"all checks passed" over 31 real findings while they were being counted.
+`test_tier2_rules.py` runs `ruff --select SLF001,PLC2701 --isolated --preview`
+over every marked file. **`--isolated` is load-bearing**: `pyproject.toml`
+exempts SLF001 for `tests/**` — rightly, since tier 3 unit-tests private
+functions on purpose — and `per-file-ignores` applies even to a CLI
+`--select`, so without it the check reports zero and proves nothing. That is
+not hypothetical; it reported "all checks passed" over 31 real findings while
+they were being counted.
+
+**Both rules, because either alone leaves the other syntax open.** `SLF001` is
+private *attribute* access — `store._conn` — and says nothing at all about
+`from lumberjack.store import _COLUMNS`, which is the same act by a different
+route. `PLC2701` is the import half, and is preview-gated in ruff, which is
+what `--preview` is for; an explicit `--select` still bounds the run to those
+two. This was found by audit rather than by the gate: `test_store.py` was
+marked tier 2 while importing `store._COLUMNS`, and the check reported clean.
+
+That also fixes the rule that was *actually* being applied. `test_schema.py`
+was held out of the tier for the identical import plus one attribute access,
+so the only thing distinguishing the two files was which syntax the second
+access happened to use — not a rule anybody chose. Under both rules the
+distinction becomes the honest one: `test_schema.py` stays tier 3 because
+schema *parity* is its subject — the dataclass fields against the column
+tuple against the real table — and a test whose subject is an internal
+cannot be a contract test. `test_store.py` is tier 2 because that was one
+line in a conformance suite, and it now spells the legacy column list out
+instead, which is a better fixture as well as a compliant one: an old
+database holds a fixed historical schema, so deriving it from today's tuple
+would have let the two sets converge and quietly stop exercising the guard.
+
+**The tier's guarantee is bounded, and the bound is checked.** `conftest.py`
+carries no mark and is not a test, but its autouse fixtures run before and
+after every tier-2 test, so a private touch there happens on a marked file's
+behalf where the per-file check cannot see it. Exactly one exists —
+`_reset_lumberjack_state` clearing the ambient task contextvar, which has no
+public equivalent and is load-bearing, since `_ambient_parent()` only walks
+past handles that have *ended* and one entered but never exited has not.
+`test_the_shared_fixtures_reach_into_exactly_one_private_thing` pins that at
+one. A second has to be argued rather than absorbed.
+
+The mark is collected with `rglob` and from both assignment forms, so a
+`pytestmark` under `tests/tier1/`, or written as `pytestmark: list = [...]`,
+is checked rather than silently ignored.
 
 Currently marked: `test_store`, `test_handler`, `test_detect`,
 `test_render_plain`, `test_otel`, `test_tracking`, `test_plan`,
