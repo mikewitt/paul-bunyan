@@ -146,11 +146,12 @@ def _where(loop: static.Loop) -> str:
 
 
 def _report_logs_around(
-    loop: static.Loop, structure: static.FileStructure, around: static.CallSite
+    loop: static.Loop, pathname: str, around: static.CallSite
 ) -> Finding:
+    """The author announced the loop and then went quiet."""
     return Finding(
         rule="loop-logs-around",
-        pathname=structure.pathname,
+        pathname=pathname,
         lineno=loop.lineno,
         what=(
             f"{_subject(loop.func_name)} logs at line {around.lineno} "
@@ -172,11 +173,12 @@ def _report_logs_around(
 
 
 def _report_nested_logs(
-    loop: static.Loop, structure: static.FileStructure, nested: static.Loop
+    loop: static.Loop, pathname: str, nested: static.Loop
 ) -> Finding:
+    """A silent loop that encloses another loop that does log."""
     return Finding(
         rule="loop-not-logged",
-        pathname=structure.pathname,
+        pathname=pathname,
         lineno=loop.lineno,
         what=(
             f"{_where(loop).capitalize()} has no log line in its body, but "
@@ -195,11 +197,12 @@ def _report_nested_logs(
 
 
 def _report_sibling_logs(
-    loop: static.Loop, structure: static.FileStructure, other: static.CallSite
+    loop: static.Loop, pathname: str, other: static.CallSite
 ) -> Finding:
+    """A silent loop whose function contains another loop that logs."""
     return Finding(
         rule="loop-not-logged",
-        pathname=structure.pathname,
+        pathname=pathname,
         lineno=loop.lineno,
         what=(
             f"{_where(loop).capitalize()} has no log line in its body. "
@@ -215,18 +218,18 @@ def _report_sibling_logs(
     )
 
 
-def _report_all_loops(loop: static.Loop, structure: static.FileStructure) -> Finding:
+def _report_all_loops(loop: static.Loop, pathname: str) -> Finding:
+    """A silent loop in a completely silent scope. Reported conditionally."""
     return Finding(
         rule="loop-not-logged",
-        pathname=structure.pathname,
+        pathname=pathname,
         lineno=loop.lineno,
         what=(
             f"{_where(loop).capitalize()} has no log line in its body, so "
             f"the display cannot see it at all. Nothing else in "
             f"{_subject(loop.func_name)} logs either, so the source gives no "
             f"sign of whether this is work worth watching or plumbing — "
-            f"which "
-            f"is why it takes --all-loops to say so."
+            "which is why it takes --all-loops to say so."
         ),
         fix=(
             "if an iteration of this loop is slow enough that you would "
@@ -267,24 +270,24 @@ def _silent_loops(
             # The author announced the loop and then went quiet. This is the
             # most specific diagnosis available, so it wins over the general
             # one below even when a nested loop also logs.
-            yield _report_logs_around(loop, structure, around[0])
+            yield _report_logs_around(loop, structure.pathname, around[0])
             continue
 
         nested = _logging_descendant(loop, structure)
         if nested is not None:
-            yield _report_nested_logs(loop, structure, nested)
+            yield _report_nested_logs(loop, structure.pathname, nested)
             continue
 
         if any(site.loop_chain for site in scope.sites):
             other = next(site for site in scope.sites if site.loop_chain)
-            yield _report_sibling_logs(loop, structure, other)
+            yield _report_sibling_logs(loop, structure.pathname, other)
             continue
 
         if all_loops:
             # No narration anywhere in the scope, so nothing in the source
             # separates this from plumbing. The observation still stands and
             # the advice is conditional on something only the author knows.
-            yield _report_all_loops(loop, structure)
+            yield _report_all_loops(loop, structure.pathname)
 
 
 def _slow_bodies(structure: static.FileStructure) -> Iterator[Finding]:
