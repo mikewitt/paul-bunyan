@@ -8,8 +8,8 @@
 #
 # Its own workflow rather than a job in `ci.yml`, because it needs the
 # `labeled`/`unlabeled` triggers and CI does not: applying the label has to
-# re-run *this* check, and would otherwise re-run the whole serial chain
-# every time anyone touched a label.
+# re-run *this* check, and would otherwise re-run the whole of CI every
+# time anyone touched a label.
 name: tier-1 guard
 
 on:
