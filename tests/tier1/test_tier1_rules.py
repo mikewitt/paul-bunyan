@@ -178,3 +178,6 @@ def test_a_parent_test_launches_through_the_shared_rig(path: Path) -> None:
             f"{path.name}:{node.lineno} launches a child process without "
             f"one of {sorted(_ENV_HELPERS)}"
         )
+
+
+# Throwaway edit: proving the tier-1 guard blocks. Revert before merging.

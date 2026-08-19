@@ -93,3 +93,6 @@ def set_current_session(session: Session | None) -> None:
     """Publish (or clear) the live session. Called by `init()`/`shutdown()`."""
     global _current
     _current = session
+
+
+# Throwaway edit: proving the tier-1 guard blocks. Revert before merging.
