@@ -100,3 +100,34 @@ def test_a_workflow_with_no_jobs_is_handled_rather_than_crashing(tmp_path) -> No
         path = tmp_path / "w.yml"
         path.write_text(text, encoding="utf-8")
         assert _jobs(path) == {}, repr(text)
+
+
+def test_the_only_pty_coverage_in_the_repository_cannot_be_deleted_quietly() -> None:
+    """Detection → rich is asserted nowhere in the suite.
+
+    Every tier-1 script either forces `output_mode` or, in
+    `piped_is_plain.py`'s case, proves detection picks *plain*. The rich
+    half needs a real terminal, so the only thing in the repository that
+    exercises it is `demo-gif.yml`, which drives `examples/demo.py` under a
+    pty and fails unless a frame actually drew a bar.
+
+    That signal rests on three separate things, none of which the suite
+    noticed: the workflow existing, `--require '━'` still being passed, and
+    `demo.py` still leaving `output_mode` unset so detection is what
+    chooses. Remove any one and the recording silently becomes a film of
+    the plain renderer — which has happened once already, when `rich` was
+    missing from the recorder's environment and a fallback gif shipped.
+
+    Not a substitute for closing the gap; a tripwire on the workaround.
+    `demo-gif.yml` is not a required check, so this cannot make it one.
+    """
+    demo_gif = _WORKFLOWS / "demo-gif.yml"
+    assert demo_gif.exists(), "the only pty coverage in the repository is gone"
+    assert "--require '━'" in demo_gif.read_text(encoding="utf-8")
+
+    demo = _WORKFLOWS.parent.parent / "examples" / "demo.py"
+    source = demo.read_text(encoding="utf-8")
+    assert "lumberjack.init()" in source, (
+        "demo.py must leave output_mode unset, or the recording stops "
+        "exercising detection and only exercises an override"
+    )

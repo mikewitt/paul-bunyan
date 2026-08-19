@@ -217,6 +217,44 @@ a private access, and the honest options are to split the file or to leave it
 tier 3. It is tier 3 until someone wants to split it — which is the rule
 working, not an exception to it.
 
+## Mutation testing, by hand and on purpose
+
+The tiers say which tests are *reviewed*. Mutation testing says whether a
+test would notice if the code were wrong, which is a different question and
+the only one that catches an assertion hollowed out before any of this
+existed. It has earned its place here repeatedly: two mutations passed the
+whole 606-test suite on trunk before `plan.py` was extracted, and four more
+were caught only because each fix in this area was checked this way.
+
+**The procedure, which is all of it:**
+
+1. Copy `src/` somewhere, or just edit in place and keep the diff small.
+2. Make one change that should break something — invert a comparison, drop
+   a guard, return a constant, rename a rendered string.
+3. Run the suite. If it stays green, the mutation found a gap: either the
+   behaviour is untested or a test asserts something weaker than its name.
+4. Restore. **`git checkout --` will take unstaged work with it** — commit
+   first, or copy the file aside. That has cost real work here more than
+   once.
+
+**Scope it to tier 2's deterministic contracts first.** Tier 1's slow shapes
+are driven by real elapsed time, so a surviving mutant there is as likely to
+be scheduling noise as a gap, and triaging it costs more than it returns.
+
+**It is not a CI gate and should not become one.** It takes hours, every
+surviving mutant needs a human to say whether it matters, and a flaky gate
+teaches the "edit the test until it passes" habit that tier 1 exists to
+prevent. Issue #85 reached the same conclusion for the same reasons.
+
+**No tool is wired up, and that is a live decision rather than an
+oversight.** `mutmut` 3.7 was tried against this repository and cannot
+import the package from the `mutants/` tree it builds, because of the `src/`
+layout — `cannot import name 'static' from 'lumberjack' (unknown location)`,
+and neither clearing `addopts` nor adding a `pythonpath` entry fixes it. So
+the choice is between adapting `mutmut`, trying `cosmic-ray`, or leaving the
+manual pass as the practice. The manual pass is what has actually found
+things so far.
+
 ## Tier 3
 
 Everything else. Private access is allowed and expected — `test_benchmark.py`
