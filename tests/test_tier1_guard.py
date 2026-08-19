@@ -18,6 +18,7 @@ tests read `tier1-guard.yml` for that, which is the same reasoning that put
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
@@ -153,3 +154,291 @@ def test_the_workflow_passes_labels_through_the_environment() -> None:
     run = text.split("run: |", 1)[1]
     assert "${{" not in run, "the run: block interpolates something"
     assert "scripts/tier1_guard.py" in run
+
+
+def test_the_job_name_is_the_one_the_ruleset_lists() -> None:
+    """Frozen, for the reason CLAUDE.md records for `bare install (no rich)`.
+
+    `name:` is the check name GitHub reports, and trunk's required-check
+    ruleset matches by that string. Renaming the job orphans the required
+    check: the ruleset waits forever for a context nothing will ever post,
+    and every merge blocks until someone edits repository settings. Nothing
+    in the tree noticed, so a rename passed the whole suite.
+    """
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    assert workflow["jobs"]["guard"]["name"] == "tier-1 guard"
+
+
+def test_the_workflow_runs_the_base_branch_copy_of_the_decider() -> None:
+    """Not the workspace copy, which is the pull request's own.
+
+    A `pull_request` event checks out `refs/pull/N/merge`, so every file in
+    the workspace is the proposed one. `scripts/` was not protected, so a
+    diff could edit `src/`, hollow a tier-1 assertion, and replace the
+    decider with one that exits 0 — and the required check went green.
+    """
+    run = _run_block()
+    assert 'git show "$BASE_SHA:scripts/tier1_guard.py"' in run
+    assert '| python "$RUNNER_TEMP/tier1_guard.py"' in run
+    assert "| python scripts/tier1_guard.py" not in run
+
+
+def test_the_diff_is_asked_for_in_the_two_forms_that_cannot_hide_a_path() -> None:
+    """`-z` and `--no-renames`, each closing a measured fail-open.
+
+    Without `-z`, git C-quotes a non-ASCII path and it stops starting with
+    `tests/`. Without `--no-renames`, a `git mv` out of `tests/tier1/` is
+    reported as its destination alone.
+    """
+    run = _run_block()
+    assert "git diff --name-only -z --no-renames" in run
+
+
+def _run_block() -> str:
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["guard"]["steps"]
+    return str(steps[-1]["run"])
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(  # noqa: S603  # nosec B603 B607
+        ["git", *args],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _scratch_repo(
+    root: Path,
+    changes: dict[str, str | None],
+    base_changes: dict[str, str | None] | None = None,
+) -> Path:
+    """A repo shaped like what `pull_request` checks out.
+
+    Base commit, a branch applying `changes`, then a merge commit — so HEAD
+    has the base tip as parent 1 and the branch as parent 2, exactly as
+    `refs/pull/N/merge` does. `None` as a value deletes the path, which is
+    how a rename's source side arrives.
+
+    `base_changes` land on the base branch *after* the pull request's own
+    `base.sha` was recorded, which is how a base branch moves while a pull
+    request is open — and the case the three-dot diff got wrong.
+    """
+    repo = root / "scratch"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "base")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    for path, body in (
+        ("src/mod.py", "VALUE = 1\n"),
+        ("tests/tier1/test_contract.py", "def test_it():\n    assert VALUE == 1\n"),
+        ("scripts/tier1_guard.py", _SCRIPT.read_text(encoding="utf-8")),
+    ):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base = subprocess.run(  # nosec B603 B607
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / "BASE_SHA").write_text(base, encoding="utf-8")
+
+    _git(repo, "checkout", "-q", "-b", "pr")
+    _write(repo, changes)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "pr")
+
+    _git(repo, "checkout", "-q", "base")
+    if base_changes:
+        _write(repo, base_changes)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "someone else")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return repo
+
+
+def _write(repo: Path, changes: dict[str, str | None]) -> None:
+    for path, body in changes.items():
+        target = repo / path
+        if body is None:
+            target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+
+
+def _drive_the_workflow(
+    repo: Path, tmp_path: Path, labels: str = "[]"
+) -> subprocess.CompletedProcess[str]:
+    """Run the workflow's own `run:` block, verbatim, against `repo`.
+
+    The environment is inherited rather than built from four keys. A bare
+    dict is not a tighter test, it is a different one: on Windows a process
+    spawned without `SYSTEMROOT` and friends fails before it reaches
+    anything this is trying to check, and `set -euo pipefail` turns that
+    into exit 1 — which is the same code a refusal returns. Three of the
+    four cases here expect a refusal, so they would have gone green on a
+    shell that never ran. `_refused()` below is the other half of that.
+
+    `RUNNER_TEMP` is passed in POSIX form because its value is spliced into
+    a bash redirect, and on Windows `str()` yields a path full of
+    backslashes.
+    """
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env.update(
+        {
+            "BASE_SHA": (repo / "BASE_SHA").read_text(encoding="utf-8").strip(),
+            "RUNNER_TEMP": runner_temp.as_posix(),
+            "PR_LABELS": labels,
+        }
+    )
+    return subprocess.run(  # noqa: S603  # nosec B603 B607
+        ["bash", "-c", _run_block()],  # noqa: S607
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _refused(done: subprocess.CompletedProcess[str]) -> None:
+    """Exit 1 *and* the guard's own words.
+
+    The code alone proves nothing: `set -euo pipefail` gives 1 for a missing
+    binary, an unreadable base commit, or a bash that never started. Every
+    refusal case asserts the message so that a run which fell over cannot be
+    read as a run which decided.
+    """
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "edits the acceptance contract" in done.stderr, done.stdout + done.stderr
+
+
+def _allowed(done: subprocess.CompletedProcess[str]) -> None:
+    """Exit 0 *and* the guard's own words, for the same reason."""
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "No contract edit alongside" in done.stdout, done.stdout + done.stderr
+
+
+#: The workflow's `run:` block is a bash script, and the job it belongs to
+#: runs on `ubuntu-latest` — asserted below, so this skip is pinned to a fact
+#: in the tree rather than to convenience. On a GitHub Windows runner `bash`
+#: resolves to `C:\Windows\System32\bash.exe`, the WSL launcher, and with no
+#: distribution installed it prints a UTF-16 notice and exits non-zero. That
+#: is not a bash at all, so driving the block under it tests nothing about
+#: the guard.
+#:
+#: It hid a real defect for exactly one push. Every case here used to assert
+#: only an exit code, and WSL's failure is exit 1 — the same code a refusal
+#: returns — so three of the four reported success on Windows against a shell
+#: that never started. `_refused()` is what turned that into a visible
+#: failure; this marker is what stops it being a false one.
+_needs_posix_shell = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the guard runs on ubuntu-latest; Windows `bash` is the WSL stub",
+)
+
+
+def test_the_guard_runs_on_linux_which_is_what_the_skip_above_rests_on() -> None:
+    """If the job ever moves off Linux, `_needs_posix_shell` stops being a
+    statement about where the code runs and becomes a hole."""
+    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
+    assert workflow["jobs"]["guard"]["runs-on"] == "ubuntu-latest"
+
+
+_HOLLOWED = "def test_it():\n    assert True\n"
+_SURRENDERS = "import sys\n\n\ndef main():\n    return 0\n\n\nsys.exit(0)\n"
+
+
+@_needs_posix_shell
+def test_a_diff_that_rewrites_the_decider_does_not_get_to_judge_itself(
+    tmp_path: Path,
+) -> None:
+    """The bypass this whole change exists for, end to end.
+
+    Before: the workflow ran the workspace copy, so this diff — `src/`
+    changed, the tier-1 assertion hollowed out, the decider replaced with
+    one that exits 0 — reported success on the required check.
+    """
+    repo = _scratch_repo(
+        tmp_path,
+        {
+            "src/mod.py": "VALUE = 2\n",
+            "tests/tier1/test_contract.py": _HOLLOWED,
+            "scripts/tier1_guard.py": _SURRENDERS,
+        },
+    )
+    _refused(_drive_the_workflow(repo, tmp_path))
+
+
+@_needs_posix_shell
+def test_a_rename_out_of_tier1_still_shows_the_side_it_left(
+    tmp_path: Path,
+) -> None:
+    """`git mv` reports one path under `--name-only`, and it is the
+    destination — so the gated side of the move disappears. `--no-renames`
+    asks for the delete and the add separately."""
+    repo = _scratch_repo(
+        tmp_path,
+        {
+            "src/mod.py": "VALUE = 2\n",
+            "tests/tier1/test_contract.py": None,
+            "tests/test_contract.py": "def test_it():\n    assert VALUE == 1\n",
+        },
+    )
+    _refused(_drive_the_workflow(repo, tmp_path))
+
+
+@_needs_posix_shell
+def test_the_workflow_is_not_accused_of_edits_the_base_branch_made(
+    tmp_path: Path,
+) -> None:
+    """Parent 1 of the merge ref is the base tip, so diffing against it
+    reports this pull request and nothing else.
+
+    `$BASE_SHA...HEAD` walks back to the merge base instead, so a gated pair
+    that landed on the *base* branch while this pull request was open is
+    read as this pull request's work and refused. Measured on the real
+    thing: 18 files against the pull request's own 16.
+    """
+    repo = _scratch_repo(
+        tmp_path,
+        {"README.md": "unrelated\n"},
+        base_changes={
+            "tests/tier1/test_contract.py": _HOLLOWED,
+            "src/mod.py": "VALUE = 3\n",
+        },
+    )
+    _allowed(_drive_the_workflow(repo, tmp_path))
+
+
+def test_a_quoted_path_is_refused_rather_than_read(guard: Any) -> None:
+    """git's default `core.quotePath` C-quotes a non-ASCII name, and
+    `"tests/tier1/…"` does not start with `tests/`. Every prefix test then
+    returns False and the diff is waved through, so this is the one input
+    that must not be guessed at."""
+    with pytest.raises(ValueError, match="quoted path"):
+        guard.read_paths('src/mod.py\n"tests/tier1/test_\\303\\274nicode.py"\n')
+
+
+def test_paths_arrive_nul_separated_from_the_workflow(guard: Any) -> None:
+    """`-z` is what stops the quoting above, so NUL is the real format and
+    newlines are the by-hand one."""
+    assert guard.read_paths(f"{_SRC}\0{_TIER1}\0") == [_SRC, _TIER1]
+    assert guard.read_paths(f"{_SRC}\n{_TIER1}\n") == [_SRC, _TIER1]
+
+
+def test_the_guards_own_parts_are_gated_alongside_src(guard: Any) -> None:
+    """The decider and the workflow are the guard's moving parts, and
+    editing either beside `src/` is the same signature as editing an
+    assertion beside `src/`. It used to be the way through."""
+    assert guard.verdict([_SRC, "scripts/tier1_guard.py"], []) is not None
+    assert guard.verdict([_SRC, ".github/workflows/tier1-guard.yml"], []) is not None

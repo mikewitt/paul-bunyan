@@ -145,6 +145,103 @@ def _where(loop: static.Loop) -> str:
 # --------------------------------------------------------------------------
 
 
+def _report_logs_around(
+    loop: static.Loop, pathname: str, around: static.CallSite
+) -> Finding:
+    """The author announced the loop and then went quiet."""
+    return Finding(
+        rule="loop-logs-around",
+        pathname=pathname,
+        lineno=loop.lineno,
+        what=(
+            f"{_subject(loop.func_name)} logs at line {around.lineno} "
+            f"but not inside {_where(loop)}. A line before or after a "
+            f"loop says it ran; only a line inside it can say how far "
+            f"along it is."
+        ),
+        fix=(
+            "add one log call in the loop body, naming the item: "
+            '`log.debug("processing %s", item)`. One record per '
+            "iteration is what the display turns into a bar."
+        ),
+        also=(
+            "if you also want a determinate total rather than a pulse, "
+            "`for item in lumberjack.track(items):` states it — but the "
+            "log line comes first and costs no dependency."
+        ),
+    )
+
+
+def _report_nested_logs(
+    loop: static.Loop, pathname: str, nested: static.Loop
+) -> Finding:
+    """A silent loop that encloses another loop that does log."""
+    return Finding(
+        rule="loop-not-logged",
+        pathname=pathname,
+        lineno=loop.lineno,
+        what=(
+            f"{_where(loop).capitalize()} has no log line in its body, but "
+            f"the loop nested inside it at line {nested.lineno} does. The "
+            f"display sees the inner work and has nothing to say which "
+            f"outer iteration it belongs to — and no outer period to take "
+            f"a ratio against, which is where the inner loop's total "
+            f"would come from."
+        ),
+        fix=(
+            "add one log call at the top of the outer body: "
+            '`log.debug("batch %d", batch)`. That single line is what '
+            "gives the inner bar a total as well as the outer one a row."
+        ),
+    )
+
+
+def _report_sibling_logs(
+    loop: static.Loop, pathname: str, other: static.CallSite
+) -> Finding:
+    """A silent loop whose function contains another loop that logs."""
+    return Finding(
+        rule="loop-not-logged",
+        pathname=pathname,
+        lineno=loop.lineno,
+        what=(
+            f"{_where(loop).capitalize()} has no log line in its body. "
+            f"{_subject(loop.func_name)} does log inside another loop (line "
+            f"{other.lineno}), so this loop is the part of it the display "
+            f"cannot see at all."
+        ),
+        fix=(
+            "add a log call in this body too, of the same shape as the "
+            f"one at line {other.lineno}. A loop that logs nothing is "
+            "invisible, and no amount of inference recovers it."
+        ),
+    )
+
+
+def _report_all_loops(loop: static.Loop, pathname: str) -> Finding:
+    """A silent loop in a completely silent scope. Reported conditionally."""
+    return Finding(
+        rule="loop-not-logged",
+        pathname=pathname,
+        lineno=loop.lineno,
+        what=(
+            f"{_where(loop).capitalize()} has no log line in its body, so "
+            f"the display cannot see it at all. Nothing else in "
+            f"{_subject(loop.func_name)} logs either, so the source gives no "
+            f"sign of whether this is work worth watching or plumbing — "
+            "which is why it takes --all-loops to say so."
+        ),
+        fix=(
+            "if an iteration of this loop is slow enough that you would "
+            'wait on it, add one line inside the body: `log.debug("…%s", '
+            "item)`. If it is not, there is nothing to do here."
+        ),
+        # Reported on request, so it must not silently gate a build
+        # that the default run passes.
+        gates=False,
+    )
+
+
 def _silent_loops(
     structure: static.FileStructure,
     scopes: dict[int | None, _Scope],
@@ -173,96 +270,24 @@ def _silent_loops(
             # The author announced the loop and then went quiet. This is the
             # most specific diagnosis available, so it wins over the general
             # one below even when a nested loop also logs.
-            yield Finding(
-                rule="loop-logs-around",
-                pathname=structure.pathname,
-                lineno=loop.lineno,
-                what=(
-                    f"{_subject(loop.func_name)} logs at line {around[0].lineno} "
-                    f"but not inside {_where(loop)}. A line before or after a "
-                    f"loop says it ran; only a line inside it can say how far "
-                    f"along it is."
-                ),
-                fix=(
-                    "add one log call in the loop body, naming the item: "
-                    '`log.debug("processing %s", item)`. One record per '
-                    "iteration is what the display turns into a bar."
-                ),
-                also=(
-                    "if you also want a determinate total rather than a pulse, "
-                    "`for item in lumberjack.track(items):` states it — but the "
-                    "log line comes first and costs no dependency."
-                ),
-            )
+            yield _report_logs_around(loop, structure.pathname, around[0])
             continue
 
         nested = _logging_descendant(loop, structure)
         if nested is not None:
-            yield Finding(
-                rule="loop-not-logged",
-                pathname=structure.pathname,
-                lineno=loop.lineno,
-                what=(
-                    f"{_where(loop).capitalize()} has no log line in its body, but "
-                    f"the loop nested inside it at line {nested.lineno} does. The "
-                    f"display sees the inner work and has nothing to say which "
-                    f"outer iteration it belongs to — and no outer period to take "
-                    f"a ratio against, which is where the inner loop's total "
-                    f"would come from."
-                ),
-                fix=(
-                    "add one log call at the top of the outer body: "
-                    '`log.debug("batch %d", batch)`. That single line is what '
-                    "gives the inner bar a total as well as the outer one a row."
-                ),
-            )
+            yield _report_nested_logs(loop, structure.pathname, nested)
             continue
 
         if any(site.loop_chain for site in scope.sites):
             other = next(site for site in scope.sites if site.loop_chain)
-            yield Finding(
-                rule="loop-not-logged",
-                pathname=structure.pathname,
-                lineno=loop.lineno,
-                what=(
-                    f"{_where(loop).capitalize()} has no log line in its body. "
-                    f"{_subject(loop.func_name)} does log inside another loop (line "
-                    f"{other.lineno}), so this loop is the part of it the display "
-                    f"cannot see at all."
-                ),
-                fix=(
-                    "add a log call in this body too, of the same shape as the "
-                    f"one at line {other.lineno}. A loop that logs nothing is "
-                    "invisible, and no amount of inference recovers it."
-                ),
-            )
+            yield _report_sibling_logs(loop, structure.pathname, other)
             continue
 
         if all_loops:
             # No narration anywhere in the scope, so nothing in the source
             # separates this from plumbing. The observation still stands and
             # the advice is conditional on something only the author knows.
-            yield Finding(
-                rule="loop-not-logged",
-                pathname=structure.pathname,
-                lineno=loop.lineno,
-                what=(
-                    f"{_where(loop).capitalize()} has no log line in its body, so "
-                    f"the display cannot see it at all. Nothing else in "
-                    f"{_subject(loop.func_name)} logs either, so the source gives no "
-                    f"sign of whether this is work worth watching or plumbing — "
-                    f"which "
-                    f"is why it takes --all-loops to say so."
-                ),
-                fix=(
-                    "if an iteration of this loop is slow enough that you would "
-                    'wait on it, add one line inside the body: `log.debug("…%s", '
-                    "item)`. If it is not, there is nothing to do here."
-                ),
-                # Reported on request, so it must not silently gate a build
-                # that the default run passes.
-                gates=False,
-            )
+            yield _report_all_loops(loop, structure.pathname)
 
 
 def _slow_bodies(structure: static.FileStructure) -> Iterator[Finding]:

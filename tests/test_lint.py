@@ -121,6 +121,7 @@ def test_idiomatic_logging_produces_no_findings(
 
 
 def test_the_silent_loop_gate_is_what_holds_those_back(
+    one: Callable[..., lint.Finding],
     rules: Callable[..., list[str]],
 ) -> None:
     # The findings are real and reachable; they are held back by a judgement
@@ -130,6 +131,21 @@ def test_the_silent_loop_gate_is_what_holds_those_back(
         "loop-not-logged",
         "loop-not-logged",
     ]
+
+    finding = one(
+        """
+        import logging
+
+        def run(items):
+            for item in items:
+                process(item)
+        """,
+        all_loops=True,
+    )
+    assert finding.rule == "loop-not-logged"
+    assert "takes --all-loops to say so" in finding.what
+    assert "there is nothing to do here" in finding.fix
+    assert finding.gates is False
 
 
 def test_a_file_that_never_imports_logging_is_not_advised(
@@ -228,7 +244,9 @@ def test_an_outer_loop_that_says_nothing_while_its_inner_one_logs(
     assert finding.lineno == 4
     # The inner loop's *total* comes from the ratio to an enclosing period, so
     # the missing outer line costs more than one row.
+    assert "the loop nested inside it at line 5 does" in finding.what
     assert "ratio" in finding.what
+    assert "gives the inner bar a total as well as the outer one a row" in finding.fix
 
 
 def test_a_dark_loop_beside_a_narrated_one(one: Callable[..., lint.Finding]) -> None:
@@ -244,7 +262,8 @@ def test_a_dark_loop_beside_a_narrated_one(one: Callable[..., lint.Finding]) -> 
 
     assert finding.rule == "loop-not-logged"
     assert finding.lineno == 6
-    assert "another loop (line 5)" in finding.what
+    assert "does log inside another loop (line 5)" in finding.what
+    assert "A loop that logs nothing is invisible" in finding.fix
 
 
 def test_a_loop_written_on_one_line_reads_as_one_line(

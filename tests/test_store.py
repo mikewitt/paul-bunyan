@@ -17,7 +17,6 @@ import pytest
 
 from lumberjack.schema import SourceKey
 from lumberjack.store import (
-    _COLUMNS,
     DEFAULT_RECENT_LIMIT,
     SQLiteRecordStore,
     WorkerKey,
@@ -264,15 +263,37 @@ def test_a_store_file_from_an_older_schema_fails_loudly(tmp_path):
     """
     path = str(tmp_path / "old.db")
     conn = sqlite3.connect(path)
-    added_since = {
-        "asyncio_task_name",
-        "asyncio_task_id",
-        "task_label",
-        "task_event",
-        "progress_current",
-        "progress_total",
-    }
-    old_columns = [c for c in _COLUMNS if c not in added_since] + ["task_name"]
+    # Spelled out rather than derived from `store._COLUMNS`, and that is the
+    # point of the test rather than a concession to the tier-2 rule. What an
+    # old file actually holds is a *fixed* historical schema — `task_name`
+    # where lumberjack now writes `asyncio_task_name`, and none of the five
+    # progress columns. Deriving it from today's tuple would make the fixture
+    # move whenever the schema does, so the day someone renames a column back
+    # the two sets would quietly converge and the guard would stop being
+    # exercised while the test stayed green.
+    old_columns = [
+        "logger_name",
+        "level_name",
+        "level_no",
+        "msg",
+        "message",
+        "pathname",
+        "filename",
+        "module",
+        "func_name",
+        "lineno",
+        "created",
+        "thread",
+        "thread_name",
+        "process",
+        "process_name",
+        "exc_text",
+        "stack_text",
+        "task_id",
+        "parent_task_id",
+        "template_id",
+        "task_name",
+    ]
     conn.execute(
         "CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         + ", ".join(f"{c} TEXT" for c in old_columns)

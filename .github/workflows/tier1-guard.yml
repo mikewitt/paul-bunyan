@@ -36,8 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # The three-dot diff below needs both endpoints, and the default
-          # shallow clone has neither.
+          # The diff below needs both endpoints, and the default shallow
+          # clone has neither. `git show "$BASE_SHA:…"` needs the base
+          # commit's tree for the same reason.
           fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -54,8 +55,39 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Three dots: changes on this branch since it diverged, never the
-          # base branch's own commits, so a stale branch is not accused of
-          # editing files someone else touched.
-          git diff --name-only "$BASE_SHA...HEAD" \
-            | python scripts/tier1_guard.py
+
+          # The decider must not come out of the tree it is judging. A
+          # `pull_request` event checks out `refs/pull/N/merge` — the pull
+          # request's own files — so running the workspace copy let a diff
+          # that rewrote `scripts/tier1_guard.py` appoint itself judge, and
+          # `scripts/` is not a path any guard protected. Read the base
+          # branch's copy and run that. Failing to read it fails the job,
+          # which is the safe direction.
+          if ! git show "$BASE_SHA:scripts/tier1_guard.py" \
+              > "$RUNNER_TEMP/tier1_guard.py"; then
+            echo "::error::base branch has no scripts/tier1_guard.py to judge with"
+            exit 1
+          fi
+
+          # Parent 1 of the merge ref is the base tip and parent 2 is the
+          # pull request's head, so diffing against parent 1 is exactly this
+          # pull request's contribution. `$BASE_SHA...HEAD` is a merge base
+          # away from that: it also reports base commits that landed after
+          # the pull request opened, accusing it of edits someone else made.
+          # The three-dot form stays as the fallback for a run with no merge
+          # ref to read, where over-reporting beats not reporting.
+          if git rev-parse --verify --quiet HEAD^2 > /dev/null; then
+            range=("HEAD^1" "HEAD")
+          else
+            range=("$BASE_SHA...HEAD")
+          fi
+
+          # `-z`, because it is the only form git never rewrites: with the
+          # default `core.quotePath` a non-ASCII path comes back C-quoted and
+          # starts with a quote rather than with `tests/`, so every prefix
+          # test in the guard returns False and the diff sails through.
+          # `--no-renames`, because a rename out of `tests/tier1/` is
+          # otherwise reported as its destination alone, hiding the gated
+          # side of the move.
+          git diff --name-only -z --no-renames "${range[@]}" \
+            | python "$RUNNER_TEMP/tier1_guard.py"
