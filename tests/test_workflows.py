@@ -4,8 +4,8 @@ This exists because of a specific failure: a job was added with the id
 `slow tests`. GitHub requires a job id to match `[A-Za-z_][A-Za-z0-9_-]*`,
 so the space made the whole of `ci.yml` invalid — and the result was not a
 red check but **no checks at all**. The pull request showed six green ones
-from other workflows, the twelve required ones simply never reported, and it
-looked mergeable.
+from other workflows, the required ones simply never reported, and it looked
+mergeable.
 
 That is the worst failure shape available: it removes the signal instead of
 raising one, and every downstream check that would have caught it is exactly

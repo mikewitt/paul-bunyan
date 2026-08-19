@@ -184,13 +184,27 @@ touches **both** `tests/tier1/**` and `src/**` unless it carries the
 `scripts/tier1_guard.py`; `tests/test_tier1_guard.py` drives it.
 
 **The label is the mechanism, not the check.** Applying one needs triage
-rights on the repository, so the way past the gate is outside the working
-tree — an agent can write any file it likes and cannot label its own pull
-request. The check alone is only a check; what makes it binding is its
-entry in trunk's required-check ruleset, which is there. Its `name:` is
-frozen from that moment, for the reason CLAUDE.md records about `bare
-install (no rich)` — renaming the job orphans a required check and blocks
-every merge until the ruleset is edited to match.
+rights on the repository, so the label itself is outside the working tree —
+an agent can write any file it likes and cannot label its own pull request.
+The check alone is only a check; what makes it binding is its entry in
+trunk's required-check ruleset, which is there. Its `name:` is frozen from
+that moment, for the reason CLAUDE.md records about `bare install (no
+rich)` — renaming the job orphans a required check and blocks every merge
+until the ruleset is edited to match. `test_tier1_guard.py` pins the name,
+because nothing else noticed a rename.
+
+**The decider is read from the base branch, and that is load-bearing.** A
+`pull_request` event checks out `refs/pull/N/merge`, so every file in the
+runner's workspace is the *proposed* one. Running `scripts/tier1_guard.py`
+from there — which is what this did at first — meant a diff could change
+`src/`, hollow out a tier-1 assertion, and replace the decider with one
+that exits 0. `scripts/` is not a protected path, so nothing objected and
+the required check went green. The workflow now runs
+`git show "$BASE_SHA:scripts/tier1_guard.py"`, and both the decider and the
+workflow are listed in `PROTECTED` so an unmodified guard at least notices
+an edit to either. This was found by audit, not by the suite; the end-to-end
+cases in `test_tier1_guard.py` drive the workflow's own `run:` block against
+a scratch repository so it cannot come back.
 
 Both halves live in repository settings rather than in the tree: the
 `tier-1 change` label and the ruleset entry. A fork, or a clone by anyone
@@ -200,8 +214,14 @@ reports and nothing enforces it.
 Editing tier 1 is not forbidden by any of this. It is made visible, and
 routed through a second pair of eyes.
 
-**Two things it does not catch, stated so nobody mistakes it for complete.**
+**Four things it does not catch, stated so nobody mistakes it for complete.**
 A pull request that hollows out a tier-1 assertion and touches nothing under
-`src/` passes — rarer, and the purest form of the attack. And nothing in the
-repository stops someone with triage rights from labelling their own change;
-that is what the label being a *record* rather than a lock is for.
+`src/` passes — rarer, and the purest form of the attack. A rename *into*
+`tests/tier1/` of a file that was already weak passes, because the diff is
+read as paths and never as content. Nothing in the repository stops someone
+with triage rights from labelling their own change; that is what the label
+being a *record* rather than a lock is for. And a pull request that rewrites
+`tier1-guard.yml` itself is not caught by anything here, because GitHub runs
+the workflow file from the pull request's own merge ref — reading the
+decider from the base branch closes the `scripts/` half of that, and the
+workflow half is closed by nobody, only made loud.
