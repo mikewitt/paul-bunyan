@@ -20,6 +20,7 @@ from lumberjack.detect import OutputMode
 from lumberjack.handler import LumberjackHandler
 from lumberjack.pump import FlushPump
 from lumberjack.renderers import Renderer
+from lumberjack.renderers.plan import FrameCounts
 from lumberjack.session import Session
 from lumberjack.store import RecordStore, SQLiteRecordStore
 
@@ -444,3 +445,62 @@ def test_the_unwritten_count_does_not_survive_uninstall(capsys):
     _install(handler=_FakeHandler(rows=["c"]), store=_FakeStore())
     teardown.run()
     assert "never reached the store" not in capsys.readouterr().err
+
+
+class _CountingRenderer(_FakeRenderer):
+    """A renderer that plans frames, which is what `_report_display` looks
+    for by duck-typing."""
+
+    def __init__(self, counts: object) -> None:
+        super().__init__()
+        self._counts = counts
+
+    def counts(self) -> object:
+        return self._counts
+
+
+def test_the_exit_report_says_what_the_display_concluded(capsys):
+    """A live bar is gone the moment the terminal scrolls, and a CI run never
+    had one — so the last frame's own account is the only durable answer to
+    "did lumberjack see my loops"."""
+    counts = FrameCounts(
+        sources=4,
+        loops=1,
+        drawn_loops=1,
+        suppressed_loops=0,
+        positions=0,
+        tasks=2,
+        heartbeat=1,
+    )
+    _install(renderer=_CountingRenderer(counts))
+    teardown.run()
+
+    err = capsys.readouterr().err
+    # Both numbers, because they answer different questions: four call sites
+    # narrating one loop are four sources and one row.
+    assert "1 loop(s) inferred from 4 repeating log source(s)" in err
+    assert "2 named task bar(s)" in err
+
+
+def test_a_run_with_no_repeating_lines_says_nothing_about_loops(capsys):
+    """Not worth a line for a short script that never looped."""
+    counts = FrameCounts(
+        sources=0,
+        loops=0,
+        drawn_loops=0,
+        suppressed_loops=0,
+        positions=0,
+        tasks=0,
+        heartbeat=0,
+    )
+    _install(renderer=_CountingRenderer(counts))
+    teardown.run()
+    assert "loop(s) inferred" not in capsys.readouterr().err
+
+
+def test_a_renderer_with_no_frames_is_not_asked_twice(capsys):
+    """Duck-typed, so the plain renderer — which has no `counts()` — must
+    pass through rather than raise into the exit path."""
+    _install(renderer=_FakeRenderer())
+    teardown.run()
+    assert "loop(s) inferred" not in capsys.readouterr().err
