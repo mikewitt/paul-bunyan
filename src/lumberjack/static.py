@@ -513,12 +513,16 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     children of the node introducing the new one. Handing them the reset
     claimed the wrong `func_name` and, worse, an empty loop chain for
     something that really does repeat (issue #82).
+
+    Specific node types overriding this default behavior are registered below.
     """
     return ctx
 
 
 @_child_ctx.register
-def _(node: ast.FunctionDef | ast.AsyncFunctionDef, ctx: _Ctx) -> _Ctx:
+def _child_ctx_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, ctx: _Ctx
+) -> _Ctx:
     # A function boundary resets the loop chain: a closure defined inside
     # a loop body is not called once per iteration, and `funcName` on its
     # records reads the inner name, not the enclosing one.
@@ -532,7 +536,7 @@ def _(node: ast.FunctionDef | ast.AsyncFunctionDef, ctx: _Ctx) -> _Ctx:
 
 
 @_child_ctx.register
-def _(node: ast.ClassDef, ctx: _Ctx) -> _Ctx:
+def _child_ctx_class(node: ast.ClassDef, ctx: _Ctx) -> _Ctx:
     # A class body is the one scope that is not a deferral: it executes
     # immediately, in place, once per pass of whatever encloses it. So it
     # takes the new name — CPython reports `funcName='Row'` for a call in
@@ -549,7 +553,7 @@ def _(node: ast.ClassDef, ctx: _Ctx) -> _Ctx:
 
 
 @_child_ctx.register
-def _(node: ast.Lambda | ast.GeneratorExp, ctx: _Ctx) -> _Ctx:
+def _child_ctx_lambda_genexpr(node: ast.Lambda | ast.GeneratorExp, ctx: _Ctx) -> _Ctx:
     # Both compile to a code object of their own, and stdlib's
     # `findCaller` reads its name — so a call inside a generator
     # expression reports `funcName='<genexpr>'`, measured on 3.13.
@@ -573,12 +577,14 @@ def _(node: ast.Lambda | ast.GeneratorExp, ctx: _Ctx) -> _Ctx:
 
 
 @_child_ctx.register
-def _(node: ast.If | ast.Try | ast.TryStar | ast.Match, ctx: _Ctx) -> _Ctx:
+def _child_ctx_branch(
+    node: ast.If | ast.Try | ast.TryStar | ast.Match, ctx: _Ctx
+) -> _Ctx:
     return ctx._replace(conditional=True)
 
 
 @_child_ctx.register
-def _(node: ast.With | ast.AsyncWith, ctx: _Ctx) -> _Ctx:
+def _child_ctx_with(node: ast.With | ast.AsyncWith, ctx: _Ctx) -> _Ctx:
     # Whether the manager swallows is unknowable from the node type —
     # `contextlib.suppress(E)` and `open(path)` are the same `With` — and
     # the two differ in exactly the way this flag is about. Name-matching
