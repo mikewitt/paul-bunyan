@@ -212,6 +212,11 @@ class _RowTextColumn(ProgressColumn):
         # As `TextColumn` does, and for the same reason: a label is a message
         # template and a wrapped one would push every row below it down the
         # screen.
+        #
+        # No maximum, so rich measures every cell at its full width and
+        # `BarColumn` — the only flexible one — absorbs the whole cost. A
+        # 56-character label leaves zero bar cells at 80 columns.
+        # lumberjack: see issue #99
         super().__init__(table_column=Column(no_wrap=True))
 
     @override

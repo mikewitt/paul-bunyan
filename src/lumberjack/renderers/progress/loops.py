@@ -580,6 +580,10 @@ class LoopRowModel:
         `foo.py bar()`. The absent number is the honest part — the row covers
         several lines and nothing here knows which one the `for` is on.
         """
+        # Only the `describe_template()` branch below is bounded by
+        # `MAX_LABEL`; the other three return an unbounded string, and a
+        # long one starves the bar it shares a line with.
+        # lumberjack: see issue #99
         cached = self._labels.get(key)
         if cached is not None and cached[0] == len(members):
             return cached[1]
