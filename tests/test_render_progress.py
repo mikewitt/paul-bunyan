@@ -30,8 +30,9 @@ pytest.importorskip("rich")
 import lumberjack.renderers.rich_renderer as rich_renderer_module
 from fixture_sources import SEQUENCE, STAGES
 from lumberjack.handler import LumberjackHandler
-from lumberjack.renderers.progress import LoopRowModel
+from lumberjack.renderers.progress import LoopRow, LoopRowModel
 from lumberjack.renderers.rich_renderer import RichProgressRenderer
+from lumberjack.schema import SourceKey
 from lumberjack.store import RecordStore
 from rich_rig import Rig
 from rich_rig import line as _line
@@ -858,9 +859,13 @@ def test_a_console_draws_only_glyphs_its_encoding_can_take(
     Regression test with a history: an earlier fix routed "degrade" through a
     `None` encoding, then `None` was given the opposite meaning — rich's own
     convention, "the stream did not say, assume utf-8" — and this branch went
-    back to drawing braille on the one console that cannot take it. Scoped to
-    the collapsed row's own line rather than the whole frame, so this is not
-    thrown off by other rows using punctuation of their own.
+    back to drawing braille on the one console that cannot take it.
+
+    Asserted over the *whole frame*, which is the strong form and was not
+    available while the heartbeat's and the cycle column's separators were
+    hard-coded (issue #70) — it had to be scoped to the collapsed row's own
+    line, so two of the three characters lumberjack draws went unchecked by
+    the test named for checking them.
     """
     real_console = rich_renderer_module.Console
     monkeypatch = pytest.MonkeyPatch()
@@ -876,11 +881,35 @@ def test_a_console_draws_only_glyphs_its_encoding_can_take(
         renderer = make_renderer(stream=stream)
         store.append([make_row(created=100.0 + i) for i in range(5)])
         renderer.refresh()
-        line = _line(strip_ansi(stream.getvalue()), "iterations")
-        assert "5 iterations" in line, "the bar did not draw"
-        assert line.isascii() == legacy
+        frame = strip_ansi(stream.getvalue())
+        assert "5 iterations" in frame, "the bar did not draw"
+        assert frame.isascii() == legacy
     finally:
         monkeypatch.undo()
+
+
+def test_the_cycle_column_takes_the_separator_it_is_given():
+    """The third literal, which no frame assertion above reaches.
+
+    A determinate loop row is the only thing that draws the cycle separator,
+    and the fixtures here never infer a total — that needs nesting and several
+    real polls. Driving the formatter directly is what keeps the character
+    covered rather than covered-by-luck; the two frame tests either side of
+    this pin the heartbeat's.
+    """
+    row = LoopRow(
+        key=SourceKey(pathname="/x.py", lineno=1, func_name="run"),
+        members=(),
+        label="x",
+        clock=SourceKey(pathname="/x.py", lineno=1, func_name="run"),
+        count=7,
+        total=20,
+        cycle_current=3,
+    )
+    assert row.is_determinate, "the fixture must exercise the determinate branch"
+    detail = rich_renderer_module._format_source_detail(row, "-")
+    assert detail == "3/20 - 7 iterations"
+    assert detail.isascii()
 
 
 def test_a_stream_that_cannot_encode_the_mark_gets_the_ascii_one(
@@ -891,8 +920,7 @@ def test_a_stream_that_cannot_encode_the_mark_gets_the_ascii_one(
     `cp1252` — is not `legacy_windows`, so rich draws its own box characters
     happily and only lumberjack's glyphs would be unencodable if drawn as-is.
     A write rich cannot encode raises rather than degrading, which would take
-    down the `logger.debug()` that reached it, so the collapsed row's own
-    line is ASCII too."""
+    down the `logger.debug()` that reached it, so the whole frame is ASCII."""
 
     class _AsciiStream(io.StringIO):
         encoding = "ascii"
@@ -914,8 +942,8 @@ def test_a_stream_that_cannot_encode_the_mark_gets_the_ascii_one(
         renderer = make_renderer(stream=stream)
         store.append([make_row(created=100.0 + i) for i in range(5)])
         renderer.refresh()
-        line = _line(strip_ansi(stream.getvalue()), "iterations")
-        assert "5 iterations" in line, "the bar did not draw"
-        assert line.isascii()
+        frame = strip_ansi(stream.getvalue())
+        assert "5 iterations" in frame, "the bar did not draw"
+        assert frame.isascii()
     finally:
         monkeypatch.undo()
