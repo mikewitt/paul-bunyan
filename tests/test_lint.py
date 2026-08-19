@@ -144,6 +144,7 @@ def test_the_silent_loop_gate_is_what_holds_those_back(
     )
     assert finding.rule == "loop-not-logged"
     assert "takes --all-loops to say so" in finding.what
+    assert "there is nothing to do here" in finding.fix
     assert finding.gates is False
 
 

@@ -9,7 +9,7 @@ does not.
 | Tier | Where | Claim | Checked by |
 |---|---|---|---|
 | **1 — acceptance** | `tests/tier1/` | This is what the package is *for*, and how a user gets it | `tests/tier1/test_tier1_rules.py` |
-| **2 — contract** | `pytestmark = pytest.mark.tier2`, files stay put | A component's public API behaves as specified | marker + SLF001-clean |
+| **2 — contract** | `pytestmark = pytest.mark.tier2`, files stay put | A component's public API behaves as specified | marker + no private access, by attribute or import |
 | **3 — internals** | everything else, unmarked | Whatever it says | nothing |
 
 **Unmarked is tier 3.** Only claims are validated, so drift runs downward: a
@@ -73,9 +73,14 @@ flush disabled, the record count is only knowable then, which the tier-1
 
 - **`shutdown()` and restoring the root logger.** Exercised incidentally — the
   process exits — but never asserted on. It is lifecycle, not the product.
-- **TTY detection.** Every script forces `output_mode` explicitly. Detection →
-  rich is covered only by `demo-gif.yml` under a real pty, and closing that gap
-  is its own problem.
+- **TTY detection → rich.** Eight of the nine scripts force `output_mode`
+  explicitly; `piped_is_plain.py` deliberately does not, so detection →
+  *plain* is covered here. The rich half needs a real pty and is covered only
+  by `demo-gif.yml`, which is not a required check — closing that gap means
+  pty-driving a child under pytest, which is Unix-only and its own problem.
+  `script_runner.child_env` strips `LUMBERJACK_*` from the child's
+  environment so an inherited `LUMBERJACK_OUTPUT_MODE` cannot satisfy the
+  plain half through the override branch instead of through detection.
 - **`wrapped`, `bursty`, `silent`** (see `examples/demo.py --list`). The first
   two are shapes the design documents as handled *badly*; pinning them here
   would freeze known-wrong behaviour as the acceptance contract, and tier 1 is
@@ -90,7 +95,10 @@ flush disabled, the record count is only knowable then, which the tier-1
 `@pytest.mark.slow` is orthogonal to the tiers — a test can be tier 1 and
 slow, and conflating "how important" with "how long" is how a tiering scheme
 rots. `pyproject.toml` deselects `slow` from the default run, so `pytest` stays
-around eleven seconds; the `slow-tests` CI job selects them with `-m slow`.
+in the low tens of seconds; the `slow-tests` CI job selects them with
+`-m slow`. (No exact figure: it was "around eleven seconds" for about a
+week, and a number that has to be re-measured to stay true is a number that
+will be wrong.)
 
 `tests/tier1/test_slow_shapes.py` is the whole of it today, and everything in
 it is slow irreducibly: `MIN_LEGIBLE_PERIOD` is 1.0s and deliberately not
@@ -99,6 +107,17 @@ consecutive real polls. Its assertions are loose about numbers and strict
 about shape — the inferred total is asserted as a band around 20, not as 20,
 because Principle 10 licenses the display to be imprecise and a test
 demanding precision would fail for being right.
+
+`phases_pulse.py` is the odd one, and the reason it is here rather than in
+the fast batch: it asserts an **absence**. The once-per-stage announcement
+line is a slow repeating source, so period ordering reads it as enclosing
+each stage's loop and offers the ratio as a total for a relationship that
+does not exist. Static structure vetoes the number without being able to
+supply the right one, so every row pulses. An absence is only worth
+asserting if the thing could have been present, which is why the indent is
+asserted beside it: the indent staying is the evidence that ordering *did*
+make its claim and only the number was withheld. Measured with the veto
+disabled: `8/40` appears on a loop that ran 40 times.
 
 That job runs on one ubuntu leg rather than the matrix. Measured: a windows
 leg spends 65s provisioning before running anything and bills at double,
@@ -117,12 +136,48 @@ Marked file-wide with `pytestmark = pytest.mark.tier2`, never per-function: the
 private-access check is per-file, so a half-marked file would be uncheckable.
 If half a file qualifies, the file is tier 3 until someone splits it.
 
-`test_tier2_rules.py` runs `ruff --select SLF001 --isolated` over every marked
-file. **`--isolated` is load-bearing**: `pyproject.toml` exempts SLF001 for
-`tests/**` — rightly, since tier 3 unit-tests private functions on purpose —
-and `per-file-ignores` applies even to a CLI `--select`, so without it the
-check reports zero and proves nothing. That is not hypothetical; it reported
-"all checks passed" over 31 real findings while they were being counted.
+`test_tier2_rules.py` runs `ruff --select SLF001,PLC2701 --isolated --preview`
+over every marked file. **`--isolated` is load-bearing**: `pyproject.toml`
+exempts SLF001 for `tests/**` — rightly, since tier 3 unit-tests private
+functions on purpose — and `per-file-ignores` applies even to a CLI
+`--select`, so without it the check reports zero and proves nothing. That is
+not hypothetical; it reported "all checks passed" over 31 real findings while
+they were being counted.
+
+**Both rules, because either alone leaves the other syntax open.** `SLF001` is
+private *attribute* access — `store._conn` — and says nothing at all about
+`from lumberjack.store import _COLUMNS`, which is the same act by a different
+route. `PLC2701` is the import half, and is preview-gated in ruff, which is
+what `--preview` is for; an explicit `--select` still bounds the run to those
+two. This was found by audit rather than by the gate: `test_store.py` was
+marked tier 2 while importing `store._COLUMNS`, and the check reported clean.
+
+That also fixes the rule that was *actually* being applied. `test_schema.py`
+was held out of the tier for the identical import plus one attribute access,
+so the only thing distinguishing the two files was which syntax the second
+access happened to use — not a rule anybody chose. Under both rules the
+distinction becomes the honest one: `test_schema.py` stays tier 3 because
+schema *parity* is its subject — the dataclass fields against the column
+tuple against the real table — and a test whose subject is an internal
+cannot be a contract test. `test_store.py` is tier 2 because that was one
+line in a conformance suite, and it now spells the legacy column list out
+instead, which is a better fixture as well as a compliant one: an old
+database holds a fixed historical schema, so deriving it from today's tuple
+would have let the two sets converge and quietly stop exercising the guard.
+
+**The tier's guarantee is bounded, and the bound is checked.** `conftest.py`
+carries no mark and is not a test, but its autouse fixtures run before and
+after every tier-2 test, so a private touch there happens on a marked file's
+behalf where the per-file check cannot see it. Exactly one exists —
+`_reset_lumberjack_state` clearing the ambient task contextvar, which has no
+public equivalent and is load-bearing, since `_ambient_parent()` only walks
+past handles that have *ended* and one entered but never exited has not.
+`test_the_shared_fixtures_reach_into_exactly_one_private_thing` pins that at
+one. A second has to be argued rather than absorbed.
+
+The mark is collected with `rglob` and from both assignment forms, so a
+`pytestmark` under `tests/tier1/`, or written as `pytestmark: list = [...]`,
+is checked rather than silently ignored.
 
 Currently marked: `test_store`, `test_handler`, `test_detect`,
 `test_render_plain`, `test_otel`, `test_tracking`, `test_plan`,
@@ -162,6 +217,44 @@ a private access, and the honest options are to split the file or to leave it
 tier 3. It is tier 3 until someone wants to split it — which is the rule
 working, not an exception to it.
 
+## Mutation testing, by hand and on purpose
+
+The tiers say which tests are *reviewed*. Mutation testing says whether a
+test would notice if the code were wrong, which is a different question and
+the only one that catches an assertion hollowed out before any of this
+existed. It has earned its place here repeatedly: two mutations passed the
+whole 606-test suite on trunk before `plan.py` was extracted, and four more
+were caught only because each fix in this area was checked this way.
+
+**The procedure, which is all of it:**
+
+1. Copy `src/` somewhere, or just edit in place and keep the diff small.
+2. Make one change that should break something — invert a comparison, drop
+   a guard, return a constant, rename a rendered string.
+3. Run the suite. If it stays green, the mutation found a gap: either the
+   behaviour is untested or a test asserts something weaker than its name.
+4. Restore. **`git checkout --` will take unstaged work with it** — commit
+   first, or copy the file aside. That has cost real work here more than
+   once.
+
+**Scope it to tier 2's deterministic contracts first.** Tier 1's slow shapes
+are driven by real elapsed time, so a surviving mutant there is as likely to
+be scheduling noise as a gap, and triaging it costs more than it returns.
+
+**It is not a CI gate and should not become one.** It takes hours, every
+surviving mutant needs a human to say whether it matters, and a flaky gate
+teaches the "edit the test until it passes" habit that tier 1 exists to
+prevent. Issue #85 reached the same conclusion for the same reasons.
+
+**No tool is wired up, and that is a live decision rather than an
+oversight.** `mutmut` 3.7 was tried against this repository and cannot
+import the package from the `mutants/` tree it builds, because of the `src/`
+layout — `cannot import name 'static' from 'lumberjack' (unknown location)`,
+and neither clearing `addopts` nor adding a `pythonpath` entry fixes it. So
+the choice is between adapting `mutmut`, trying `cosmic-ray`, or leaving the
+manual pass as the practice. The manual pass is what has actually found
+things so far.
+
 ## Tier 3
 
 Everything else. Private access is allowed and expected — `test_benchmark.py`
@@ -184,13 +277,27 @@ touches **both** `tests/tier1/**` and `src/**` unless it carries the
 `scripts/tier1_guard.py`; `tests/test_tier1_guard.py` drives it.
 
 **The label is the mechanism, not the check.** Applying one needs triage
-rights on the repository, so the way past the gate is outside the working
-tree — an agent can write any file it likes and cannot label its own pull
-request. The check alone is only a check; what makes it binding is its
-entry in trunk's required-check ruleset, which is there. Its `name:` is
-frozen from that moment, for the reason CLAUDE.md records about `bare
-install (no rich)` — renaming the job orphans a required check and blocks
-every merge until the ruleset is edited to match.
+rights on the repository, so the label itself is outside the working tree —
+an agent can write any file it likes and cannot label its own pull request.
+The check alone is only a check; what makes it binding is its entry in
+trunk's required-check ruleset, which is there. Its `name:` is frozen from
+that moment, for the reason CLAUDE.md records about `bare install (no
+rich)` — renaming the job orphans a required check and blocks every merge
+until the ruleset is edited to match. `test_tier1_guard.py` pins the name,
+because nothing else noticed a rename.
+
+**The decider is read from the base branch, and that is load-bearing.** A
+`pull_request` event checks out `refs/pull/N/merge`, so every file in the
+runner's workspace is the *proposed* one. Running `scripts/tier1_guard.py`
+from there — which is what this did at first — meant a diff could change
+`src/`, hollow out a tier-1 assertion, and replace the decider with one
+that exits 0. `scripts/` is not a protected path, so nothing objected and
+the required check went green. The workflow now runs
+`git show "$BASE_SHA:scripts/tier1_guard.py"`, and both the decider and the
+workflow are listed in `PROTECTED` so an unmodified guard at least notices
+an edit to either. This was found by audit, not by the suite; the end-to-end
+cases in `test_tier1_guard.py` drive the workflow's own `run:` block against
+a scratch repository so it cannot come back.
 
 Both halves live in repository settings rather than in the tree: the
 `tier-1 change` label and the ruleset entry. A fork, or a clone by anyone
@@ -200,8 +307,14 @@ reports and nothing enforces it.
 Editing tier 1 is not forbidden by any of this. It is made visible, and
 routed through a second pair of eyes.
 
-**Two things it does not catch, stated so nobody mistakes it for complete.**
+**Four things it does not catch, stated so nobody mistakes it for complete.**
 A pull request that hollows out a tier-1 assertion and touches nothing under
-`src/` passes — rarer, and the purest form of the attack. And nothing in the
-repository stops someone with triage rights from labelling their own change;
-that is what the label being a *record* rather than a lock is for.
+`src/` passes — rarer, and the purest form of the attack. A rename *into*
+`tests/tier1/` of a file that was already weak passes, because the diff is
+read as paths and never as content. Nothing in the repository stops someone
+with triage rights from labelling their own change; that is what the label
+being a *record* rather than a lock is for. And a pull request that rewrites
+`tier1-guard.yml` itself is not caught by anything here, because GitHub runs
+the workflow file from the pull request's own merge ref — reading the
+decider from the base branch closes the `scripts/` half of that, and the
+workflow half is closed by nobody, only made loud.
