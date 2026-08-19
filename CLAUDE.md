@@ -373,11 +373,16 @@ So **a sub-5% change is invisible to a single before/after pair** on this class 
 
 ### CI
 
-**Jobs run in a chain, one at a time.** `lint` → `typecheck` → `test` (with `max-parallel: 1`, so the six legs are serial too) → `slow-tests` → `bare` → `package` → `coverage`. This reverses the original decision, which was "jobs are independent — knowing *which* is broken beats making one wait on another". Wall-clock is longer — 6.7 minutes against about 2.5 — and that is accepted; it is what the owner asked for.
+**Jobs run concurrently and depend on nothing. The matrix stops early.** Seven independent jobs — `lint`, `typecheck`, `test`, `slow-tests`, `bare`, `package`, `coverage` — with `fail-fast: true` on `test`'s six legs.
 
-Be precise about what each half buys, because the two are easy to conflate. The **`needs:` chain between jobs** genuinely prevents work from starting: a failing nine-second `lint` now stops twelve jobs that would otherwise all run. **`max-parallel: 1` buys nothing measurable** — `fail-fast: false` means all six legs run whether or not one fails, so serializing them skips none of them, and on a public repository GitHub-hosted minutes are free regardless. It is there because serial execution was the request, not because it saves anything. `fail-fast: true` is the lever if the matrix should ever stop early.
+This is a round trip, and the round trip is the point. The jobs were briefly chained (`lint` → `typecheck` → `test` → …) with `max-parallel: 1`, so that a failing nine-second `lint` would stop everything behind it. Two things came out of running it that way, and both argue for what is here now:
 
-The cost is real and is the thing the old note was protecting: a red run now names one broken job, so a second failure only surfaces after the first is fixed. `fail-fast: false` stays on the matrix, so a failing leg does not cancel its siblings — the serialization is about not *starting* work that a earlier failure has already invalidated, not about hiding results that exist.
+- **The chain traded the wrong thing.** Wall-clock went from about 2.5 minutes to 6.7, and what it bought was a red run that names *one* broken job — so a second failure only surfaces after the first is fixed. Knowing which jobs are broken beats making one wait on another.
+- **It could not have been about cost.** Standard GitHub-hosted runners are free on public repositories, so nothing the chain skipped was billed. That argument was never available; see the paragraph below, which exists because it was made anyway.
+
+**`fail-fast: true` is the only lever that genuinely skips work.** A `needs:` chain delays work; `max-parallel` spaces it out; cancelling the matrix stops it. Its cost is a real loss of information — a leg cancelled mid-run reports nothing, so a matrix that dies on ubuntu 3.12 cannot say whether windows was also broken. Accepted, because the common case is one defect failing every leg for the same reason, and re-running after a fix is cheap.
+
+It bounds the six legs of `test` and nothing else. GitHub cannot cancel a sibling *job* on another's failure without chaining them, so `lint`, `typecheck`, `bare`, `package` and `coverage` still run to completion — which is the point: they each answer a different question, and a red matrix should not hide their answers.
 
 Worth knowing before touching the runner budget, and worth knowing *first* that there is no budget: standard GitHub-hosted runners are free on public repositories, on every plan, and stayed free through the 2026 pricing change. Nothing here is billed, so no CI change on this repo can save money and none should be argued for on that basis. The shape is still real if the repo ever goes private, or if anyone reaches for larger runners, which are charged even on a public repo. The suite is about **13%** of runner time. A windows leg spends **65 seconds** provisioning before it runs anything and carries a 2× multiplier where charging applies, against ubuntu's 1 second — so windows would be 55% of the notional cost from 3 of 14 jobs, and trimming *tests* would save almost nothing. The lever is which legs run, never which tests.
 
@@ -398,7 +403,7 @@ test: it fails any pull request whose diff touches both `tests/tier1/**` and
 signature it catches is a change that alters behaviour and edits the
 assertion that noticed. Its own workflow because it needs the
 `labeled`/`unlabeled` triggers — applying the label has to re-run *it*, and
-would otherwise re-run the whole serial chain every time anyone touched a
+would otherwise re-run the whole of CI every time anyone touched a
 label. It **is** a required check on trunk, which is the difference between
 a gate and a suggestion — and it is why its `name:` is now frozen, for the
 reason `bare install (no rich)` records below: renaming the job orphans a

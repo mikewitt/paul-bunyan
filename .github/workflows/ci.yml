@@ -33,19 +33,20 @@ concurrency:
 # copies of whatever uv picked.
 jobs:
   lint:
-    # First in the chain. Every job below waits on the one before it, so a
-    # failure here costs nine seconds instead of the ~12 runner-minutes a full
-    # fan-out spends before reporting the same thing. The trade is real and
-    # accepted: a red run now names one broken job rather than all of them, so
-    # a second failure only surfaces after the first is fixed.
+    # Nothing waits on this, and nothing waits on anything. Jobs were briefly
+    # chained so a failing nine-second lint would stop the rest; the chain was
+    # reverted because knowing *which* jobs are broken beats making one wait
+    # on another, and on a public repository the runner minutes it saved were
+    # free anyway. A red run should name every broken thing at once.
     #
     # Its own job, not a step in the matrix below: style is a property of the
     # source, not of the OS or interpreter running it, so checking it six
     # times says the same thing six times — and reports a single misplaced
     # comma as six red legs with no check called "lint" among them.
     # None of these jobs depends on another: which one is broken is more
-    # useful than making one wait on the rest, the same reasoning the matrix
-    # already applies with fail-fast: false.
+    # useful than making one wait on the rest. The matrix below goes the
+    # other way and stops early, deliberately — its six legs usually fail
+    # for one reason, where these five jobs each answer a different question.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -61,7 +62,6 @@ jobs:
       - run: uv run black --check .
 
   typecheck:
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -89,7 +89,6 @@ jobs:
   # they test is lumberjack's timing, not the platform's. It also multiplies
   # the flake surface of the only tests here that depend on a loaded runner.
   slow-tests:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -101,21 +100,23 @@ jobs:
       - run: uv run pytest -m slow
 
   test:
-    needs: typecheck
     runs-on: ${{ matrix.os }}
     strategy:
-      # Report every combination: a failure on one OS/version shouldn't hide
-      # whether the others are healthy.
-      fail-fast: false
-      # One leg at a time, because the owner asked for serial CI and accepted
-      # the wall-clock. Be clear about what this does *not* buy, so nobody
-      # re-derives it as a saving: with `fail-fast: false` above, all six legs
-      # run whether or not one fails, so serializing them cannot skip any —
-      # and on a public repository GitHub-hosted minutes are free anyway. The
-      # chain of `needs:` between *jobs* does prevent work from starting; this
-      # line only spaces it out. `fail-fast: true` is the lever if the matrix
-      # should ever stop early, at the cost of hiding which other legs failed.
-      max-parallel: 1
+      # Stop the matrix as soon as one leg fails, cancelling the rest in
+      # flight. This is the one lever that genuinely skips work — a `needs:`
+      # chain only delays it, and `max-parallel` only spaces it out.
+      #
+      # The cost is real and is the reason it was `false` before: a leg
+      # cancelled mid-run reports nothing, so a run that dies on ubuntu 3.12
+      # cannot tell you whether windows was also broken. That is accepted
+      # here, because the common case is one defect failing every leg for the
+      # same reason, and re-running the matrix after a fix is cheap.
+      #
+      # It bounds only the six legs of *this* job. GitHub has no way to
+      # cancel a sibling job on another's failure without chaining them, so
+      # lint, typecheck, bare, package and coverage still run to completion
+      # — which is the point: they report what else is wrong.
+      fail-fast: true
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13", "3.14"]
@@ -129,7 +130,6 @@ jobs:
       - run: uv run pytest
 
   bare:
-    needs: slow-tests
     # Design principle 8: `pip install lumberjack` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
     # `test` installs every extra, so without this job no `except ImportError`
@@ -171,7 +171,6 @@ jobs:
       - run: uv run pytest
 
   package:
-    needs: bare
     # The wheel is the artefact users actually get, and it is assembled by
     # hatchling from a config nothing else exercises — a mistake in the
     # packages list or a missing py.typed passes every other job here.
@@ -231,7 +230,6 @@ jobs:
     # bare-install skipif, and Windows path branches — but collecting it
     # means six `--partial` uploads plus a `final` call, which is a lot of
     # workflow for a fraction of a percent.
-    needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
