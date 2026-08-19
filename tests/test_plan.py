@@ -450,8 +450,18 @@ def test_a_position_row_is_indented_one_past_its_loop():
     ("period", "expected"),
     [
         (2.0, "2.0s each"),
+        # The widest period still stated in full digits: a hundred and
+        # fifteen days an iteration.
+        (9_999_999.9, "9,999,999.9s each"),
+        # The everyday trigger, and the one the bound was tightened for. A
+        # container that starts at epoch 0 and then NTP-syncs folds one span
+        # of about 1.7e9 seconds into the period — no corruption, just a
+        # clock stepping forward. In full digits that is 21 characters in a
+        # column otherwise about 8, and rich squeezes every other cell to
+        # fit it.
+        (1.755e9, "1.8e+09s each"),
         (1e12, "1.0e+12s each"),
-        # A corrupted timestamp can reach this, and it used to render 419
+        # A fabricated timestamp can reach this, and it used to render 419
         # characters into a fixed-width column.
         (1e308, "1.0e+308s each"),
     ],
@@ -464,7 +474,15 @@ def test_a_very_slow_loop_states_its_period_compactly(period, expected):
     assert len(cell) <= MAX_SECONDS_WIDTH + len("s each")
 
 
-def test_the_heartbeat_bounds_its_period_the_same_way():
-    line = frame(heartbeat=HeartbeatState(events=3, period=1e308)).heartbeat
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [(1.755e9, "1.8e+09s each"), (1e308, "1.0e+308s each")],
+)
+def test_the_heartbeat_bounds_its_period_the_same_way(period, expected):
+    """`HEARTBEAT_SUMMARY_WIDTH` is a floor, so an unbounded summary pushes
+    the message right rather than being cut — which is why the bound has to
+    be on the seconds cell itself."""
+    line = frame(heartbeat=HeartbeatState(events=3, period=period)).heartbeat
     assert line is not None
-    assert "1.0e+308s each" in line.summary
+    assert expected in line.summary
+    assert len(line.summary.rstrip()) <= HEARTBEAT_SUMMARY_WIDTH

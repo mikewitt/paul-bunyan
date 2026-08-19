@@ -75,13 +75,24 @@ if TYPE_CHECKING:
 HEARTBEAT_SUMMARY_WIDTH = 26
 
 #: The widest fixed-point second count either rate cell will print before
-#: switching to exponential. Not a claim about which periods are meaningful —
-#: only about what fits. `rate` guarantees a positive finite float and nothing
-#: more, so a corrupted timestamp yielding `period=1e308` gives `rate=1e-308`,
-#: which passed every guard and rendered as **419 characters**, dragging every
-#: other row sideways with it. 15 holds `999,999,999.9s`, which is eleven days
-#: an iteration; past that the exact digits say nothing the exponent does not.
-MAX_SECONDS_WIDTH = 15
+#: switching to exponential. 11 holds `9,999,999.9` — a hundred and fifteen
+#: days an iteration — in full digits; past that the exact seconds say nothing
+#: the exponent does not.
+#:
+#: **The trigger is a clock step, not a corrupted timestamp**, and getting
+#: that wrong is what made an earlier version of this bound too loose. A
+#: period is folded from raw `record.created` spans with no upper bound, so a
+#: container that starts at epoch 0 and then NTP-syncs, a VM resumed from a
+#: snapshot, or an unsynchronised RTC all produce one span of ~1.7e9 seconds.
+#: That renders `1,755,000,000.0s each` — 21 characters in a column otherwise
+#: about 8 — and `_RowTextColumn` sets `no_wrap` with no maximum, so rich
+#: measures it at full width and squeezes everything else. Measured at width
+#: 80 the bar drops from 34 cells to 20; at width 60, from 14 to 3, with the
+#: elapsed clock truncated to `0:0…`.
+#:
+#: A fabricated `created` near 1e308 is the same defect further out — 419
+#: characters — and the same bound closes both.
+MAX_SECONDS_WIDTH = 11
 
 
 def _seconds(value: float) -> str:
