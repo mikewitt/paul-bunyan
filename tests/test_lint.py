@@ -307,17 +307,14 @@ def test_a_body_that_does_little_is_not_a_slow_body(
 ) -> None:
     # `extract` in the demo: one log line and a sleep. One line is plenty, and
     # a linter that asks for more here is asking for noise.
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def run(count):
             for i in range(count):
                 log.debug("fetched row %d", i)
                 time.sleep(0.1)
-        """)
-        == []
-    )
+        """) == []
 
 
 def test_stages_in_sequence_with_nothing_announcing_them(
@@ -344,8 +341,7 @@ def test_stages_in_sequence_with_nothing_announcing_them(
 
 
 def test_one_announcement_line_settles_it(rules: Callable[..., list[str]]) -> None:
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def run(files, records, rows):
@@ -358,9 +354,7 @@ def test_one_announcement_line_settles_it(rules: Callable[..., list[str]]) -> No
             log.info("stage 3: joining")
             for row in rows:
                 log.debug("joined row %s", row)
-        """)
-        == []
-    )
+        """) == []
 
 
 def test_a_logging_wrapper_without_stacklevel(one: Callable[..., lint.Finding]) -> None:
@@ -379,15 +373,12 @@ def test_a_logging_wrapper_without_stacklevel(one: Callable[..., lint.Finding]) 
 def test_a_wrapper_that_passes_stacklevel_is_fine(
     rules: Callable[..., list[str]],
 ) -> None:
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def log_helper(message, *args):
             log.debug(message, *args, stacklevel=2)
-        """)
-        == []
-    )
+        """) == []
 
 
 def test_a_wrapper_forwarding_kwargs_is_not_accused(
@@ -395,30 +386,24 @@ def test_a_wrapper_forwarding_kwargs_is_not_accused(
 ) -> None:
     # `**kwargs` may carry a stacklevel this walk cannot see, and accusing a
     # call that already does the right thing is the expensive kind of wrong.
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def log_helper(message, *args, **kwargs):
             log.debug(message, *args, **kwargs)
-        """)
-        == []
-    )
+        """) == []
 
 
 def test_a_local_variable_is_not_a_wrapper(rules: Callable[..., list[str]]) -> None:
     # Only a *parameter* is the caller's message. A local is this function's
     # own text, and this function is where it should be attributed.
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def run():
             message = build_message()
             log.debug(message)
-        """)
-        == []
-    )
+        """) == []
 
 
 def test_an_fstring_destroys_the_template(one: Callable[..., lint.Finding]) -> None:
@@ -455,16 +440,13 @@ def test_nothing_repeating_at_all(one: Callable[..., lint.Finding]) -> None:
 def test_two_startup_lines_are_not_worth_a_paragraph(
     rules: Callable[..., list[str]],
 ) -> None:
-    assert (
-        rules("""
+    assert rules("""
         import logging
 
         def render():
             log.info("rendering 2.4M points at dpi=200")
             log.info("wrote figure.png")
-        """)
-        == []
-    )
+        """) == []
 
 
 # --------------------------------------------------------------------------

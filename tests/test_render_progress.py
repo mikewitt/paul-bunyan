@@ -460,9 +460,9 @@ def test_a_nested_bar_moves_under_its_parent_when_containment_settles(
     labels = ("elsewhere …", _OUTER, _INNER)
     drawn = [ln for ln in re.split(r"[\r\n]", frame) if any(x in ln for x in labels)]
     last = [next(x for x in labels if x in ln) for ln in drawn[-3:]]
-    assert last == list(labels), (
-        f"the child did not move under its parent: {drawn[-3:]}"
-    )
+    assert last == list(
+        labels
+    ), f"the child did not move under its parent: {drawn[-3:]}"
 
 
 def test_a_rows_clock_survives_growth_a_move_and_a_collapse(
@@ -692,9 +692,9 @@ def test_a_loop_too_slow_to_read_draws_a_second_determinate_row(
     position = lines[loop + 1]
     assert "3 of 3" in position, "no position row directly under the loop"
     assert "batch …: validating checksums" in position
-    assert position.index("batch") > lines[loop].index("sequence.py"), (
-        "the position row is not indented under its loop"
-    )
+    assert position.index("batch") > lines[loop].index(
+        "sequence.py"
+    ), "the position row is not indented under its loop"
 
 
 def test_the_position_row_fills_only_as_far_as_the_stage_reached(
