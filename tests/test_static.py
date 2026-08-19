@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
@@ -739,3 +740,409 @@ def test_a_call_in_a_while_condition_belongs_to_the_loop(
     assert by_template["checking %d"].loop_chain != (), "while-test repeats"
     assert by_template["item %s"].loop_chain != (), "a body always repeats"
     assert by_template["starting %s"].loop_chain == (), "for-iter runs once"
+
+
+# --------------------------------------------------------------------------
+# `stable_order`, which used to fail open
+# --------------------------------------------------------------------------
+#
+# The table from issue #81, verbatim, plus the shapes that must *not* be
+# caught. Each body has three sites and would draw a determinate `n of 3`
+# sub-iteration row if `stable_order` said yes; where the middle one can be
+# skipped, the row would show a percentage that is wrong rather than
+# imprecise, which Principle 10 does not license.
+#
+# The unstable cases are written so the *middle* site is the skippable one,
+# because a body whose last site is conditional is unstable for a reason that
+# is easy to get right by accident.
+
+_UNSTABLE = {
+    "an if statement": """
+                if flag:
+                    log.warning('bad')""",
+    "an and": "                _ = flag and log.warning('bad')",
+    "an or": "                _ = flag or log.warning('bad')",
+    "a conditional expression": (
+        "                _ = log.warning('bad') if flag else None"
+    ),
+    "an assert message": "                assert flag, log.warning('bad')",
+    "a try": """
+                try:
+                    log.warning('bad')
+                except ValueError:
+                    pass""",
+    # The sharp pair: semantically identical to the `try` above, and the two
+    # used to give opposite answers.
+    "a suppressing with": """
+                with suppress(ValueError):
+                    log.warning('bad')""",
+    "a plain with": """
+                with open(flag) as fh:
+                    log.warning('bad')""",
+}
+
+
+_JUMPS = {"continue": "continue", "break": "break", "return": "return"}
+
+
+@pytest.mark.parametrize("body", _UNSTABLE.values(), ids=list(_UNSTABLE))
+def test_a_body_that_can_skip_a_line_has_no_stable_order(
+    analyze: Callable[..., static.FileStructure], body: str
+) -> None:
+    structure = analyze(f"""
+        from contextlib import suppress
+
+        def work(log, items, flag):
+            for item in items:
+                log.debug('opening')
+{body}
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    assert len(loop.call_sites) == 3
+    assert not loop.stable_order
+
+
+@pytest.mark.parametrize("jump", _JUMPS.values(), ids=list(_JUMPS))
+def test_everything_after_a_jump_is_conditional(
+    analyze: Callable[..., static.FileStructure], jump: str
+) -> None:
+    """The everyday shape, and the one that made this fail open.
+
+    A guard clause skips the rest of the iteration, so the position row used
+    to pin at 1 of 3 for the whole of a skipped item while the loop row above
+    it advanced.
+    """
+    structure = analyze(f"""
+        def work(log, items):
+            for item in items:
+                log.debug('item %s: opening', item)
+                if item:
+                    {jump}
+                log.debug('item %s: validating', item)
+                log.debug('item %s: committing', item)
+        """)
+    (loop,) = structure.loops.values()
+    opening, validating, committing = loop.call_sites
+
+    assert not opening.conditional, "before the jump, order is still a promise"
+    assert validating.conditional and committing.conditional
+    assert not loop.stable_order
+
+
+def test_a_jump_in_the_last_statement_costs_nothing(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """Nothing follows it, so nothing is skippable and the row survives.
+
+    Without this the rule would be "any jump anywhere", which is the cheaper
+    reading issue #81 offered and a strictly worse one: it withholds rows
+    that are correct.
+    """
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+                log.debug('committing')
+                if item:
+                    break
+        """)
+    (loop,) = structure.loops.values()
+    assert loop.stable_order
+
+
+_NOT_OURS = {
+    # A nested loop's `break` binds to the nested loop.
+    "a nested loop's break": """
+                for other in items:
+                    if other:
+                        break""",
+    # A nested function's `return` returns from the function.
+    "a nested def's return": """
+                def helper():
+                    return 1""",
+    "a lambda's body": "                _ = lambda: 1",
+}
+
+
+@pytest.mark.parametrize("middle", _NOT_OURS.values(), ids=list(_NOT_OURS))
+def test_a_jump_belonging_to_something_else_is_not_ours(
+    analyze: Callable[..., static.FileStructure], middle: str
+) -> None:
+    """Over-suppression is cheap but not free, and these are the boundaries.
+
+    Each of these contains a jump keyword that cannot reach our body, so the
+    row must survive — otherwise the rule degenerates into "any `break` in
+    the file", and the position row disappears from code it is correct for.
+    """
+    structure = analyze(f"""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+{middle}
+                log.debug('committing')
+        """)
+    loop = structure.loops[min(structure.loops)]
+    assert loop.stable_order
+
+
+def test_a_break_in_a_nested_loops_else_clause_is_ours(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """The exception to the exception, and the reason `_jumps_out` cannot
+    simply stop descending at a nested loop: a `for`/`else` clause is not
+    part of that loop, so a `break` there binds to ours."""
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                log.debug('opening')
+                for other in items:
+                    pass
+                else:
+                    break
+                log.debug('committing')
+        """)
+    outer = structure.loops[min(structure.loops)]
+    assert not outer.stable_order
+
+
+def test_the_first_operand_of_a_boolop_always_runs(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """`a and b` defers `b`, never `a` — so a per-child split is the point,
+    and marking the whole expression conditional would be over-suppression."""
+    structure = analyze("""
+        def work(log, items):
+            for item in items:
+                _ = log.debug('opening') and item
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    assert loop.stable_order
+
+
+# --------------------------------------------------------------------------
+# Only a scope node's body runs in the scope it introduces
+# --------------------------------------------------------------------------
+
+DEFINITION_TIME = """
+def outer(items):
+    for item in items:
+        @(log.debug("decorating %s", item) or (lambda f: f))
+        def worker():
+            log.debug("in worker")
+
+        worker()
+
+
+def classbody(items):
+    for item in items:
+        class Row:
+            log.debug("class body %s", item)
+
+
+def defaults(items):
+    for item in items:
+        def worker(x=log.debug("default %s", item)):
+            pass
+"""
+
+
+def test_a_definition_time_expression_belongs_to_the_enclosing_scope(
+    write_module: Callable[..., Path],
+) -> None:
+    """A decorator, a class base and a parameter default all evaluate where
+    the `def` is written, not inside it — so a `def` in a loop body evaluates
+    them once per iteration, and static used to say `loop_chain=()`.
+
+    Driven against real records rather than a remembered rule, for the reason
+    `test_ast_linenos_match_the_records_they_emit` gives: this is a claim
+    about what CPython attributes, and it should fail if CPython changes.
+    See issue #82.
+    """
+    path = write_module(DEFINITION_TIME, name="definition_time.py")
+    logger = logging.getLogger("test_static.definition_time")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    capture = _Capture()
+    logger.addHandler(capture)
+    try:
+        namespace: dict[str, object] = {"log": logger}
+        source = path.read_text(encoding="utf-8")
+        exec(compile(source, str(path), "exec"), namespace)  # noqa: S102 # nosec B102
+        for name in ("outer", "classbody", "defaults"):
+            fn = namespace[name]
+            assert callable(fn)
+            fn([1, 2, 3])
+    finally:
+        logger.removeHandler(capture)
+
+    structure = static.analyze_file(str(path))
+    assert structure is not None
+    by_template = {site.template: site for site in structure.call_sites.values()}
+
+    # The three definition-time expressions: named for the enclosing
+    # function, and inside the loop that re-executes the `def`.
+    for template in ("decorating %s", "class body %s", "default %s"):
+        site = by_template[template]
+        assert site.loop_chain != (), f"{template!r} repeats and said it did not"
+
+    # And the runtime agrees about all four, including the closure body,
+    # which is the one that really does leave the loop behind.
+    for record in capture.records:
+        emitted = structure.call_sites.get(record.lineno)
+        assert emitted is not None, f"no call site at line {record.lineno}"
+        assert emitted.func_name == record.funcName, record.msg
+
+    fired = Counter(record.msg for record in capture.records)
+    assert fired["decorating %s"] == 3, "the decorator re-evaluates per iteration"
+    assert by_template["in worker"].loop_chain == (), "a closure body does not"
+
+
+def test_a_class_body_keeps_the_loop_it_is_written_in(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """The one scope that is not a deferral.
+
+    A class body executes immediately and in place, so it takes the new name
+    — CPython reports `funcName='Row'` — and keeps the loop chain. Resetting
+    both agreed with the consumer's `funcName` check by accident, so the site
+    was *accepted* with an empty chain and earned the standalone
+    one-bar-per-call-site row the row model exists to remove.
+    """
+    structure = analyze("""
+        def build(log, items):
+            for item in items:
+                class Row:
+                    log.debug('row %s', item)
+        """)
+    (site,) = structure.call_sites.values()
+    assert site.func_name == "Row"
+    assert site.loop_chain != ()
+
+
+def test_a_conditionally_defined_decorator_stays_conditional(
+    analyze: Callable[..., static.FileStructure],
+) -> None:
+    """`loops` and `conditional` move together, which is the trap.
+
+    Restoring the loop chain for a decorator while dropping the branch flag
+    would readmit this as a stable-ordered body member — turning issue #82's
+    fail-*closed* miss into issue #81's fail-*open* fabricated percentage,
+    which is strictly worse than either.
+    """
+    structure = analyze("""
+        def build(log, items, flag):
+            for item in items:
+                log.debug('opening')
+                if flag:
+                    @(log.debug('decorating %s', item) or (lambda f: f))
+                    def worker():
+                        pass
+                log.debug('committing')
+        """)
+    (loop,) = structure.loops.values()
+    decorating = next(s for s in loop.call_sites if s.template == "decorating %s")
+    assert decorating.loop_chain != ()
+    assert decorating.conditional
+    assert not loop.stable_order
+
+
+GENERATOR_SCOPE = """
+def run(items):
+    for item in items:
+        log.debug("item %s: opening", item)
+        total = sum(
+            log.debug("element %s", x) or 1
+            for x in (log.debug("first iterable") or item)
+        )
+        log.debug("item %s: total %s", item, total)
+"""
+
+
+def test_a_generator_expression_is_its_own_scope(
+    write_module: Callable[..., Path],
+) -> None:
+    """`funcName` really is `<genexpr>`, and saying otherwise contradicted it.
+
+    Generator expressions were left out of PEP 709, so unlike a list or set
+    comprehension they still compile to a frame of their own on every version
+    this package supports. Static used to report the enclosing function, and
+    the consumer's `funcName` check then refused the site — while still
+    counting it toward the body size a position row draws against. One real
+    member and one unmatchable one satisfied `MIN_BODY_SITES`, and the row
+    read `1 of 2` forever. See issue #83.
+
+    The outermost iterable is the exception, and it is `For.iter`'s split one
+    level down: it is evaluated eagerly, where it is written.
+    """
+    path = write_module(GENERATOR_SCOPE, name="generator_scope.py")
+    logger = logging.getLogger("test_static.generator_scope")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    capture = _Capture()
+    logger.addHandler(capture)
+    try:
+        namespace: dict[str, object] = {"log": logger}
+        source = path.read_text(encoding="utf-8")
+        exec(compile(source, str(path), "exec"), namespace)  # noqa: S102 # nosec B102
+        run = namespace["run"]
+        assert callable(run)
+        run([[1, 2]])
+    finally:
+        logger.removeHandler(capture)
+
+    structure = static.analyze_file(str(path))
+    assert structure is not None
+    for record in capture.records:
+        site = structure.call_sites.get(record.lineno)
+        assert site is not None, f"no call site at line {record.lineno}"
+        assert site.func_name == record.funcName, record.msg
+
+    by_template = {site.template: site for site in structure.call_sites.values()}
+    inside = by_template["element %s"]
+    assert inside.func_name == "<genexpr>"
+    # Not modelled as a loop, so it claims no chain rather than the enclosing
+    # one — when the generator is consumed is not knowable from the source.
+    assert inside.loop_chain == ()
+    assert (inside.position, inside.body_size) == (None, None)
+
+    # The body keeps the eager iterable, which really does run once per
+    # iteration in `run`, and loses only the element expression.
+    eager = by_template["first iterable"]
+    assert eager.func_name == "run"
+    (loop,) = structure.loops.values()
+    assert [site.template for site in loop.call_sites] == [
+        "item %s: opening",
+        "first iterable",
+        "item %s: total %s",
+    ]
+
+
+_COMPREHENSIONS = {
+    "list": "[log.debug('element %s', x) or 1 for x in item]",
+    "set": "{log.debug('element %s', x) or 1 for x in item}",
+    "dict": "{x: log.debug('element %s', x) for x in item}",
+}
+
+
+@pytest.mark.parametrize(
+    "comprehension", _COMPREHENSIONS.values(), ids=list(_COMPREHENSIONS)
+)
+def test_a_comprehension_stays_in_the_enclosing_scope(
+    analyze: Callable[..., static.FileStructure], comprehension: str
+) -> None:
+    """PEP 709 inlines list, set and dict comprehensions from 3.12, which is
+    this package's floor — so the enclosing name and loop chain are simply
+    correct there, and treating them like generator expressions would throw
+    away structure that is real."""
+    structure = analyze(f"""
+        def run(log, items):
+            for item in items:
+                log.debug('opening')
+                _ = {comprehension}
+        """)
+    by_template = {site.template: site for site in structure.call_sites.values()}
+    inside = by_template["element %s"]
+    assert inside.func_name == "run"
+    assert inside.loop_chain != ()

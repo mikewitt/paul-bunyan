@@ -24,11 +24,22 @@ What it cannot see, and why each silence is the correct failure:
   asserting something untrue is worse than one asserting less.
 - **Log calls it does not recognise** — see `_MESSAGE_ARG` for the exact rule
   and the false positive it accepts in exchange.
-- **Comprehensions and generator expressions**, which are modelled neither as
-  loops nor as scopes: a call site inside one is attributed to the enclosing
-  function and to the enclosing loops.
-- **`break`, `continue` and `return`**, which make a body's textual order an
-  upper bound rather than a promise.
+- **That a generator expression is a loop.** It is modelled as a *scope*
+  (`funcName` really is `<genexpr>`) but not as a loop, so a call inside one
+  reports an empty loop chain although it repeats. Modelling it properly needs
+  a `Loop` of its own, and when the generator is consumed — here, elsewhere,
+  never — is not knowable from the source. Comprehensions need none of this:
+  PEP 709 inlines them from 3.12, so the enclosing name and loop chain are
+  simply correct.
+- **Whether an annotation is evaluated at all.** Under
+  `from __future__ import annotations` it never is, and 3.14's `__annotate__`
+  defers it further, but it is attributed to the enclosing scope as though it
+  ran there. Excluding annotations is a different change from the one
+  decorators and defaults wanted; nothing recognisable has been found in one.
+- **Whether a context manager swallows.** `with contextlib.suppress(...)` and
+  `with open(...)` are one node type, so every `with` body is treated as
+  conditional. That costs real position rows on an ordinary shape and
+  fabricates none, which is the direction Principle 10 points.
 
 And the thing it must never be trusted about: a file that has changed since the
 running process imported it. Line numbers move, and `file:lineno` is exact and
@@ -152,9 +163,12 @@ class CallSite:
     #: call is not inside a loop. Resets at every function, lambda and class
     #: boundary: a closure defined in a loop body does not run per iteration.
     loop_chain: tuple[int, ...]
-    #: The call sits under an `if`, `try` or `match` *within its innermost
-    #: loop body*, so it may not fire on every iteration. A consumer ordering
-    #: a body should treat that body as having no stable order.
+    #: The call may not fire on an iteration where the body's other sites
+    #: do — because it sits under a branch (`if`, `try`, `match`, `with`) or
+    #: in the deferred half of an expression, or because a `break`,
+    #: `continue` or `return` earlier in the same body can skip it. Scoped to
+    #: the innermost loop body. A consumer ordering a body should treat that
+    #: body as having no stable order.
     conditional: bool
     #: 1-based ordinal within the innermost loop body, in textual order, and
     #: the body's size — `position` of `body_size`. Both None exactly when
@@ -212,14 +226,23 @@ class Loop:
         sub-iteration bar built on it would show a wrong percentage rather
         than an imprecise one.
 
-        Under-detects, and fails *open* when it does — see issue #81. This
-        reads `conditional`, which the walk sets for statement-level branches
-        only, while the module docstring above already records `break`,
-        `continue` and `return` as making textual order an upper bound. A
-        guard clause, a `for`/`else`, `cond and log(...)` and
-        `contextlib.suppress` all return True here and should not.
+        `conditional` is what carries this, and the walk sets it for three
+        separate reasons: a call under a statement-level branch (`if`, `try`,
+        `match`, `with`), a call in the deferred half of an expression
+        (`a and log(...)`, a conditional expression, an `assert` message),
+        and a call textually after a `break`, `continue` or `return` in the
+        same body. All three are the same claim — this line may not fire on
+        an iteration where an earlier one did — and any of them is enough to
+        withhold the row.
+
+        Where it errs it now errs *closed*: a guard clause marks the whole
+        remainder of the body conditional even though those sites really do
+        fire together, and a `with` that cannot suppress is treated as one
+        that can. Both cost a row that would have been correct. The direction
+        matters more than the count — a withheld row claims less, while the
+        determinate row this used to admit showed a percentage that was
+        wrong. See issue #81 for what it looked like before.
         """
-        # lumberjack: see issue #81
         return all(not site.conditional for site in self.call_sites)
 
 
@@ -389,6 +412,87 @@ def _nested_statements(node: ast.AST) -> int:
     return total
 
 
+#: Scope boundaries, which two separate rules need. A `return` inside one
+#: belongs to it rather than to the loop body that lexically contains it, and
+#: a `break` cannot cross one at all; and only a scope node's *body* runs in
+#: the scope it introduces, which is what `_Walker._visit_scope` is for.
+_Scope = (
+    ast.FunctionDef
+    | ast.AsyncFunctionDef
+    | ast.ClassDef
+    | ast.Lambda
+    | ast.GeneratorExp
+)
+_SCOPES: Final = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+)
+
+_LOOP_NODES: Final = (ast.For, ast.AsyncFor, ast.While)
+
+
+def _deferred_children(node: ast.AST) -> frozenset[int]:
+    """The children of `node` that evaluate only sometimes, by `id()`.
+
+    `_child_ctx` gives one context to every child, which is right for a
+    statement-level branch — an `if` defers its whole body — and wrong for an
+    expression that defers only part of itself. These three do:
+
+    - `a and log(...)` / `a or log(...)` — everything after the first operand
+    - `log(...) if cond else None` — both arms, never the test
+    - `assert cond, log(...)` — the message, which evaluates only on failure
+
+    Corpus incidence of a log call in one of these is 0 across 2,244 files
+    (see issue #81), so this buys no measured coverage today. It is here
+    because the shapes are ordinary Python and the alternative is a
+    determinate bar over a body that does not have the order it claims.
+    """
+    if isinstance(node, ast.BoolOp):
+        return frozenset(id(value) for value in node.values[1:])
+    if isinstance(node, ast.IfExp):
+        return frozenset({id(node.body), id(node.orelse)})
+    if isinstance(node, ast.Assert):
+        return frozenset({id(node.msg)}) if node.msg is not None else frozenset()
+    return frozenset()
+
+
+def _jumps_out(node: ast.AST, *, nested_loop: bool = False) -> bool:
+    """Whether `node` can end the enclosing loop body early.
+
+    `break`, `continue` and `return` make textual order an upper bound rather
+    than a promise: everything after one of them is skippable, so a
+    determinate sub-iteration bar over the body would show a percentage that
+    is wrong rather than imprecise. This is the everyday shape — a guard
+    clause at the top of a loop — and it used to pass `stable_order`.
+
+    Three boundaries, each of which changes the answer:
+
+    - **Scopes.** A `return` in a nested `def` returns from that `def`.
+    - **A nested loop's body.** Its `break` and `continue` bind to it, and its
+      `return` still binds to us.
+    - **A nested loop's `else` clause.** Not part of that loop, so a `break`
+      there binds to us after all — which is why this cannot simply stop
+      descending at a loop.
+    """
+    if isinstance(node, ast.Return):
+        return True
+    if isinstance(node, ast.Break | ast.Continue):
+        return not nested_loop
+    if isinstance(node, _SCOPES):
+        return False
+    if isinstance(node, _LOOP_NODES):
+        return any(_jumps_out(child, nested_loop=True) for child in node.body) or any(
+            _jumps_out(child, nested_loop=nested_loop) for child in node.orelse
+        )
+    return any(
+        _jumps_out(child, nested_loop=nested_loop)
+        for child in ast.iter_child_nodes(node)
+    )
+
+
 def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     """The context a node's children are visited with.
 
@@ -396,42 +500,73 @@ def _child_ctx(node: ast.AST, ctx: _Ctx) -> _Ctx:
     walk decides what a node *is* and this decides what it *encloses*. A node
     matching none of these hands its own context straight down.
 
-    Loops are the deliberate omission: only part of a loop statement repeats,
-    so `_Walker._visit_loop` splits the children itself rather than giving
-    them all one context.
+    Loops and scopes are the deliberate omissions: only part of either
+    statement runs where the node says it does, so `_Walker._visit_loop` and
+    `_visit_scope` split the children themselves and call this for the half
+    that belongs inside. What comes back here is *that* half's context.
 
-    One node, one child context — which is the shape, and is *not* enough for
-    a scope node. A decorator, a parameter default, an annotation and a class
-    base all execute in the enclosing scope at definition time, but they are
-    children of the node that introduces the new one, so they receive the
-    reset here along with the body that does belong to it. That claims the
-    wrong `func_name` and, worse, an empty loop chain for something that
-    really does repeat. See issue #82 for the measurement and for why the
-    fix has to move `loops` and `conditional` together.
+    One node, one child context is the shape, and it is not enough on its
+    own — a decorator, a parameter default, an annotation and a class base
+    all execute in the enclosing scope at definition time, though they are
+    children of the node introducing the new one. Handing them the reset
+    claimed the wrong `func_name` and, worse, an empty loop chain for
+    something that really does repeat (issue #82).
     """
-    # lumberjack: see issue #82
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-        # A scope boundary resets the loop chain: a closure defined inside
-        # a loop body is not called once per iteration, and `funcName` on
-        # its records reads the inner name, not the enclosing one.
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        # A function boundary resets the loop chain: a closure defined inside
+        # a loop body is not called once per iteration, and `funcName` on its
+        # records reads the inner name, not the enclosing one.
         return _Ctx(
             func_name=node.name,
-            func_lineno=node.lineno,
-            # A class body has no parameters, and a call in one is not a
-            # wrapper forwarding anything.
-            params=frozenset() if isinstance(node, ast.ClassDef) else _params(node),
-            loops=(),
-            conditional=False,
-        )
-    if isinstance(node, ast.Lambda):
-        return _Ctx(
-            func_name="<lambda>",
             func_lineno=node.lineno,
             params=_params(node),
             loops=(),
             conditional=False,
         )
+    if isinstance(node, ast.ClassDef):
+        # A class body is the one scope that is not a deferral: it executes
+        # immediately, in place, once per pass of whatever encloses it. So it
+        # takes the new name — CPython reports `funcName='Row'` for a call in
+        # `class Row:`, and static agreeing is what lets the site through the
+        # consumer's name check — and *keeps* the loop chain and the branch
+        # flag, which describe when the statement runs rather than what it is.
+        return ctx._replace(
+            func_name=node.name,
+            func_lineno=node.lineno,
+            # No parameters, and a call in a class body is not a wrapper
+            # forwarding anything.
+            params=frozenset(),
+        )
+    if isinstance(node, ast.Lambda | ast.GeneratorExp):
+        # Both compile to a code object of their own, and stdlib's
+        # `findCaller` reads its name — so a call inside a generator
+        # expression reports `funcName='<genexpr>'`, measured on 3.13.
+        # Saying `run` here made static *contradict* the records, which is
+        # worse than saying nothing: consumers use static as a veto.
+        #
+        # A generator expression is a loop and is deliberately not modelled
+        # as one. It would need a `Loop` of its own before its body could be
+        # ordered, and when it runs is not knowable from the source — it may
+        # be consumed here, elsewhere, or never. An empty loop chain claims
+        # less; the enclosing chain would have claimed something untrue.
+        return _Ctx(
+            func_name="<lambda>" if isinstance(node, ast.Lambda) else "<genexpr>",
+            func_lineno=node.lineno,
+            # A generator expression takes no parameters, so nothing in one
+            # can be a wrapper forwarding a caller's message.
+            params=_params(node) if isinstance(node, ast.Lambda) else frozenset(),
+            loops=(),
+            conditional=False,
+        )
     if isinstance(node, ast.If | ast.Try | ast.TryStar | ast.Match):
+        return ctx._replace(conditional=True)
+    if isinstance(node, ast.With | ast.AsyncWith):
+        # Whether the manager swallows is unknowable from the node type —
+        # `contextlib.suppress(E)` and `open(path)` are the same `With` — and
+        # the two differ in exactly the way this flag is about. Name-matching
+        # the known suppressors would catch the common case and miss a
+        # hand-rolled one, which is a *fail-open* miss and the class of defect
+        # this whole flag exists to close. So every `with` body is conditional.
         return ctx._replace(conditional=True)
     return ctx
 
@@ -457,13 +592,73 @@ class _Walker:
             if log_call is not None:
                 self.found.append(_Found(log_call=log_call, ctx=ctx))
             # Keep descending: an argument can be another call.
-        elif isinstance(node, ast.For | ast.AsyncFor | ast.While):
+        elif isinstance(node, _LOOP_NODES):
             self._visit_loop(node, ctx)
+            return
+        elif isinstance(node, _SCOPES):
+            self._visit_scope(node, ctx)
             return
 
         ctx = _child_ctx(node, ctx)
+        # One context per child, except where only *part* of an expression
+        # is deferred — `_child_ctx` cannot say that, because it answers per
+        # node. A scope node reached this way still resets the flag for its
+        # own children, which is correct: a lambda's body has an order of its
+        # own regardless of when the lambda is evaluated.
+        deferred = _deferred_children(node)
+        conditional_ctx = ctx._replace(conditional=True)
         for child in ast.iter_child_nodes(node):
-            self.visit(child, ctx)
+            self.visit(child, conditional_ctx if id(child) in deferred else ctx)
+
+    def _visit_scope(self, node: _Scope, ctx: _Ctx) -> None:
+        """Only the body executes in the new scope.
+
+        A decorator expression, a parameter default, an annotation and a
+        class base are all children of the node that introduces the scope
+        and all execute in the *enclosing* one, at definition time. Giving
+        them the reset context named the wrong function and emptied the loop
+        chain for something that genuinely repeats: a decorator on a `def`
+        inside a `for` runs once per iteration, because the `def` statement
+        re-executes. See issue #82.
+
+        Annotations are the one member this still gets wrong, and
+        deliberately: under `from __future__ import annotations` they are
+        never evaluated at all, so they want *excluding* rather than
+        re-scoping. That is a different change from the one the rest of
+        these want, and nothing recognisable has ever been found in one.
+        """
+        inner = _child_ctx(node, ctx)
+        if isinstance(node, ast.GeneratorExp):
+            self._visit_genexpr(node, ctx, inner)
+            return
+        body = node.body if isinstance(node.body, list) else [node.body]
+        belongs = {id(stmt) for stmt in body}
+        for child in ast.iter_child_nodes(node):
+            self.visit(child, inner if id(child) in belongs else ctx)
+
+    def _visit_genexpr(self, node: ast.GeneratorExp, ctx: _Ctx, inner: _Ctx) -> None:
+        """The outermost iterable is evaluated eagerly, in the enclosing scope.
+
+        Exactly `For.iter`'s split, one level down: `sum(f(x) for x in g())`
+        calls `g()` where it is written and everything else inside the
+        generator's own frame. Measured — the eager part reports the
+        enclosing `funcName` and the rest report `<genexpr>` — and it is a
+        grandchild rather than a child, which is why this cannot be the
+        set-of-ids shape `_visit_scope` uses for every other scope.
+
+        Comprehensions are not here on purpose: PEP 709 inlines list, set
+        and dict comprehensions from 3.12, which is this package's floor, so
+        a call in one really does report the enclosing name and really does
+        run in the enclosing loop. Generator expressions were left out of
+        that change.
+        """
+        first = node.generators[0]
+        for child in ast.iter_child_nodes(node):
+            if child is not first:
+                self.visit(child, inner)
+                continue
+            for part in ast.iter_child_nodes(child):
+                self.visit(part, ctx if part is first.iter else inner)
 
     def _visit_loop(self, node: ast.For | ast.AsyncFor | ast.While, ctx: _Ctx) -> None:
         inner = (*ctx.loops, node.lineno)
@@ -497,8 +692,19 @@ class _Walker:
             repeats.add(id(node.test))
         body = repeats
         body_ctx = ctx._replace(loops=inner, conditional=False)
+        # Everything textually after a `break`, `continue` or `return` is
+        # skippable, so the body's order stops being a promise there. Split
+        # at the top level of the body only: a jump nested inside a statement
+        # is inside a branch, and that branch has already marked its own
+        # contents conditional.
+        after_jump = ctx._replace(loops=inner, conditional=True)
+        jumped = False
         for child in ast.iter_child_nodes(node):
-            self.visit(child, body_ctx if id(child) in body else ctx)
+            if id(child) not in body:
+                self.visit(child, ctx)
+                continue
+            self.visit(child, after_jump if jumped else body_ctx)
+            jumped = jumped or _jumps_out(child)
 
 
 # --------------------------------------------------------------------------
