@@ -489,3 +489,14 @@ def test_the_default_does_not_override_an_explicit_since(store, make_row):
         + [make_row(created=now, message=str(i)) for i in range(5)]
     )
     assert [r.message for r in store.recent(since=now - 10)] == list("01234")
+
+
+def test_close_prevents_subsequent_queries_and_is_idempotent():
+    """A closed store is unusable for queries, raising sqlite3.ProgrammingError.
+    Multiple closes are safe."""
+    store = SQLiteRecordStore(":memory:")
+    store.close()
+    store.close()  # second close is a no-op
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.recent()
