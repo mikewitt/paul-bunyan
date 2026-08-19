@@ -73,9 +73,14 @@ flush disabled, the record count is only knowable then, which the tier-1
 
 - **`shutdown()` and restoring the root logger.** Exercised incidentally — the
   process exits — but never asserted on. It is lifecycle, not the product.
-- **TTY detection.** Every script forces `output_mode` explicitly. Detection →
-  rich is covered only by `demo-gif.yml` under a real pty, and closing that gap
-  is its own problem.
+- **TTY detection → rich.** Eight of the nine scripts force `output_mode`
+  explicitly; `piped_is_plain.py` deliberately does not, so detection →
+  *plain* is covered here. The rich half needs a real pty and is covered only
+  by `demo-gif.yml`, which is not a required check — closing that gap means
+  pty-driving a child under pytest, which is Unix-only and its own problem.
+  `script_runner.child_env` strips `LUMBERJACK_*` from the child's
+  environment so an inherited `LUMBERJACK_OUTPUT_MODE` cannot satisfy the
+  plain half through the override branch instead of through detection.
 - **`wrapped`, `bursty`, `silent`** (see `examples/demo.py --list`). The first
   two are shapes the design documents as handled *badly*; pinning them here
   would freeze known-wrong behaviour as the acceptance contract, and tier 1 is
@@ -90,7 +95,10 @@ flush disabled, the record count is only knowable then, which the tier-1
 `@pytest.mark.slow` is orthogonal to the tiers — a test can be tier 1 and
 slow, and conflating "how important" with "how long" is how a tiering scheme
 rots. `pyproject.toml` deselects `slow` from the default run, so `pytest` stays
-around eleven seconds; the `slow-tests` CI job selects them with `-m slow`.
+in the low tens of seconds; the `slow-tests` CI job selects them with
+`-m slow`. (No exact figure: it was "around eleven seconds" for about a
+week, and a number that has to be re-measured to stay true is a number that
+will be wrong.)
 
 `tests/tier1/test_slow_shapes.py` is the whole of it today, and everything in
 it is slow irreducibly: `MIN_LEGIBLE_PERIOD` is 1.0s and deliberately not
