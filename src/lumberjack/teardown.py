@@ -29,10 +29,13 @@ from lumberjack.detect import MAX_BARS_ENV_VAR
 from lumberjack.renderers.plain import PlainTextRenderer
 
 if TYPE_CHECKING:
+    from lumberjack.schema import LogRecordRow
     from lumberjack.session import Session
 
 _session: Session | None = None
 _prev_excepthook = None
+#: Rows the exit flush could not write, reported after the display is down.
+_unwritten = 0
 
 
 def install(session: Session) -> None:
@@ -60,13 +63,14 @@ def install(session: Session) -> None:
 
 def uninstall() -> None:
     """Give the excepthook and atexit hook back. A no-op if not installed."""
-    global _session, _prev_excepthook
+    global _session, _prev_excepthook, _unwritten
     if _session is None:
         return
     sys.excepthook = _prev_excepthook or sys.__excepthook__
     atexit.unregister(run)
     _session = None
     _prev_excepthook = None
+    _unwritten = 0
 
 
 def handle_exception(
@@ -98,6 +102,7 @@ def run() -> None:
     _flush_buffer()
     _stop_live_display()
     _report_dropped()
+    _report_unwritten()
     _report_suppressed_bars()
     _dump_diagnostics()
 
@@ -126,6 +131,31 @@ def _report_dropped() -> None:
                 "lower flush_interval in init().",
                 file=sys.stderr,
             )
+
+
+def _report_unwritten() -> None:
+    """Say so if the exit flush could not reach the store.
+
+    During the run a failed write is retried — `flush()` puts the batch back
+    and the next tick tries again. This is the one flush with no next tick,
+    so there is nowhere to put the rows and the only honest thing left is to
+    name the number. Silence here would be the same defect issue #77
+    reported, moved to the one place it is least recoverable.
+
+    Reported separately from `_report_dropped()` rather than folded into it:
+    that number means the buffer overflowed and points at `buffer_size` and
+    `flush_interval`, which is not the remedy for a store that is refusing
+    writes.
+    """
+    if not _unwritten:
+        return
+    with contextlib.suppress(Exception):
+        print(
+            f"lumberjack: {_unwritten} record(s) never reached the store — "
+            "the final write failed. The store was unwritable at exit; the "
+            "records are lost.",
+            file=sys.stderr,
+        )
 
 
 def _report_suppressed_bars() -> None:
@@ -171,9 +201,10 @@ def _dump_diagnostics() -> None:
 
 
 def _flush_buffer() -> None:
-    # The last chance the buffered records have: if `append()` raises here
-    # they are already out of the buffer and nothing holds them.
-    # lumberjack: see issue #77.
+    # The last chance the buffered records have. `flush()` puts a failed
+    # batch back for the next tick to retry; there is no next tick here, so
+    # the count is kept for `_report_unwritten()` to name instead. Losing
+    # them silently is what issue #77 reported.
     #
     # Deliberately a duplicate of `lumberjack.flush()`, not a call to it:
     # `flush()` takes `session.registry_lock()` around the same read-then-write
@@ -183,9 +214,13 @@ def _flush_buffer() -> None:
     # by the time an atexit hook or excepthook runs, `shutdown()` racing it is
     # not the failure mode this guards against. Do not "simplify" this into a
     # call to `flush()`.
+    global _unwritten
     if _session is None:
         return
-    with contextlib.suppress(Exception):
+    rows: list[LogRecordRow] = []
+    try:
         rows = _session.handler.drain()
         if rows:
             _session.store.append(rows)
+    except Exception:  # noqa: BLE001 - cleanup must never hide a real traceback
+        _unwritten = len(rows)

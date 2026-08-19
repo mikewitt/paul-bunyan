@@ -5,7 +5,7 @@ from __future__ import annotations
 import collections
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import override
 
 from lumberjack.schema import LogRecordRow
@@ -37,6 +37,9 @@ class LumberjackHandler(logging.Handler):
         self._buffer: collections.deque[LogRecordRow] = collections.deque(
             maxlen=buffer_size
         )
+        # `deque.maxlen` is `int | None` to a type checker and never None
+        # here; `restore()` does capacity arithmetic and wants the int.
+        self._buffer_size = buffer_size
         # Our own lock, not `logging.Handler.lock`. That one serializes
         # `emit()` against the handler's output; this one guards the buffer,
         # which `drain()` touches from the pump thread without going through
@@ -99,8 +102,51 @@ class LumberjackHandler(logging.Handler):
                 self.handleError(record)
 
     def drain(self) -> list[LogRecordRow]:
-        """Atomically empty and return the buffer, oldest first."""
+        """Atomically empty and return the buffer, oldest first.
+
+        Destructive: once this returns, nothing else holds those rows. A
+        caller that cannot guarantee the write succeeds owes them `restore()`
+        on failure, or Principle 6's lossless half is broken silently.
+        """
         with self._lock:
             rows = list(self._buffer)
             self._buffer.clear()
         return rows
+
+    def restore(self, rows: Sequence[LogRecordRow]) -> None:
+        """Put a failed batch back at the front, oldest first.
+
+        `drain()` empties the buffer before the store write is attempted, so
+        a raising `append()` used to lose the batch outright — not the
+        counted, announced loss the bounded buffer already makes, but a
+        silent one, which is the failure Principle 6 names specifically
+        (issue #77).
+
+        Three things this has to keep true, and each shapes the code:
+
+        - **No reordering.** These rows are older than anything that arrived
+          while the write was failing, so they go at the *front*.
+        - **No unbounded growth.** A permanently failing store — disk full, a
+          closed connection — must not grow the retry queue without limit, so
+          the batch is trimmed to what fits under the existing ceiling.
+        - **The loss stays counted.** What no longer fits increments
+          `dropped`, so `teardown._report_dropped()` covers it at exit for
+          free rather than needing a second counter with a second message.
+
+        Trimmed from the *front* rather than by letting `extendleft` spill:
+        a full `deque` discards from the far end, which would evict the
+        newest records the buffer holds in order to make room for the oldest
+        ones being retried. Dropping the oldest is the same rule the buffer
+        already applies when it overflows.
+
+        **No double-write**, which this cannot enforce and depends on:
+        `RecordStore.append()` is all-or-nothing per batch, so a batch that
+        raised wrote nothing and replaying it duplicates nothing.
+        """
+        with self._lock:
+            capacity = self._buffer_size - len(self._buffer)
+            overflow = len(rows) - capacity
+            if overflow > 0:
+                self._dropped += overflow
+                rows = rows[overflow:]
+            self._buffer.extendleft(reversed(rows))
