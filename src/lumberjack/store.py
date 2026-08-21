@@ -87,12 +87,74 @@ class TaskDelta(NamedTuple):
 #:
 #: Bounded by default because `recent()` is the documented way to query
 #: captured records, and the unbounded form materializes one dataclass per
-#: row: at the ~1M-record retention target that is roughly nine seconds and
-#: half a million live objects, from a call that looks free. A cap is the
-#: wrong answer for the rare caller who genuinely wants everything and the
-#: right one for everybody else, so `n=None` still means "all of it" — it
-#: just has to be asked for now.
+#: row: at the default retention bound that is roughly nine seconds and half
+#: a million live objects, from a call that looks free. A cap is the wrong
+#: answer for the rare caller who genuinely wants everything and the right
+#: one for everybody else, so `n=None` still means "all of it" — which now
+#: means "all of what is retained", `DEFAULT_RETAIN` below.
 DEFAULT_RECENT_LIMIT = 1000
+
+#: How many records a session keeps before the oldest are evicted.
+#:
+#: The store is `:memory:` by default and a long-running job is the scenario
+#: this package exists for, so an unbounded one is a leak with a schedule.
+#: Measured, in a fresh process per size and linear with no plateau: **319
+#: bytes per record** of RSS, of which 262 is the store's own pages — 304 MiB
+#: at this bound, ~3 GiB at ten times it.
+#:
+#: A million because that is the number `CLAUDE.md` and this file already
+#: claimed as the retention target while nothing enforced it; choosing it
+#: makes the existing prose true rather than adding a second figure to
+#: reconcile. Eviction is by arrival order only, never by content, so what is
+#: dropped is always the oldest and never the interesting.
+DEFAULT_RETAIN = 1_000_000
+
+#: The smallest `retain` an application may ask for, and not an arbitrary
+#: floor.
+#:
+#: The display's models resume from a rowid watermark and lag it by at most
+#: one refresh interval, so eviction is safe exactly while it never deletes
+#: rows newer than that watermark. At `DEFAULT_RETAIN` with `RETENTION_SLACK`
+#: that would need over 1.1M records to arrive inside one 200ms redraw —
+#: roughly 5.5M/s, two orders of magnitude above the measured capture ceiling,
+#: so structurally unreachable. At a retain of a thousand it is trivially
+#: reachable, and the symptom is a bar that under-counts. The store still
+#: received every record either way; the display being imprecise is what
+#: Principle 10 licenses, and this bound is where that stops being cheap.
+#:
+#: Also above `TemplateIndex.LOOKBACKS`'s largest read, which harvests a row
+#: label from a bounded tail: below that, a slow announcement line's template
+#: becomes unfindable and static grouping degrades silently.
+MIN_RETAIN = 10_000
+
+#: How far past `retain` the store is allowed to grow before it is trimmed,
+#: as a divisor of `retain`.
+#:
+#: What the slack saves is the *repetition*, not the delete. Measured at the
+#: default bound, on 1.1M rows: resolving the cutoff id costs **13.7ms** —
+#: `EXPLAIN QUERY PLAN` says `SCAN records`, since `ORDER BY id DESC LIMIT 1
+#: OFFSET N` walks N index entries — and the range delete that follows costs
+#: about 208ms for the 100,000 rows it removes. The delete is proportional to
+#: the rows going, so trimming often does not make it cheaper; the scan is
+#: paid per *trim* regardless of how little it removes.
+#:
+#: So trimming on every drain would spend 13.7ms five times a second locating
+#: a cutoff, about 7% of a thread, to delete a few thousand rows. Trimming
+#: once per `retain // RETENTION_SLACK` records spends it once per 100,000
+#: records instead — roughly 1.4ms/s at a sustained 10k/s, some fifty times
+#: less — and the delete work is unchanged. It lands on the pump's background
+#: thread, never on the thread that called `log.debug()`.
+#:
+#: The cost of the slack is that the high-water mark is 110% of what was
+#: asked for.
+#:
+#: It amortises only while a drain adds fewer rows than the slack; a bigger
+#: one crosses the threshold by itself and correctly trims every time. At the
+#: default that cannot happen — the slack is 100,000 records and the write
+#: buffer holds 10,000, so no single drain can deliver enough. It is reachable
+#: at `MIN_RETAIN`, where the slack is 1,000, and it is a cost rather than a
+#: defect: the store stays bounded either way.
+RETENTION_SLACK = 10
 
 _COLUMNS = (
     "logger_name",

@@ -21,6 +21,12 @@ tag matches the version in `pyproject.toml`, so bump both together.
   then `import lumberjack`. The two differ because `lumberjack` on PyPI is
   registered to a project with no releases; the import name is the one this
   codebase is written around and is not moving.
+- **A bounded store.** Captured records are kept in a rolling window of the
+  newest million rather than accumulating for the life of the process — about
+  300 MiB, where unbounded reaches ~3 GiB ten times over and keeps going.
+  `init(retain=...)` sets the size and `retain=None` keeps everything.
+  Eviction is by arrival order and never by content, so what survives is the
+  part nearest whatever just happened.
 - **`lumberjack.init()`** — installs a handler on the root logger, picks a
   renderer for the detected output mode, and starts the buffer→store pump.
   `shutdown()` puts the root logger back as it was found, handlers and level
@@ -103,3 +109,7 @@ surprise someone:
 - **A loop body with a conditional log line gets no position row.** Its order
   is not reliable, and a wrong percentage is worse than none.
 - **`tqdm` and lumberjack fight over the terminal** if both are live.
+- **A very small `retain` can make a bar under-count.** The display resumes
+  from a watermark that lags by one redraw, so a burst evicted between two of
+  them is never counted. `init()` refuses a `retain` below 10,000 for that
+  reason; the store still received every record either way.

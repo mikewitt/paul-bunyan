@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from lumberjack.renderers.progress import MAX_LABEL, describe_template
+from lumberjack.renderers.progress import (
+    LOOKBACKS,
+    MAX_LABEL,
+    describe_template,
+)
+from lumberjack.store import MIN_RETAIN
 
 
 @pytest.mark.parametrize(
@@ -34,3 +39,16 @@ def test_a_template_reads_as_a_description(template, expected):
     shares one line with a bar, a count and a rate, and a log template can be
     a paragraph."""
     assert describe_template(template) == expected
+
+
+def test_the_template_lookback_fits_inside_the_smallest_legal_store():
+    """A definition kept in two places drifts in one of them.
+
+    `TemplateIndex` harvests a row's label from a bounded tail read, so a
+    retention bound below its largest lookback would make a slow
+    announcement line's template unfindable — and the row would silently
+    fall back to `file:line func()` while static grouping degraded with it.
+    `MIN_RETAIN` is well clear of it today; this fails if either number
+    moves toward the other.
+    """
+    assert max(LOOKBACKS) <= MIN_RETAIN

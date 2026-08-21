@@ -244,6 +244,10 @@ def _flush_buffer() -> None:
     # the count is kept for `_report_unwritten()` to name instead. Losing
     # them silently is what issue #77 reported.
     #
+    # Deliberately does *not* apply retention, which `flush()` does. There is
+    # nothing to bound at exit — the process is going away — and the tail is
+    # exactly what `_dump_diagnostics()` is about to read.
+    #
     # Deliberately a duplicate of `lumberjack.flush()`, not a call to it:
     # `flush()` takes `session.registry_lock()` around the same read-then-write
     # so a concurrent `shutdown()` cannot close the store between them, but

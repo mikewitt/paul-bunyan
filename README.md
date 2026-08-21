@@ -339,10 +339,10 @@ print(records[-1].func_name, records[-1].lineno)
 
 `recent()` takes `n` (the last n, still oldest first) or `since` (an epoch
 timestamp), and the two compose as "the last `n` of those at or after
-`since`". `n` defaults to 1000 rather than to everything — at the million-record
-retention target the unbounded form is a multi-second call that builds half a
+`since`". `n` defaults to 1000 rather than to everything — at the default
+retention bound the unbounded form is a multi-second call that builds half a
 million objects, which is a surprising bill for something that looks free.
-Pass `n=None` when you do want the lot. Each record carries stdlib
+Pass `n=None` when you do want the lot, which means everything *retained*. Each record carries stdlib
 `LogRecord`'s attributes — `message`, `level_name`, `level_no`, `logger_name`,
 `pathname`, `filename`, `func_name`, `lineno`, `created`, `exc_text` — plus
 the attribution lumberjack captures at write time: `thread_name`,
@@ -354,9 +354,19 @@ The `flush()` is only needed because the read happens immediately after the
 writes. A background pump drains the buffer into the store every 200ms, so in
 a real run the store is already near-current; `flush()` just removes the race.
 
-`RecordStore` carries more than `recent()` — aggregate counts, eviction — and
-`examples/demo.py` uses a couple of them. Treat the rest as unstable for now:
-it is the interface the renderers are still being built against.
+**The store is a rolling window, not a transcript.** It keeps the newest
+million records and evicts the oldest beyond that, because it lives in memory
+by default and a long-running job is the case lumberjack is for — unbounded,
+that is about 300 MiB per million and climbing. Set the size with
+`init(retain=...)`, or `retain=None` to keep everything. Eviction is by
+arrival order and never by content, so what survives is always the part
+nearest whatever just happened; a store you pass in yourself is trimmed too,
+since trimming leaves it perfectly usable where closing would not.
+
+`RecordStore` carries more than `recent()` — aggregate counts, and `evict()`
+if you would rather run your own retention with `retain=None`. Treat the rest
+as unstable for now: it is the interface the renderers are still being built
+against.
 
 ### 5. Manage the lifecycle, if you need to
 

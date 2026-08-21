@@ -17,7 +17,13 @@ from lumberjack.handler import DEFAULT_BUFFER_SIZE, LumberjackHandler
 from lumberjack.pump import DEFAULT_FLUSH_INTERVAL, FlushPump
 from lumberjack.renderers import Renderer, create_renderer
 from lumberjack.session import Session
-from lumberjack.store import RecordStore, SQLiteRecordStore
+from lumberjack.store import (
+    DEFAULT_RETAIN,
+    MIN_RETAIN,
+    RETENTION_SLACK,
+    RecordStore,
+    SQLiteRecordStore,
+)
 from lumberjack.tracking import TaskHandle, task, track
 
 #: The distribution is `pybunyan`; the import name is `lumberjack`. They
@@ -58,6 +64,7 @@ def init(
     replace_handlers: bool = True,
     dump_last_n: int = 50,
     flush_interval: float = DEFAULT_FLUSH_INTERVAL,
+    retain: int | None = DEFAULT_RETAIN,
 ) -> LumberjackHandler:
     """Install lumberjack on the root logger.
 
@@ -78,6 +85,21 @@ def init(
     exit. A `store` passed in here belongs to the caller and is left open by
     `shutdown()`; one lumberjack creates itself is closed.
 
+    `retain` bounds the store: once this session has written that many
+    records plus a tenth, the oldest are evicted back down to it. A million
+    by default, which is about 300 MiB — the store is `:memory:` unless you
+    pass one, and a long-running job is the case this package exists for, so
+    unbounded is a leak with a schedule rather than a neutral default. Pass
+    `retain=None` for the old behaviour, or any int at or above
+    `store.MIN_RETAIN`; a smaller one raises, for the reason stated there.
+
+    The bound applies to a store you pass in as well as to one lumberjack
+    creates. Eviction is not the same act as closing: `shutdown()` leaves a
+    caller's store open because closing makes it unusable afterwards, whereas
+    a trimmed store is entirely usable and holds the newest `retain` records.
+    Reach for `retain=None` and `RecordStore.evict()` if you want your own
+    policy on your own schedule.
+
     Failing partway through leaves the process as it was found: a store
     created here is closed again rather than left open and unreachable.
     """
@@ -93,7 +115,26 @@ def init(
             replace_handlers=replace_handlers,
             dump_last_n=dump_last_n,
             flush_interval=flush_interval,
+            retain=retain,
         )
+
+
+def _validated_retain(retain: int | None) -> int | None:
+    """`retain`, or `ValueError` naming the floor and why there is one.
+
+    `None` is unbounded and legal — an application that wants to keep
+    everything may say so, and one passing its own store may already have a
+    retention policy of its own.
+    """
+    if retain is None:
+        return None
+    if not isinstance(retain, int) or retain < MIN_RETAIN:
+        raise ValueError(
+            f"retain must be None or an int of at least {MIN_RETAIN:,}, "
+            f"not {retain!r}; below that a burst can be evicted between two "
+            f"redraws and a progress bar under-counts"
+        )
+    return retain
 
 
 def _init_locked(
@@ -105,12 +146,17 @@ def _init_locked(
     replace_handlers: bool,
     dump_last_n: int,
     flush_interval: float,
+    retain: int | None,
 ) -> LumberjackHandler:
     """`init()`'s body, with `registry_lock()` already held."""
     if _registry.current_session() is not None:
         raise RuntimeError(
             "lumberjack.init() already called; call lumberjack.shutdown() first"
         )
+    # Before anything is installed, so a rejected argument leaves the process
+    # exactly as it was found. A bad *argument* is a caller's bug and raises;
+    # only a bad environment variable warns and degrades.
+    retain = _validated_retain(retain)
 
     owns_store = store is None
     resolved_store = store if store is not None else SQLiteRecordStore(":memory:")
@@ -135,6 +181,7 @@ def _init_locked(
             dump_last_n=dump_last_n,
             prev_handlers=root.handlers[:] if replace_handlers else [],
             prev_level=root.level,
+            retain=retain,
         )
         # Inside the guard rather than after it: `install()` raises when
         # teardown is already installed, so it is one more thing that can fail
@@ -235,6 +282,51 @@ def flush() -> None:
         except Exception:
             session.handler.restore(rows)
             raise
+        session.stored += len(rows)
+        # Outside the `except` above, deliberately, and not inside a second
+        # one. An `evict()` that raises has lost nothing — the rows are in
+        # the store — so routing it through `restore()` would put an
+        # already-written batch back in the buffer for the next tick to write
+        # a *second* time, which is exactly what `append()`'s all-or-nothing
+        # contract exists to prevent. Letting it propagate is right: the pump
+        # suppresses it and retries next tick, and a caller who invoked
+        # `flush()` by hand deserves to hear that the store is failing.
+        _apply_retention(session)
+
+
+def _apply_retention(session: Session) -> None:
+    """Trim the store back to `session.retain`, amortised over the slack.
+
+    Called from `flush()` with `registry_lock()` held, which is what makes
+    reading `session.stored` and writing it back safe.
+
+    Why here and not in `RecordStore.append()`: that would put a `DELETE`
+    inside the batch whose all-or-nothing guarantee `handler.restore()`
+    depends on, giving the rollback a second thing to be correct about — and
+    it would make `append()`'s docstring false at its most load-bearing
+    sentence. Why not a second timer: retention is a function of *volume*,
+    not of time, so a quiet program should not pay a keyed walk every ten
+    seconds to delete nothing.
+
+    Why `keep_last` and not `before`: the resource being bounded is memory,
+    and age does not bound memory — a program logging 100k/s and one logging
+    10/s produce wildly different footprints from the same window. `before`
+    stays in the interface for a caller who wants it.
+
+    Cost, measured at the default bound over 1.1M rows: 222ms for the trim,
+    of which 14ms is resolving the cutoff and the rest is the range delete.
+    Paid once per `retain // RETENTION_SLACK` records, on whichever thread
+    called `flush()` — which in a real run is the pump's.
+    """
+    retain = session.retain
+    if retain is None or session.stored <= retain + retain // RETENTION_SLACK:
+        return
+    deleted = session.store.evict(keep_last=retain)
+    # From `evict()`'s own return value rather than a `COUNT(*)`: the handler
+    # is the only writer, so arithmetic on both sides keeps this exact, and a
+    # count over a million rows is not a query a drain may make five times a
+    # second.
+    session.stored -= deleted
 
 
 def is_initialized() -> bool:

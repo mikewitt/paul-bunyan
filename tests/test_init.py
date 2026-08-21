@@ -22,8 +22,14 @@ import pytest
 import lumberjack
 from lumberjack import teardown
 from lumberjack.detect import OutputMode
-from lumberjack.handler import LumberjackHandler
-from lumberjack.store import RecordStore, SQLiteRecordStore
+from lumberjack.handler import DEFAULT_BUFFER_SIZE, LumberjackHandler
+from lumberjack.store import (
+    DEFAULT_RETAIN,
+    MIN_RETAIN,
+    RETENTION_SLACK,
+    RecordStore,
+    SQLiteRecordStore,
+)
 
 
 def _raise(exc: Exception):
@@ -331,3 +337,205 @@ def test_a_failed_write_keeps_the_records_for_the_next_flush():
     finally:
         lumberjack.shutdown()
         store.close()
+
+
+# --- the store is bounded, and the bound is stated (#109) ------------------
+#
+# `evict()` shipped fully implemented, index-optimised and tested, and
+# nothing ever called it — so the default `:memory:` store accumulated every
+# record for the life of the process. Measured at 319 bytes a record: 304 MiB
+# at a million, ~3 GiB at ten. The scenario is not exotic, it is the one the
+# package exists for.
+
+
+#: Records per flush. Below `DEFAULT_BUFFER_SIZE`, because the write buffer
+#: is bounded and evicts under pressure: with the pump disabled, logging more
+#: than it holds before flushing measures how fast lumberjack *discards* a
+#: record rather than how many it keeps. That is a different question, and it
+#: silently caps every count here at the buffer size.
+_FLUSH_EVERY = DEFAULT_BUFFER_SIZE // 4
+
+
+def _log_n(n: int, *, logger: str = "retention-test") -> None:
+    """Log `n` records through the real path, draining as the pump would."""
+    log = logging.getLogger(logger)
+    for i in range(n):
+        log.info("row %d processed", i)
+        if (i + 1) % _FLUSH_EVERY == 0:
+            lumberjack.flush()
+    lumberjack.flush()
+    handler = lumberjack.current_handler()
+    assert handler is not None
+    assert handler.dropped == 0, "the buffer evicted; this is not a retention test"
+
+
+def test_the_store_is_bounded_by_retain():
+    """The observable contract: how many records a caller can read back.
+
+    Not "was `evict()` called" — that is the mechanism, and the mechanism is
+    free to change.
+    """
+    lumberjack.init(output_mode="plain", flush_interval=0, retain=MIN_RETAIN)
+    try:
+        _log_n(MIN_RETAIN * 3)
+        store = lumberjack.current_store()
+        assert store is not None
+        held = store.recent(n=None)
+        assert len(held) <= MIN_RETAIN + MIN_RETAIN // RETENTION_SLACK
+    finally:
+        lumberjack.shutdown()
+
+
+def test_what_survives_eviction_is_the_newest():
+    """Eviction is by arrival order and never by content, so the records a
+    reader most likely wants — the ones nearest whatever just went wrong —
+    are the ones kept."""
+    lumberjack.init(output_mode="plain", flush_interval=0, retain=MIN_RETAIN)
+    try:
+        total = MIN_RETAIN * 3
+        _log_n(total)
+        store = lumberjack.current_store()
+        assert store is not None
+        held = store.recent(n=None)
+        assert held[-1].message == f"row {total - 1} processed"
+        assert held[0].message != "row 0 processed", "the oldest were not evicted"
+    finally:
+        lumberjack.shutdown()
+
+
+def test_retention_leaves_room_before_it_trims():
+    """The slack is what makes this amortised rather than paid per drain.
+
+    `evict(keep_last=N)` walks N index entries to resolve its cutoff, so
+    trimming on every 200ms drain would cost a `retain`-sized walk five times
+    a second. Just over the bound must therefore still be untrimmed.
+    """
+    lumberjack.init(output_mode="plain", flush_interval=0, retain=MIN_RETAIN)
+    try:
+        _log_n(MIN_RETAIN + 1)
+        store = lumberjack.current_store()
+        assert store is not None
+        assert len(store.recent(n=None)) == MIN_RETAIN + 1
+    finally:
+        lumberjack.shutdown()
+
+
+def test_retain_none_keeps_everything():
+    """The opt-out, for an application that wants the old behaviour or has a
+    retention policy of its own."""
+    lumberjack.init(output_mode="plain", flush_interval=0, retain=None)
+    try:
+        _log_n(MIN_RETAIN * 2)
+        store = lumberjack.current_store()
+        assert store is not None
+        assert len(store.recent(n=None)) == MIN_RETAIN * 2
+    finally:
+        lumberjack.shutdown()
+
+
+def test_a_caller_supplied_store_is_trimmed_too():
+    """Eviction is not the same act as closing, so it does not follow the
+    same ownership rule.
+
+    `shutdown()` leaves a caller's store open because closing makes it
+    unusable afterwards; a trimmed store is entirely usable and holds the
+    newest `retain` records. Exempting caller-supplied stores would exempt
+    every long-running configuration that actually needs the bound, since
+    passing a file-backed store is how durable capture is done.
+    """
+    store = SQLiteRecordStore(":memory:")
+    lumberjack.init(
+        store=store, output_mode="plain", flush_interval=0, retain=MIN_RETAIN
+    )
+    try:
+        _log_n(MIN_RETAIN * 3)
+        assert len(store.recent(n=None)) <= MIN_RETAIN + MIN_RETAIN // RETENTION_SLACK
+    finally:
+        lumberjack.shutdown()
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "retain",
+    [0, -1, 1, 999, MIN_RETAIN - 1, 1.5, "lots"],
+)
+def test_a_retain_the_display_cannot_survive_is_rejected(retain: object):
+    """A bad argument is a caller's bug and raises; only a bad environment
+    variable warns and degrades.
+
+    The floor is not arbitrary. The display's models resume from a rowid
+    watermark that lags by up to one refresh interval, so a `retain` small
+    enough for a burst to be evicted between two redraws makes a bar
+    under-count.
+    """
+    with pytest.raises(ValueError, match="retain"):
+        lumberjack.init(output_mode="plain", retain=retain)  # type: ignore[arg-type]
+    assert not lumberjack.is_initialized(), "a rejected argument still installed"
+
+
+def test_the_default_retain_is_the_number_the_docs_claim():
+    """`store.py` and `CLAUDE.md` both said "the ~1M-record retention target"
+    while nothing enforced it. Choosing that number is what made the prose
+    true rather than adding a second figure to reconcile."""
+    assert DEFAULT_RETAIN == 1_000_000
+
+
+class _CountingStore(SQLiteRecordStore):
+    """A real store that also records how often it was asked to evict.
+
+    A subclass rather than a stub, so the rows really are trimmed and the
+    count describes work that actually happened.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(":memory:")
+        self.evictions = 0
+
+    def evict(self, *, before=None, keep_last=None):
+        self.evictions += 1
+        return super().evict(before=before, keep_last=keep_last)
+
+
+def test_retention_is_amortised_rather_than_paid_on_every_drain():
+    """The slack has to keep working after the first trim, not just before it.
+
+    Found by mutation: dropping `session.stored -= deleted` leaves the store
+    correctly bounded and every other test green, because the *rows* are
+    still trimmed — what regresses is that the count never falls back below
+    the threshold, so every drain from then on asks the store to evict again.
+    Measured, that is a 14ms cutoff scan five times a second to delete almost
+    nothing.
+
+    So the contract is about how often the store is asked, and counting is
+    the honest way to assert it.
+
+    The drain has to be smaller than the slack for there to be anything to
+    amortise — a drain that adds more than the slack pushes past the
+    threshold on its own, every time, and correctly trims. At the default
+    bound that is unreachable: the slack is 100,000 records and the write
+    buffer holds 10,000, so a drain cannot deliver enough. Here the bound is
+    the floor, so the batch is sized down to match.
+    """
+    store = _CountingStore()
+    slack = MIN_RETAIN // RETENTION_SLACK
+    per_flush = slack // 5
+    flushes = 80
+    lumberjack.init(
+        store=store, output_mode="plain", flush_interval=0, retain=MIN_RETAIN
+    )
+    try:
+        log = logging.getLogger("retention-test")
+        for batch in range(flushes):
+            for i in range(per_flush):
+                log.info("row %d processed", batch * per_flush + i)
+            lumberjack.flush()
+    finally:
+        lumberjack.shutdown()
+        evictions = store.evictions
+        store.close()
+
+    # A fifth of the slack per flush, so a trim is due about every fifth one
+    # once the bound is reached. One per flush is the defect.
+    assert (
+        0 < evictions <= flushes // RETENTION_SLACK
+    ), f"{evictions} evictions over {flushes} flushes"

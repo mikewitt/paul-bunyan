@@ -49,6 +49,22 @@ class Session:
     #: Root logger state as `init()` found it.
     prev_handlers: list[logging.Handler]
     prev_level: int
+    #: How many records the store keeps before the oldest are evicted; None
+    #: is unbounded. Validated by `init()`, enforced by `flush()`.
+    retain: int | None = None
+    #: Rows written to the store by this session, exactly.
+    #:
+    #: Exact rather than estimated because `LumberjackHandler` is the only
+    #: writer and `evict()` returns the number of rows it deleted — so the
+    #: count is maintained by arithmetic on both sides and never needs a
+    #: `COUNT(*)`, which at a million rows is the kind of query a drain must
+    #: not make five times a second.
+    #:
+    #: A caller-supplied store may already hold rows this has never seen, so
+    #: it is what *this session* wrote rather than what the store contains.
+    #: Retention overshooting on the first trim of a pre-populated store is
+    #: the cost, and it self-corrects on the next one.
+    stored: int = 0
     #: Absent when `flush_interval=0` — the only genuinely optional member.
     pump: FlushPump | None = None
 
