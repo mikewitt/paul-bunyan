@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import math
 import sys
 from typing import TextIO
 
@@ -38,15 +39,30 @@ def _isoformat(created: float) -> str:
     resolve. Untested, deliberately: reproducing it needs a fold in the
     *host's* zone, and the seam to inject one would exist only for the test.
     """
-    # A `created` outside the platform's `time_t` range raises here
-    # rather than degrading, which loses the whole line and not just
-    # its timestamp.
-    # lumberjack: see issue #97
-    return (
-        datetime.datetime.fromtimestamp(created, tz=datetime.UTC)
-        .astimezone()
-        .isoformat(timespec="milliseconds")
-    )
+    try:
+        return (
+            datetime.datetime.fromtimestamp(created, tz=datetime.UTC)
+            .astimezone()
+            .isoformat(timespec="milliseconds")
+        )
+    except (OverflowError, OSError, ValueError):
+        # A `created` outside the platform's `time_t` range, or NaN. Three
+        # different exceptions across the range, none of them documented as
+        # the one to expect, so all three are caught by name rather than
+        # bare.
+        #
+        # This is the *first* thing `render()` does in both output modes, so
+        # a raise here used to cost the whole line — level, logger and
+        # message included, which is the part a human tailing a file wants
+        # and the part that is not broken. `emit()` routes the failure to
+        # `handleError()` and the record still reaches the store, so nothing
+        # was lost that Principle 6 promises; what was lost was the only
+        # rendering of it, silently unless `logging.raiseExceptions` is on.
+        #
+        # `repr` rather than a fixed sentinel because the number is evidence:
+        # a `created` of 1.76e18 is a caller that wrote nanoseconds where
+        # seconds were meant, and saying so is more use than `<invalid>`.
+        return repr(created)
 
 
 class PlainTextRenderer:
@@ -93,6 +109,21 @@ class PlainTextRenderer:
             # is readable by a person and by a log pipeline without either
             # having to convert.
             payload["timestamp"] = _isoformat(row.created)
+            if not math.isfinite(row.created):
+                # `json.dumps` writes NaN and Infinity as bare `NaN` and
+                # `Infinity`, which Python reads back and RFC 8259 does not
+                # allow — jq, Go and `JSON.parse` all reject the line, and a
+                # JSON-lines consumer that cannot parse a line is worse off
+                # than one that never received it.
+                #
+                # This became reachable with the guard in `_isoformat` above:
+                # a non-finite `created` used to raise before anything was
+                # written, so the invalid line could not be produced. Fixing
+                # the raise without this would trade a silently missing line
+                # for a loudly broken one. `null` rather than a number
+                # because there is genuinely no timestamp here, and the value
+                # itself is still on the record beside it.
+                payload["created"] = None
             line = json.dumps(payload, default=str, separators=(",", ":"))
         else:
             ts = _isoformat(row.created)

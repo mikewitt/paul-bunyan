@@ -504,3 +504,41 @@ def test_a_renderer_with_no_frames_is_not_asked_twice(capsys):
     _install(renderer=_FakeRenderer())
     teardown.run()
     assert "loop(s) inferred" not in capsys.readouterr().err
+
+
+class _UnrenderableRow:
+    """A row `PlainTextRenderer` cannot write, whichever field it reaches for.
+
+    The known cause of an unrenderable record — a `created` outside the
+    platform's `time_t` range — now degrades inside `_isoformat` rather than
+    raising (issue #97). This stands in for the ones nobody has met yet,
+    because the dump's contract is about the *rest of the tail*, not about
+    which field was broken.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        raise ValueError(f"unrenderable row has no {name}")
+
+
+def test_one_unrenderable_record_does_not_truncate_the_exit_dump(capsys, make_row):
+    """The suppression is per row, not around the loop.
+
+    Wrapped around the whole loop, a single bad record ended the dump where
+    it stood and took every row after it — and the tail is the thing the dump
+    exists to print, so losing the rest of it to one row is the wrong trade.
+    """
+    rows = [
+        make_row(message="before the bad one"),
+        _UnrenderableRow(),
+        make_row(message="after the bad one"),
+    ]
+    _install(
+        renderer=_FakeRenderer(write_through=False),
+        store=_FakeStore(rows=cast(list[str], rows)),
+        dump_last_n=5,
+    )
+    teardown.run()
+
+    err = capsys.readouterr().err
+    assert "before the bad one" in err
+    assert "after the bad one" in err, "the dump stopped at the bad row"

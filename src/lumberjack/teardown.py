@@ -230,7 +230,12 @@ def _dump_diagnostics() -> None:
         rows = _session.store.recent(n=_session.dump_last_n)
         dumper = PlainTextRenderer(stream=sys.stderr)
         for row in rows:
-            dumper.render(row)
+            # Per row, not around the loop. One unrenderable record used to
+            # truncate the dump at that point and take every row after it
+            # with it — the tail is what this exists to print, so losing the
+            # rest of it to one bad row is the wrong trade (issue #97).
+            with contextlib.suppress(Exception):
+                dumper.render(row)
 
 
 def _flush_buffer() -> None:
