@@ -108,6 +108,44 @@ def _caller_origin() -> Origin:
     return frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name
 
 
+def _validated_total(total: int | None) -> int | None:
+    """`total`, or `ValueError` naming what was passed.
+
+    A bad **argument** is a caller's bug and raises; only a bad environment
+    variable warns and degrades. `total` is an argument.
+
+    One guard here rather than four defences downstream, because everything
+    that can set a total funnels through this and `_bump`. `mypy` catches a
+    typed caller; an untyped one used to reach the display, and three of the
+    four bad values degraded to a pulse by accident rather than by decision.
+    The fourth did not: `_task_row()` tests `current > total`, which is False
+    for every `current` when `total` is `inf`, so it planned a **determinate**
+    bar that rich draws at 0% forever. A bar claiming to know how much work
+    there is, showing none of it done, and never moving — that is the display
+    asserting something untrue, which Principle 10 does not license.
+
+    `nan` was benign only by accident: SQLite happens to store it as NULL, so
+    it read back as "no total claimed". Nothing here decided that, and a
+    second backend need not agree.
+
+    Rejecting non-`int` covers `inf` and `nan` in one, since neither is an
+    `int`. `bool` *is* an `int` subclass, so `task(total=True)` means 1 — odd
+    to write and harmless to run, and no fixture wants a check for it.
+
+    This must not depend on there being a session: the tracking API is inert
+    without `init()` (Design Principle 4), and a caller's bug is still a
+    caller's bug in a program that never initialised lumberjack.
+    """
+    if total is None:
+        return None
+    if not isinstance(total, int) or total <= 0:
+        raise ValueError(
+            f"total must be a positive int or None, not {total!r}; "
+            f"pass None to report progress without claiming a total"
+        )
+    return total
+
+
 class TaskHandle:
     """A running task. Returned by `task()`; also its own context manager.
 
@@ -154,11 +192,7 @@ class TaskHandle:
         # `__enter__` rejects rather than serializes.
         self._lock = threading.Lock()
         self._current = 0
-        # Unvalidated: `total` is annotated `int | None` and nothing
-        # enforces it, so `inf` reaches the display as a determinate
-        # bar stuck at 0% forever.
-        # lumberjack: see issue #98
-        self._total = total
+        self._total = _validated_total(total)
         self._ended = False
         # Whether the `start` row was actually written — see `_emit()`, which
         # is where the all-or-nothing rule this flag carries is explained.
@@ -317,7 +351,12 @@ class TaskHandle:
                 return
             self._current = value if absolute else self._current + value
             if total is not None:
-                self._total = total
+                # The second way in, and the one #98 missed: `set_progress`
+                # takes a total and reached `self._total` without passing
+                # anything that validated it. Raising here rather than
+                # silently keeping the old total, because a caller who says
+                # `inf` has a bug either way and a swallowed one is worse.
+                self._total = _validated_total(total)
             if now - self._last_tick < TICK_INTERVAL:
                 return
             self._last_tick = now
@@ -454,7 +493,11 @@ def track[T](
     whoever iterates it and delay its start until then.
     """
     if total is None and isinstance(iterable, Sized):
-        total = len(iterable)
+        # `or None` for the empty case. A stated `total=0` is a caller's bug
+        # and `_validated_total` rejects it, but an empty list is not — it is
+        # a loop with no work in it, and "no total claimed" is the honest
+        # report rather than a claim of zero.
+        total = len(iterable) or None
     handle = task(
         name if name is not None else _describe(iterable),
         level=level,

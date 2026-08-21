@@ -12,6 +12,7 @@ import contextlib
 import logging
 import sys
 import threading
+from typing import cast
 
 import pytest
 
@@ -765,3 +766,109 @@ def test_a_level_raised_mid_task_still_leaves_the_start_row_anchored(session):
             pass
     logger.setLevel(logging.NOTSET)
     assert session.events() == [("start", "interrupted")]
+
+
+# --- a stated total is an argument, so a bad one raises (#98) --------------
+#
+# Three of the four bad values used to degrade to a pulse, which is the "no
+# claim" channel and the right place to land — but by accident, not by
+# decision. `inf` did not: `_task_row()` tests `current > total`, False for
+# every `current`, so it planned a *determinate* bar that rich draws at 0%
+# for ever. A bar that claims to know the size of the work, shows none of it
+# done and never moves is the display asserting something untrue.
+
+_BAD_TOTALS = pytest.mark.parametrize(
+    "total",
+    [
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(float("-inf"), id="-inf"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(0, id="zero"),
+        pytest.param(-5, id="negative"),
+        pytest.param(2.5, id="float"),
+    ],
+)
+
+
+@_BAD_TOTALS
+def test_task_rejects_a_total_it_cannot_mean(total: object) -> None:
+    with pytest.raises(ValueError, match="positive int"):
+        lumberjack.task("ingest", total=cast(int, total))
+
+
+@_BAD_TOTALS
+def test_subtask_rejects_a_total_it_cannot_mean(total: object) -> None:
+    parent = lumberjack.task("parent")
+    with pytest.raises(ValueError, match="positive int"):
+        parent.subtask("child", total=cast(int, total))
+
+
+@_BAD_TOTALS
+def test_set_progress_rejects_a_total_it_cannot_mean(total: object) -> None:
+    """The second way in, and the one the issue missed.
+
+    `set_progress(current, total)` writes `self._total` through `_bump`,
+    which validated nothing — so a handle opened with a good total could be
+    handed `inf` afterwards and reach the display exactly as before.
+    """
+    handle = lumberjack.task("ingest", total=10)
+    with pytest.raises(ValueError, match="positive int"):
+        handle.set_progress(1, cast(int, total))
+
+
+@_BAD_TOTALS
+def test_a_bad_total_raises_without_a_session(total: object) -> None:
+    """Design Principle 4 holds: the guard is on the argument, not on
+    anything session-shaped.
+
+    A library may call the tracking API in a program that never ran `init()`,
+    where it is inert — and a caller's bug is still a caller's bug there.
+    Nothing in this test installs a session.
+    """
+    assert not lumberjack.is_initialized()
+    with pytest.raises(ValueError):
+        lumberjack.task("ingest", total=cast(int, total))
+
+
+def test_the_error_names_the_value_that_was_passed() -> None:
+    """A message that says only "invalid total" makes the caller go looking."""
+    with pytest.raises(ValueError, match=r"inf"):
+        lumberjack.task("ingest", total=cast(int, float("inf")))
+
+
+@pytest.mark.parametrize("total", [1, 10, 1_000_000, None])
+def test_a_total_the_display_can_mean_is_accepted(total: int | None) -> None:
+    handle = lumberjack.task("ingest", total=total)
+    handle.set_progress(1, total)
+    handle.end()
+
+
+def test_true_is_one_because_bool_is_an_int(session) -> None:
+    """Odd to write, harmless to run, and not worth a check of its own —
+    pinned so the omission is a decision rather than an oversight.
+
+    `bool` is an `int` subclass, so rejecting non-`int` totals lets this
+    through and it means 1. Asserted through the stored row rather than the
+    handle: what a total *is* is only observable in what gets written.
+    """
+    truthy: int = True
+    lumberjack.task("ingest", total=truthy).end()
+    assert {r.progress_total for r in session.read()} == {1}
+
+
+def test_tracking_an_empty_sized_iterable_claims_no_total() -> None:
+    """`track([])` derives `total=0`, which as a *stated* total is a bug.
+
+    Derived is different: an empty list is a loop with no work in it, and
+    "no total claimed" is the honest report rather than a claim of zero. It
+    must not raise — a caller wrapping a list that happens to be empty has
+    done nothing wrong.
+    """
+    assert list(lumberjack.track([], name="nothing")) == []
+
+
+def test_tracking_a_non_empty_sized_iterable_still_derives_its_total(session) -> None:
+    """The `or None` above must not swallow a real length."""
+    list(lumberjack.track(range(10), name="items"))
+    ends = [r for r in session.read() if r.task_event == "end"]
+    assert [r.progress_total for r in ends] == [10]
