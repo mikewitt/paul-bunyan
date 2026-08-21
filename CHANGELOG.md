@@ -17,6 +17,10 @@ tag matches the version in `pyproject.toml`, so bump both together.
 
 ### Added
 
+- **Installs as `pybunyan`, imports as `lumberjack`.** `pip install pybunyan`,
+  then `import lumberjack`. The two differ because `lumberjack` on PyPI is
+  registered to a project with no releases; the import name is the one this
+  codebase is written around and is not moving.
 - **`lumberjack.init()`** — installs a handler on the root logger, picks a
   renderer for the detected output mode, and starts the buffer→store pump.
   `shutdown()` puts the root logger back as it was found, handlers and level

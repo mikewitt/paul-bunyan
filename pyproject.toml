@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lumberjack"
+name = "pybunyan"
 version = "0.1.0.dev0"
 description = "Attribution, storage, and live-terminal rendering on top of stdlib logging."
 readme = "README.md"

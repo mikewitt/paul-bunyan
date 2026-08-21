@@ -130,7 +130,7 @@ jobs:
       - run: uv run pytest
 
   bare:
-    # Design principle 8: `pip install lumberjack` must pull in nothing, so a
+    # Design principle 8: `pip install pybunyan` must pull in nothing, so a
     # library can instrument with zero imposed dependencies. Every leg of
     # `test` installs every extra, so without this job no `except ImportError`
     # guard in the package — rich_renderer.py's, rich_compat.py's or
@@ -217,6 +217,15 @@ jobs:
           assert (
               importlib.resources.files("lumberjack") / "py.typed"
           ).is_file(), "py.typed missing from the wheel"
+          # The distribution is `pybunyan`; the import name is `lumberjack`.
+          # So `importlib.metadata` is asked for a name that is not the
+          # module's, and getting it wrong degrades `__version__` to the
+          # uninstalled sentinel rather than raising. A built wheel is the
+          # only place that matters, and this step is holding one.
+          assert lumberjack.__version__ != "0.0.0+unknown", (
+              "the installed wheel reports the uninstalled sentinel: "
+              "lumberjack._DISTRIBUTION does not name the built distribution"
+          )
           print("wheel smoke test passed")
           EOF
 

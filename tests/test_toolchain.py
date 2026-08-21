@@ -1,4 +1,6 @@
-"""The lint hooks and the lint CI job must enforce the same ruleset.
+"""Two places `pyproject.toml` is copied to, and neither copy is checked.
+
+The lint hooks and the lint CI job must enforce the same ruleset.
 
 `.pre-commit-config.yaml` pins tool versions by git rev; `uv sync` resolves
 them from `pyproject.toml`. Nothing links the two, so they drift — and the
@@ -18,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
+import lumberjack
+
 _CONFIG = Path(__file__).resolve().parent.parent / ".pre-commit-config.yaml"
+_PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 #: pre-commit repo URL -> the console script whose --version we compare against.
 _PINNED_TOOLS = {
@@ -93,3 +98,41 @@ def test_assert_is_a_lint_error_in_src_and_allowed_in_tests() -> None:
 
     assert s101_fires_for("src/lumberjack/_probe.py"), "S101 must be enforced in src/"
     assert not s101_fires_for("tests/test_probe.py"), "the assert IS the test in tests/"
+
+
+def test_the_distribution_name_matches_the_one_the_package_asks_for() -> None:
+    """`pyproject.toml` names the distribution; `__init__.py` looks it up.
+
+    They are written down twice and nothing links them, which is the same
+    shape as the pre-commit pin above and fails far more quietly. The
+    distribution is `pybunyan` and the import name is `lumberjack`, so the
+    two are *supposed* to differ — which is exactly why a typo here reads as
+    intentional. `importlib.metadata.version()` raises
+    `PackageNotFoundError` for a name nothing installed, and `__init__.py`
+    catches that to keep an uninstalled source tree importable, so the whole
+    failure is `__version__` silently becoming the sentinel.
+    """
+    match = re.search(
+        r'^name = "([^"]+)"', _PYPROJECT.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert match is not None, "pyproject.toml has no [project] name"
+    declared = match.group(1)
+    asked_for = lumberjack._DISTRIBUTION
+    assert declared == asked_for, (
+        f"pyproject.toml declares {declared!r} but lumberjack asks "
+        f"importlib.metadata for {asked_for!r}. __version__ would fall back "
+        f"to the sentinel for every installed user."
+    )
+
+
+def test_the_installed_version_is_not_the_sentinel() -> None:
+    """The other half: the name can agree and still match nothing installed.
+
+    `_DISTRIBUTION` matching `pyproject.toml` only proves the two strings are
+    the same string. This proves the lookup actually resolved, which is what
+    a rename breaks and what no other test would notice.
+    """
+    assert lumberjack.__version__ != "0.0.0+unknown", (
+        "importlib.metadata could not find the distribution, so __version__ "
+        "is the uninstalled sentinel. Re-run `uv sync`."
+    )

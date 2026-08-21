@@ -84,6 +84,15 @@ jobs:
           assert (
               importlib.resources.files("lumberjack") / "py.typed"
           ).is_file(), "py.typed missing from the wheel"
+          # The distribution is `pybunyan`; the import name is `lumberjack`.
+          # So `importlib.metadata` is asked for a name that is not the
+          # module's, and getting it wrong degrades `__version__` to the
+          # uninstalled sentinel rather than raising. A built wheel is the
+          # only place that matters, and this step is holding one.
+          assert lumberjack.__version__ != "0.0.0+unknown", (
+              "the installed wheel reports the uninstalled sentinel: "
+              "lumberjack._DISTRIBUTION does not name the built distribution"
+          )
           print(f"wheel smoke test passed for {lumberjack.__version__}")
           EOF
 

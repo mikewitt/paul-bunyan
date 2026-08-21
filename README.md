@@ -37,7 +37,7 @@ runnable form, one scenario per shape of log stream.
 
 ## Install
 
-**Not on PyPI yet** — the name is not settled, so install from source:
+**Not on PyPI yet**, so install from source:
 
 ```bash
 git clone https://github.com/mikewitt/paul-bunyan
@@ -45,11 +45,16 @@ cd paul-bunyan
 uv sync --all-extras        # or: pip install -e ".[recommended]"
 ```
 
-Once published there will be two shapes, and the split is deliberate: the base
+It will publish as **`pybunyan`** and import as `lumberjack` — so
+`pip install pybunyan`, then `import lumberjack`. The two differ because
+`lumberjack` on PyPI is registered to a project with no releases, and the
+import name is the one this codebase is written around.
+
+There will be two install shapes, and the split is deliberate: the base
 install pulls in **nothing**, so a library can instrument without imposing a
-dependency on anyone downstream, while `[recommended]` adds `rich`, which *is*
-the interactive display. Every optional dependency degrades rather than errors
-— no `rich` means the plain renderer, not a crash.
+dependency on anyone downstream, while `pybunyan[recommended]` adds `rich`,
+which *is* the interactive display. Every optional dependency degrades rather
+than errors — no `rich` means the plain renderer, not a crash.
 
 ## What use looks like
 

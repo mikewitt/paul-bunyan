@@ -20,8 +20,16 @@ from lumberjack.session import Session
 from lumberjack.store import RecordStore, SQLiteRecordStore
 from lumberjack.tracking import TaskHandle, task, track
 
+#: The distribution is `pybunyan`; the import name is `lumberjack`. They
+#: differ because `lumberjack` on PyPI is registered to someone else, and the
+#: import name is what the whole codebase is written around. `metadata.version`
+#: takes the *distribution* name, so getting this wrong does not raise — it
+#: falls through to the sentinel below and `__version__` is quietly wrong
+#: forever. `tests/test_toolchain.py` pins it against `pyproject.toml`.
+_DISTRIBUTION = "pybunyan"
+
 try:
-    __version__ = importlib.metadata.version("lumberjack")
+    __version__ = importlib.metadata.version(_DISTRIBUTION)
 except importlib.metadata.PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
