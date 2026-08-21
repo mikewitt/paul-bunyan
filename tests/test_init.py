@@ -539,3 +539,43 @@ def test_retention_is_amortised_rather_than_paid_on_every_drain():
     assert (
         0 < evictions <= flushes // RETENTION_SLACK
     ), f"{evictions} evictions over {flushes} flushes"
+
+
+def test_a_pre_populated_store_still_gets_trimmed_repeatedly(make_row):
+    """The row count must not drift when the store holds rows nobody counted.
+
+    `init()` accepts a store the caller built, and it may already hold
+    records this session never wrote — reopening a file-backed one is the
+    ordinary way to get durable capture. Subtracting `evict()`'s return value
+    from the session's own count looks equivalent to assigning the bound and
+    is not: the first trim deletes far more than the session ever wrote, the
+    count goes negative, and retention then does not fire again until the
+    session has written that whole difference a second time.
+
+    So a second trim is the assertion, not the first one.
+    """
+    store = _CountingStore()
+    # Rows from a "previous run", written straight to the store so the
+    # session has no idea they exist.
+    prior = MIN_RETAIN * 4
+    log = logging.getLogger("retention-test")
+    store.append([make_row(message="a row from a previous run") for _ in range(prior)])
+
+    lumberjack.init(
+        store=store, output_mode="plain", flush_interval=0, retain=MIN_RETAIN
+    )
+    try:
+        # Five flushes of half the bound: the first trim is due on the third,
+        # and every flush after it. Under the defect there is exactly one.
+        for _ in range(5):
+            for i in range(MIN_RETAIN // 2):
+                log.info("row %d processed", i)
+            lumberjack.flush()
+        held = len(store.recent(n=None))
+    finally:
+        lumberjack.shutdown()
+        evictions = store.evictions
+        store.close()
+
+    assert evictions >= 2, f"retention stopped after {evictions} trim(s)"
+    assert held <= MIN_RETAIN + MIN_RETAIN // RETENTION_SLACK

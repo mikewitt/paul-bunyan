@@ -321,12 +321,19 @@ def _apply_retention(session: Session) -> None:
     retain = session.retain
     if retain is None or session.stored <= retain + retain // RETENTION_SLACK:
         return
-    deleted = session.store.evict(keep_last=retain)
-    # From `evict()`'s own return value rather than a `COUNT(*)`: the handler
-    # is the only writer, so arithmetic on both sides keeps this exact, and a
-    # count over a million rows is not a query a drain may make five times a
-    # second.
-    session.stored -= deleted
+    session.store.evict(keep_last=retain)
+    # Assigned, not decremented by what `evict()` returned. The trim leaves
+    # the store holding exactly `retain` rows — it is only reached when there
+    # were more — so this is exact without a `COUNT(*)`, which over a million
+    # rows is not a query a drain may make five times a second.
+    #
+    # Subtracting the deleted count looks equivalent and is not. A store
+    # passed to `init()` may already hold rows this session never wrote, so
+    # the first trim deletes far more than this session's own count: the
+    # arithmetic goes negative and retention then does not fire again until
+    # the session has written that difference all over again, by which time
+    # the store is well past its bound. Assigning cannot drift that way.
+    session.stored = retain
 
 
 def is_initialized() -> bool:

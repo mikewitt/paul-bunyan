@@ -55,15 +55,15 @@ class Session:
     #: Rows written to the store by this session, exactly.
     #:
     #: Exact rather than estimated because `LumberjackHandler` is the only
-    #: writer and `evict()` returns the number of rows it deleted — so the
-    #: count is maintained by arithmetic on both sides and never needs a
-    #: `COUNT(*)`, which at a million rows is the kind of query a drain must
-    #: not make five times a second.
+    #: writer: it counts up by what was appended and is reset to `retain` by
+    #: a trim, which leaves the store holding exactly that. So it never needs
+    #: a `COUNT(*)`, which at a million rows is the kind of query a drain
+    #: must not make five times a second.
     #:
-    #: A caller-supplied store may already hold rows this has never seen, so
-    #: it is what *this session* wrote rather than what the store contains.
-    #: Retention overshooting on the first trim of a pre-populated store is
-    #: the cost, and it self-corrects on the next one.
+    #: A caller-supplied store may already hold rows this session never
+    #: wrote, so until the first trim this undercounts what the store
+    #: contains and retention fires later than it otherwise would. After the
+    #: first trim the two agree exactly.
     stored: int = 0
     #: Absent when `flush_interval=0` — the only genuinely optional member.
     pump: FlushPump | None = None
