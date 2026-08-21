@@ -1072,3 +1072,88 @@ def test_the_widest_realistic_row_keeps_its_bar(width: int, strip_ansi):
 
     drawn = strip_ansi(stream.getvalue())
     assert _BAR_GLYPHS.search(drawn), f"no bar cells at {width} columns: {drawn!r}"
+
+
+# --- the closing frame is bounded too (#28) --------------------------------
+
+
+def _many_loops(store: RecordStore, make_row, count: int) -> None:
+    """`count` separate loops, each repeating enough to earn a row of its own.
+
+    One worker apiece, which is what keeps them separate: sources sharing a
+    worker at one pace are one loop body, and merging them is the whole of
+    #8. Fifty threads each running their own loop is the shape that still
+    legitimately draws fifty rows.
+
+    Distinct `func_name`s rather than distinct templates, because a template
+    reaches a label only once `TemplateIndex` has harvested it — which takes
+    more polls than this needs. `file:line func()` is the fallback label and
+    is just as countable.
+    """
+    now = time.time()
+    store.append(
+        [
+            make_row(
+                lineno=site,
+                func_name=f"loop{site}",
+                thread=site,
+                thread_name=f"worker-{site}",
+                created=now - 0.5 + i * 0.05,
+            )
+            for site in range(count)
+            for i in range(4)
+        ]
+    )
+
+
+@pytest.mark.parametrize("console_height", [10], indirect=True)
+def test_the_closing_frame_is_cropped_to_the_terminal(
+    console_height, as_terminal, store: RecordStore, make_row, make_renderer, strip_ansi
+):
+    """Principle 6's "never corrupt a traceback", at the one moment it is at
+    risk.
+
+    rich crops every live frame and then deliberately un-crops the last one,
+    so a run tracking fifty loops printed fifty rows out of `close()` —
+    immediately before Python's excepthook prints, on the path where that
+    matters most.
+    """
+    stream = io.StringIO()
+    renderer = make_renderer(stream=stream)
+    _many_loops(store, make_row, 50)
+    renderer.refresh()
+    assert len(renderer.rows()) == 50, "the model did not build the rows to crop"
+
+    before = strip_ansi(stream.getvalue())
+    renderer.close()
+    closing = strip_ansi(stream.getvalue())[len(before) :]
+
+    # By row identity, not by rendered line: hiding rows narrows the label
+    # column, so the same row appears as two different strings across the
+    # two frames `close()` writes.
+    drawn = set(re.findall(r"loop\d+", closing))
+    assert drawn, "the closing frame drew nothing at all"
+    assert (
+        len(drawn) <= console_height
+    ), f"{len(drawn)} rows in a {console_height}-row terminal's closing frame"
+
+
+@pytest.mark.parametrize("console_height", [10], indirect=True)
+def test_cropping_the_closing_frame_does_not_change_what_was_counted(
+    console_height, as_terminal, store: RecordStore, make_row, make_renderer
+):
+    """The crop is a display decision and must not reach the numbers.
+
+    `counts()` reads rich's own task dicts, and hiding a task leaves it in
+    them — which is why this is `visible=False` and not `remove_task()`.
+    Teardown prints these at exit, and they are the durable answer for a run
+    nobody watched.
+    """
+    renderer = make_renderer(stream=io.StringIO())
+    _many_loops(store, make_row, 50)
+    renderer.refresh()
+    counted = renderer.counts()
+
+    renderer.close()
+    assert renderer.counts() == counted
+    assert counted.loops == 50

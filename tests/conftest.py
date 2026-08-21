@@ -105,7 +105,23 @@ def console_width(request: pytest.FixtureRequest) -> int:
 
 
 @pytest.fixture
-def as_terminal(monkeypatch: pytest.MonkeyPatch, console_width: int) -> None:
+def console_height(request: pytest.FixtureRequest) -> int | None:
+    """How tall the `as_terminal` console reports itself.
+
+    `None` leaves rich to detect it, which is what every test wanting only a
+    terminal-ish console gets. Override with
+    `@pytest.mark.parametrize("console_height", [10], indirect=True)` — the
+    closing frame is bounded by height, so "does this crop" is a question
+    only a stated height can ask.
+    """
+    height: int | None = getattr(request, "param", None)
+    return height
+
+
+@pytest.fixture
+def as_terminal(
+    monkeypatch: pytest.MonkeyPatch, console_width: int, console_height: int | None
+) -> None:
     """Make the renderer's console believe it is talking to a real terminal.
 
     Here rather than beside the rest of the rich rig in `tests/rich_rig.py`,
@@ -123,8 +139,14 @@ def as_terminal(monkeypatch: pytest.MonkeyPatch, console_width: int) -> None:
         # swaps its own `━` for `-`, so an assertion about a bar's shape would
         # fail there for a reason that has nothing to do with the display.
         # What rich does on a legacy console has its own tests.
+        # `height=None` is rich's own "detect it", so the fixture can pass the
+        # parameter unconditionally and still leave the default alone.
         lambda **kwargs: real_console(
-            force_terminal=True, width=console_width, legacy_windows=False, **kwargs
+            force_terminal=True,
+            width=console_width,
+            height=console_height,
+            legacy_windows=False,
+            **kwargs,
         ),
     )
 

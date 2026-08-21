@@ -575,13 +575,61 @@ class RichProgressRenderer:
         # mangle a traceback) — stopping the display matters more.
         with contextlib.suppress(Exception):
             self.refresh()
+        # Bound the frame before stopping. rich crops every *live* frame and
+        # then deliberately un-crops the last one — `Live.stop()` sets
+        # `vertical_overflow = "visible"` itself, with a comment saying it
+        # means to — so a run tracking fifty loops printed fifty rows here
+        # regardless of terminal height. On the excepthook path those rows
+        # land immediately before a traceback, which is the one thing
+        # Principle 6 says must never be corrupted.
+        #
+        # Re-asserting "ellipsis" is not the fix, because rich means what it
+        # says; the renderable has to be bounded instead. What survives the
+        # bound stopped being an open question when #8 closed: `_relayout`
+        # has already put running subtrees first and quiet ones after, so
+        # taking the tail drops the least interesting rows.
+        with contextlib.suppress(Exception):
+            self._bound_final_frame()
         self._closed = True
-        # Deliberately not fixed here, despite this being the line that would
-        # do it: `Live.stop()` sets `vertical_overflow = "visible"` itself,
-        # with a comment saying it means to, so re-asserting "ellipsis" is not
-        # the fix — the renderable has to be bounded before stopping, and
-        # *which* bars survive that bound is the open question in #8. Making
-        # it transient would crop by deleting the final counts, which the
-        # "drain before closing" decision exists to preserve.
-        # lumberjack: see issue #28
         self._live.stop()
+
+    def _bound_final_frame(self) -> None:
+        """Hide inferred rows past the terminal's height, then repaint once.
+
+        `visible=False` rather than `remove_task()`: it is public rich API,
+        it needs nothing added to `rich_compat.py`, and it leaves the tasks
+        in place so `counts()` — which reads rich's own dicts — still reports
+        what was tracked rather than what was drawn. Teardown prints that
+        number, and it is the durable answer for a run nobody watched.
+
+        One rule for both teardown paths, deliberately. Keeping the full
+        frame on a clean exit and cropping only under the excepthook would be
+        more faithful to intent, but `close()` is on the `Renderer` protocol
+        and cannot tell which caller it has without widening that protocol
+        for one implementation. It is also unnecessary: a clean exit already
+        reports the durable counts through `_report_display()` and the tail
+        through `_dump_diagnostics()`, neither of which is bounded by a
+        terminal.
+
+        Exact bars keep their slots. That is the group-order rule — heartbeat,
+        then what was stated, then what was inferred — applied to the one
+        frame that never had it.
+        """
+        height = self._console.size.height
+        reserved = len(self._task_progress.tasks)
+        if self._frame is not None and self._frame.heartbeat is not None:
+            reserved += 1
+        # One line spare, so whatever prints next — a traceback, a shell
+        # prompt — starts on screen rather than scrolling the frame itself.
+        budget = max(1, height - reserved - 1)
+        source_tasks = self._source_progress.tasks
+        if len(source_tasks) <= budget:
+            return
+        # By position, not by identity: `_relayout` has already ordered these,
+        # and a position row is threaded immediately after the loop row it
+        # belongs to — so a prefix can never keep a subordinate row whose
+        # parent it dropped.
+        for task in source_tasks[budget:]:
+            self._source_progress.update(task.id, visible=False)
+        self._live.update(self._compose())
+        self._live.refresh()
