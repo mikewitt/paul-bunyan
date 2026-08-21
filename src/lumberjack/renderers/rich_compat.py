@@ -23,6 +23,7 @@ bare install.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, override
 
 try:
@@ -164,6 +165,33 @@ def _plan_fields(row: PlanRow) -> dict[str, Any]:
 _COLLAPSED_BAR = "▪"
 _COLLAPSED_BAR_ASCII = "#"
 
+#: How much of one line a row's label may occupy, as a fraction of the
+#: console width.
+#:
+#: A share rather than a constant because the thing being protected is the
+#: *bar*, and how much room a bar needs is not a property of the label. Every
+#: other cell in the row is text lumberjack formats itself and can therefore
+#: bound at the source — a count, a rate `plan.MAX_SECONDS_WIDTH` already
+#: caps, an elapsed clock. The label is the one cell carrying arbitrary user
+#: text, so it is the one cell that has to yield.
+#:
+#: 0.35 is 28 columns at 80 and 42 at 120, measured through the real columns
+#: against the widest realistic detail cell (`12/20 · 400 iterations`): the
+#: bar keeps 6 cells at 80 and 14 at 100, where before this it kept **none**
+#: at 80 for any label of 54 characters or more. Above ~160 columns the
+#: share exceeds `MAX_LABEL` and stops binding, which is correct — there is
+#: room for the whole label and a bar both.
+LABEL_WIDTH_SHARE = 0.35
+
+#: Never clip the label below this, however narrow the terminal. Under about
+#: 34 columns there is no useful row to draw either way; this stops the label
+#: disappearing entirely before the display gives up.
+MIN_LABEL_WIDTH = 8
+
+#: The floor the share exists to protect. Measured: at 60 columns a 28-column
+#: label still leaves the bar nothing without this, and 3 cells with it.
+BAR_MIN_WIDTH = 8
+
 
 class _RowBarColumn(ProgressColumn):
     """A bar while the loop runs; a mark once it has gone quiet.
@@ -188,7 +216,11 @@ class _RowBarColumn(ProgressColumn):
     def __init__(self, collapsed_mark: str = _COLLAPSED_BAR) -> None:
         self._bar = BarColumn()
         self._collapsed_mark = collapsed_mark
-        super().__init__()
+        # A minimum, so the bar is not the cell that reaches zero when the row
+        # runs out of room. It is a floor rather than the whole fix: rich
+        # honours it only once the text cells have stopped demanding their
+        # full width, which is what `_RowTextColumn`'s cap is for.
+        super().__init__(table_column=Column(min_width=BAR_MIN_WIDTH))
 
     @override
     def render(self, task: Task) -> RenderableType:
@@ -205,19 +237,48 @@ class _RowTextColumn(ProgressColumn):
     """
 
     def __init__(
-        self, field: str | None = None, *, style: str = "progress.description"
+        self,
+        field: str | None = None,
+        *,
+        style: str = "progress.description",
+        width_of: Callable[[], int] | None = None,
     ) -> None:
         self._field = field
         self._style = style
-        # As `TextColumn` does, and for the same reason: a label is a message
-        # template and a wrapped one would push every row below it down the
-        # screen.
+        self._width_of = width_of
+        # `no_wrap`, as `TextColumn` does and for the same reason: a label is
+        # a message template, and a wrapped one would push every row below it
+        # down the screen.
         #
-        # No maximum, so rich measures every cell at its full width and
-        # `BarColumn` — the only flexible one — absorbs the whole cost. A
-        # 56-character label leaves zero bar cells at 80 columns.
-        # lumberjack: see issue #99
+        # The maximum is the other half, and it is why `width_of` exists.
+        # Without one, rich measures every text cell at its full desired width
+        # and `BarColumn` — the only cell that can give — absorbs all of it,
+        # so a 54-character label left **zero** bar cells at 80 columns and
+        # the row lost the one element it exists to draw (issue #99).
         super().__init__(table_column=Column(no_wrap=True))
+
+    @override
+    def get_table_column(self) -> Column:
+        """The column, with the label's cap recomputed for this frame.
+
+        rich calls this once per `make_tasks_table()` and copies the result,
+        so a cap derived here follows the terminal as it is resized with no
+        resize handling of our own. Pinned by a canary in
+        `tests/test_progress_layout.py`: if a rich upgrade started caching
+        the column instead, the cap would silently freeze at whatever width
+        the display happened to start with.
+
+        Cells without a `width_of` — the count and the rate — keep the plain
+        column. Both are strings lumberjack formats and has already bounded,
+        so capping them again here would only ellipsise a number.
+        """
+        column = super().get_table_column()
+        if self._width_of is None:
+            return column
+        column.max_width = max(
+            MIN_LABEL_WIDTH, int(self._width_of() * LABEL_WIDTH_SHARE)
+        )
+        return column
 
     @override
     def render(self, task: Task) -> Text:

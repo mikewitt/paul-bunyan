@@ -21,7 +21,7 @@ from fixture_sources import (
     SETTLED_CYCLES,
     SIBLINGS,
 )
-from lumberjack.renderers.progress import LoopRowModel
+from lumberjack.renderers.progress import MAX_LABEL, LoopRowModel
 
 # --- the runtime path -------------------------------------------------------
 #
@@ -651,3 +651,91 @@ def test_a_total_measured_against_a_sibling_is_not_reused_for_the_parent(
         "a total measured against a source inside this very row was reused as "
         "the fraction of a different parent"
     )
+
+
+# --- every branch is bounded, not just the template one (#99) ---------------
+#
+# A label shares one line with a bar, and the bar is the row's reason to
+# exist. `describe_template` clipped its own result from the start; the other
+# three branches returned whatever the file, the function or the loop
+# statement happened to be called, and those are precisely the rows that have
+# *no* template — so they were both the longest labels and the least
+# informative ones.
+
+_LONG_FUNC = "normalise_and_validate_every_incoming_payload_before_writing_it"
+_LONG_FILE = "extraordinarily_long_module_name_for_a_data_pipeline_stage.py"
+
+
+def test_a_single_site_row_with_no_template_is_clipped(store, make_row):
+    """The `key.format()` branch: `file:line func()`, none of it bounded."""
+    model = LoopRowModel(store, min_repeats=3)
+    store.append(
+        [
+            make_row(
+                msg="",
+                pathname=f"/nonexistent/{_LONG_FILE}",
+                func_name=_LONG_FUNC,
+                created=100.0 + i,
+            )
+            for i in range(4)
+        ]
+    )
+    (row,) = model.poll()
+    assert len(row.label) <= MAX_LABEL, row.label
+    assert row.label.endswith("…")
+
+
+def test_a_runtime_merged_row_is_clipped(store, make_row):
+    """The `f"{base} {func}()"` branch: no source on disk, so no loop to name."""
+    model = LoopRowModel(store, min_repeats=3)
+    for i in range(4):
+        store.append(
+            [
+                make_row(
+                    lineno=lineno,
+                    pathname=f"/nonexistent/{_LONG_FILE}",
+                    func_name=_LONG_FUNC,
+                    msg="",
+                    created=100.0 + i,
+                )
+                for lineno in (10, 11)
+            ]
+        )
+    (row,) = model.poll()
+    assert len(row.members) == 2
+    assert len(row.label) <= MAX_LABEL, row.label
+
+
+def test_a_statically_merged_row_is_clipped(store, make_row, write_module):
+    """The `group.at.format()` branch: the loop statement's own location."""
+    path = str(write_module(SIBLINGS, name=_LONG_FILE, strip=False))
+    model = LoopRowModel(store, min_repeats=3)
+    at = 100.0
+    for _ in range(4):
+        store.append(
+            [
+                make_row(
+                    pathname=path, lineno=8, func_name="run", msg="row %d: parsed"
+                ),
+                make_row(
+                    pathname=path,
+                    lineno=9,
+                    func_name="run",
+                    msg="row %d: validated",
+                ),
+            ]
+        )
+        at += 1.0
+        rows = model.poll()
+    (row,) = rows
+    assert len(row.members) == 2
+    assert len(row.label) <= MAX_LABEL, row.label
+
+
+def test_a_long_template_is_still_clipped(store, make_row):
+    """The branch that was always bounded, kept honest beside the other three."""
+    model = LoopRowModel(store, min_repeats=3)
+    long_template = "reconciling %s against the ledger for tenant %s in region %s"
+    store.append([make_row(msg=long_template, created=100.0 + i) for i in range(4)])
+    (row,) = model.poll()
+    assert len(row.label) <= MAX_LABEL, row.label

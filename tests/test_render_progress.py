@@ -32,7 +32,12 @@ from fixture_sources import SEQUENCE, STAGES
 from lumberjack.handler import LumberjackHandler
 from lumberjack.renderers import plan
 from lumberjack.renderers.plan import RowKind
-from lumberjack.renderers.progress import LoopRow
+from lumberjack.renderers.progress import LoopRow, describe_template
+from lumberjack.renderers.rich_compat import (
+    _RowBarColumn,
+    _RowElapsedColumn,
+    _RowTextColumn,
+)
 from lumberjack.renderers.rich_renderer import RichProgressRenderer
 from lumberjack.schema import SourceKey
 from lumberjack.store import RecordStore
@@ -950,3 +955,120 @@ def test_a_stream_that_cannot_encode_the_mark_gets_the_ascii_one(
         assert frame.isascii()
     finally:
         monkeypatch.undo()
+
+
+# --- the bar is the cell that must not lose (#99) --------------------------
+
+#: Long enough that `describe_template` clips it to `MAX_LABEL`, which is the
+#: worst case any row can present now that every branch of `_build_label` is
+#: clipped. Before the label column had a maximum, this left the bar **zero**
+#: cells at 80 columns — an ordinary terminal.
+_LONGEST_TEMPLATE = "normalising and validating the incoming payload for row %d"
+
+_BAR_GLYPHS = re.compile(r"[━╸]")
+
+
+def _live_row(store: RecordStore, make_row, renderer) -> None:
+    """Eight records from one source, recent enough that the row is not idle.
+
+    A retired row collapses to a one-character mark, which cannot starve
+    anything — so a test about the bar's width has to keep the bar.
+    """
+    now = time.time()
+    store.append(
+        [
+            make_row(msg=_LONGEST_TEMPLATE, created=now - 0.4 + i * 0.05)
+            for i in range(8)
+        ]
+    )
+    renderer.refresh()
+
+
+@pytest.mark.parametrize("console_width", [60, 80, 100, 200], indirect=True)
+def test_a_long_label_never_leaves_the_bar_without_cells(
+    console_width, as_terminal, store: RecordStore, make_row, make_renderer, strip_ansi
+):
+    """The row's reason to exist must not be the cell that reaches zero.
+
+    Three of the four text cells are strings lumberjack formats and has
+    already bounded; the label is arbitrary user text. With no maximum on it
+    rich measured every text cell at its full desired width and `BarColumn` —
+    the only cell that can give — absorbed all of it. Parametrized over width
+    because one width cannot distinguish a cap that adapts from a constant
+    that happens to suit one terminal.
+    """
+    stream = io.StringIO()
+    renderer = make_renderer(stream=stream)
+    _live_row(store, make_row, renderer)
+
+    drawn = _line(strip_ansi(stream.getvalue()), "normalising")
+    assert _BAR_GLYPHS.search(
+        drawn
+    ), f"no bar cells at {console_width} columns: {drawn}"
+
+
+@pytest.mark.parametrize("console_width", [80, 200], indirect=True)
+def test_the_label_cap_follows_the_terminal_rather_than_a_constant(
+    console_width, as_terminal, store: RecordStore, make_row, make_renderer, strip_ansi
+):
+    """A wide terminal has room for the whole label *and* a bar; 80 does not,
+    and the label is what yields.
+
+    Pinned as a pair, because the property worth having is the difference. A
+    fixed cap would truncate identically at both widths — passing the test
+    above while throwing away label text nobody needed to lose.
+    """
+    stream = io.StringIO()
+    renderer = make_renderer(stream=stream)
+    _live_row(store, make_row, renderer)
+
+    drawn = _line(strip_ansi(stream.getvalue()), "normalising")
+    whole_label = describe_template(_LONGEST_TEMPLATE)
+    if console_width == 200:
+        assert whole_label in drawn, f"a wide terminal clipped anyway: {drawn}"
+    else:
+        assert whole_label not in drawn, f"80 columns had no room for this: {drawn}"
+    assert _BAR_GLYPHS.search(drawn), f"no bar cells: {drawn}"
+
+
+@pytest.mark.parametrize("width", [60, 80, 100, 120])
+def test_the_widest_realistic_row_keeps_its_bar(width: int, strip_ansi):
+    """Issue #99's own table, through issue #99's own columns.
+
+    The two tests above draw whatever detail and rate the model happens to
+    produce, and for an unparented row that is `8 iterations` and a short
+    rate — narrow enough that the bar survived at 80 columns even *before*
+    the cap existed, so neither of them fails there without it. The reported
+    case is the widest row the display can draw: a determinate nested loop,
+    whose detail cell carries the cycle and the run count both. Arranging
+    that end to end needs inferred containment, and the cells are what the
+    bug is about, so they are stated instead.
+
+    Reaches into the columns rather than the renderer for the same reason:
+    what is pinned here is how rich divides one line between five cells.
+    """
+    stream = io.StringIO()
+    console = rich_renderer_module.Console(
+        file=stream, width=width, legacy_windows=False, no_color=True, highlight=False
+    )
+    progress = rich_renderer_module.Progress(
+        _RowTextColumn(width_of=lambda: console.width),
+        _RowBarColumn(),
+        _RowTextColumn("detail"),
+        _RowTextColumn("rate", style="progress.remaining"),
+        _RowElapsedColumn(),
+        console=console,
+    )
+    progress.add_task(
+        describe_template(_LONGEST_TEMPLATE),
+        total=20,
+        completed=12,
+        detail="12/20 · 400 iterations",
+        rate="121/s",
+        collapsed=False,
+        subrow=False,
+    )
+    console.print(progress.make_tasks_table(progress.tasks))
+
+    drawn = strip_ansi(stream.getvalue())
+    assert _BAR_GLYPHS.search(drawn), f"no bar cells at {width} columns: {drawn!r}"

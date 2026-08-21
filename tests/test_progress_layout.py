@@ -125,3 +125,41 @@ def test_relayout_keeps_rows_the_caller_did_not_mention():
     second = progress.add_task("second")
     _relayout(progress, [second])
     assert [task.id for task in progress.tasks] == [second, first]
+
+
+def test_rich_asks_each_column_for_its_table_column_every_frame():
+    """The mechanism the label's width cap rests on.
+
+    `_RowTextColumn.get_table_column()` derives the label's `max_width` from
+    the console's *current* width, which only tracks a resized terminal if
+    rich asks for the column again on every frame. It does —
+    `Progress.make_tasks_table()` calls `get_table_column().copy()` per
+    column per call — and this pins it. Were an upgrade to hoist that out of
+    the render loop, the cap would freeze at whatever width the display
+    started with, and every frame assertion elsewhere would still pass.
+    """
+    pytest.importorskip("rich")
+    import lumberjack.renderers.rich_renderer as rich_renderer_module
+    from lumberjack.renderers.rich_compat import _RowTextColumn
+
+    widths = [100]
+    column = _RowTextColumn(width_of=lambda: widths[-1])
+    progress = rich_renderer_module.Progress(column)
+    progress.add_task("a task")
+
+    assert progress.make_tasks_table(progress.tasks).columns[0].max_width == 35
+    widths.append(80)
+    assert progress.make_tasks_table(progress.tasks).columns[0].max_width == 28
+
+
+def test_a_column_without_a_width_source_is_left_unbounded():
+    """The count and the rate keep the plain column deliberately.
+
+    Both are strings lumberjack formats and has already bounded — a rate by
+    `plan.MAX_SECONDS_WIDTH`, a count by what it is counting — so a second
+    cap here could only ellipsise a number, which is worse than a wide cell.
+    """
+    pytest.importorskip("rich")
+    from lumberjack.renderers.rich_compat import _RowTextColumn
+
+    assert _RowTextColumn("rate").get_table_column().max_width is None

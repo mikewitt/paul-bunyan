@@ -69,9 +69,27 @@ _CONVERSION = re.compile(
 #: of the line, where `row %d: schema validated` reads as source code.
 _PLACEHOLDER = "…"
 
-#: Longest label drawn. A row's description shares one line with a bar, a
-#: count and a rate, and a log template can be a paragraph.
+#: Longest label a row may *carry*. A log template can be a paragraph, and a
+#: frame holding one is a frame that has to be cropped by whoever draws it.
+#:
+#: This is a bound on content, not on layout, and the two are separate on
+#: purpose. How much of a *line* the label may occupy depends on how wide the
+#: terminal is, so it is decided at render time by `_RowTextColumn` — which
+#: also means this number no longer has to be small enough to leave room for a
+#: bar at 80 columns. It only has to stop a paragraph reaching the frame.
 MAX_LABEL = 56
+
+
+def clip_label(label: str) -> str:
+    """`label`, no longer than `MAX_LABEL`, ellipsis included in the budget.
+
+    Every branch that produces a row label goes through here. A function name
+    is as capable of being 200 characters long as a message template is, and
+    for a while only the template branch was bounded — see issue #99.
+    """
+    if len(label) <= MAX_LABEL:
+        return label
+    return label[: MAX_LABEL - 1].rstrip() + _PLACEHOLDER
 
 
 def describe_template(template: str) -> str:
@@ -85,10 +103,7 @@ def describe_template(template: str) -> str:
     label = _CONVERSION.sub(
         lambda match: "%" if match.group(0) == "%%" else _PLACEHOLDER, first_line
     )
-    label = " ".join(label.split())
-    if len(label) > MAX_LABEL:
-        label = label[: MAX_LABEL - 1].rstrip() + _PLACEHOLDER
-    return label
+    return clip_label(" ".join(label.split()))
 
 
 class TemplateIndex:

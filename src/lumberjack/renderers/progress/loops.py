@@ -58,7 +58,11 @@ from lumberjack.renderers.progress.sources import (
     RepeatingSourceModel,
     _same_loop_period,
 )
-from lumberjack.renderers.progress.templates import TemplateIndex, describe_template
+from lumberjack.renderers.progress.templates import (
+    TemplateIndex,
+    clip_label,
+    describe_template,
+)
 from lumberjack.schema import SourceKey
 
 if TYPE_CHECKING:
@@ -471,7 +475,10 @@ class LoopRowModel:
         described = describe_template(template) if template else ""
         # `ntpath.basename`, on every platform — see `SourceKey.format`.
         where = ntpath.basename(source.pathname)
-        return described or f"{where}:{source.lineno}"
+        # Clipped like a row label, and for the same reason: `_body_width`
+        # reserves a column as wide as the widest stage, so an unbounded one
+        # here would drag every bar beside it sideways.
+        return clip_label(described or f"{where}:{source.lineno}")
 
     def _parent_row(self, key: SourceKey, clock: BarState) -> SourceKey | None:
         """Which row this one runs inside: the AST first, then the timing.
@@ -580,10 +587,14 @@ class LoopRowModel:
         `foo.py bar()`. The absent number is the honest part — the row covers
         several lines and nothing here knows which one the `for` is on.
         """
-        # Only the `describe_template()` branch below is bounded by
-        # `MAX_LABEL`; the other three return an unbounded string, and a
-        # long one starves the bar it shares a line with.
-        # lumberjack: see issue #99
+        # Every branch is clipped, not just the template one. A file path and
+        # a function name are as capable of being long as a template is —
+        # `_normalise_and_validate_incoming_payload` is 41 characters before
+        # the file and the line are added — and those are precisely the rows
+        # that *have* no template, so they were both the longest labels and
+        # the least informative ones (issue #99). `describe_template` clips
+        # its own result, so the outer call is a no-op on that branch rather
+        # than a second truncation.
         cached = self._labels.get(key)
         if cached is not None and cached[0] == len(members):
             return cached[1]
@@ -600,6 +611,7 @@ class LoopRowModel:
             template = self._templates.template(key)
             described = describe_template(template) if template else ""
             label = described or key.format()
+        label = clip_label(label)
         self._labels[key] = (len(members), label)
         return label
 

@@ -1,8 +1,11 @@
 """Rendering interface and factory.
 
-Only `renderers/rich_renderer.py` may import `rich`, and only inside a
-try/except guard — this is what makes the bare (no-`rich`) install degrade
-to the plain renderer instead of failing at import time.
+Two modules may import `rich`, each inside its own try/except guard:
+`renderers/rich_renderer.py` and `renderers/rich_compat.py`. Nothing else
+may, and that is what makes the bare (no-`rich`) install degrade to the
+plain renderer instead of failing at import time. `rich_compat.py` is
+reachable only *from* `rich_renderer.py`, but it guards independently so
+the two carry no import-order relationship — see its docstring.
 """
 
 from __future__ import annotations

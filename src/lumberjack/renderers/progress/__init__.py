@@ -89,6 +89,7 @@ from lumberjack.renderers.progress.templates import (
     LOOKBACKS,
     MAX_LABEL,
     TemplateIndex,
+    clip_label,
     describe_template,
 )
 
@@ -122,6 +123,7 @@ __all__ = [
     "TaskProgressModel",
     "TemplateIndex",
     "ascii_fallback",
+    "clip_label",
     "depth_first_order",
     "describe_template",
     "heartbeat_frames",

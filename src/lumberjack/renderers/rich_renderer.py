@@ -318,7 +318,12 @@ class RichProgressRenderer:
         # `_RowBarColumn`. They are never-markup for the same reason the task
         # bars' columns are: a label is a message template or a file path.
         self._source_progress = Progress(
-            _RowTextColumn(),
+            # The label is the only cell carrying arbitrary user text, so it
+            # is the only one given a width-relative cap — see
+            # `LABEL_WIDTH_SHARE`. A lambda rather than the width itself
+            # because the column is read once per frame, which is what makes
+            # the cap follow a resized terminal for free.
+            _RowTextColumn(width_of=lambda: self._console.width),
             _RowBarColumn(collapsed_mark),
             # `completed` drives the bar's fill, which is the *cycle* position
             # once one is inferred, so the counts a reader wants are a field

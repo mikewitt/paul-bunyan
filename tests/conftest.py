@@ -90,7 +90,22 @@ def make_log_record() -> Callable[..., logging.LogRecord]:
 
 
 @pytest.fixture
-def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+def console_width(request: pytest.FixtureRequest) -> int:
+    """How wide the `as_terminal` console reports itself.
+
+    100 unless a test says otherwise with
+    `@pytest.mark.parametrize("console_width", [80], indirect=True)`. It is a
+    fixture rather than an argument to `as_terminal` because width is a
+    property of the console that fixture fakes, and because the display's
+    layout now depends on it: a label's cap is a share of the terminal, so
+    "does the bar survive here" is a different question at 60 and at 120.
+    """
+    width: int = getattr(request, "param", 100)
+    return width
+
+
+@pytest.fixture
+def as_terminal(monkeypatch: pytest.MonkeyPatch, console_width: int) -> None:
     """Make the renderer's console believe it is talking to a real terminal.
 
     Here rather than beside the rest of the rich rig in `tests/rich_rig.py`,
@@ -109,7 +124,7 @@ def as_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
         # fail there for a reason that has nothing to do with the display.
         # What rich does on a legacy console has its own tests.
         lambda **kwargs: real_console(
-            force_terminal=True, width=100, legacy_windows=False, **kwargs
+            force_terminal=True, width=console_width, legacy_windows=False, **kwargs
         ),
     )
 
