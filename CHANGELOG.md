@@ -61,9 +61,8 @@ tag matches the version in `pyproject.toml`, so bump both together.
 - **Outbound OpenTelemetry spans** from `task()`, when OTel is configured.
   Independent of whether `init()` has run.
 - **A queryable record store.** Everything captured is kept, not just what the
-  display shows: `current_store().recent()`, plus aggregate counts by source
-  and by template. SQLite, from the standard library, so the base install
-  needs nothing.
+  display shows: `current_store().recent()`, plus aggregate counts by source.
+  SQLite, from the standard library, so the base install needs nothing.
 - **Plain-text and JSON-lines output** for pipes and files, chosen
   automatically when stderr is not a terminal, and never emitting ANSI or
   cursor control. Timestamps are timezone-aware ISO 8601; JSON lines carry

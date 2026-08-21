@@ -179,6 +179,9 @@ class LogRecordRow:
             task_event=event.kind if event else None,
             progress_current=event.current if event else None,
             progress_total=event.total if event else None,
+            # The one column nothing writes, which makes `count_by_template()`,
+            # `templates()` and `idx_records_template_id` dead rather than
+            # merely empty. lumberjack: see issue #108
             template_id=None,
         )
 

@@ -236,10 +236,10 @@ lumberjack uninstalled — which is what makes it a reasonable thing to ask.
 
 `examples/demo.py` carries a scenario per shape of log stream, including the
 ones lumberjack currently handles badly, and states for each what it does today
-versus what it should. An instrumentation linter that reports which of these a
-codebase is missing is planned
-([#40](https://github.com/mikewitt/paul-bunyan/issues/40)) — the point being
-that a tool can name the specific line to add, which prose cannot.
+versus what it should. You do not have to work out which of these your own
+code is missing by reading the list: `python -m lumberjack.lint` reports it,
+naming the specific line to add and where — which is the thing a tool can do
+and prose cannot.
 
 ### 3. Tell it what the work is
 
@@ -341,8 +341,9 @@ Pass `n=None` when you do want the lot. Each record carries stdlib
 `LogRecord`'s attributes — `message`, `level_name`, `level_no`, `logger_name`,
 `pathname`, `filename`, `func_name`, `lineno`, `created`, `exc_text` — plus
 the attribution lumberjack captures at write time: `thread_name`,
-`process_name`, `asyncio_task_name` / `asyncio_task_id`, and columns held for
-the task hierarchy and template clustering that later phases fill in.
+`process_name`, `asyncio_task_name` / `asyncio_task_id`, and the task
+hierarchy and progress columns `task()` and `track()` write. One column,
+`template_id`, is reserved and never written.
 
 The `flush()` is only needed because the read happens immediately after the
 writes. A background pump drains the buffer into the store every 200ms, so in
