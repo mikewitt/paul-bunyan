@@ -70,7 +70,7 @@ def main():
     lumberjack.init()
 
     for i in range(10_000):
-        log.debug("processed item %d", i)   # this line becomes one bar
+        log.debug("processed item %d", i)  # this line becomes one bar
 
 
 if __name__ == "__main__":
@@ -271,6 +271,7 @@ off the main thread, since context does not propagate into a bare
 with lumberjack.task("etl run") as run:
     threading.Thread(target=worker, args=(run,)).start()
 
+
 def worker(parent):
     with parent.subtask("extract", total=700) as t:
         ...
@@ -321,14 +322,14 @@ lumberjack.init()
 for i in range(1000):
     logging.info("processed item %d", i)
 
-lumberjack.flush()                  # drain the buffer into the store right now
+lumberjack.flush()  # drain the buffer into the store right now
 store = lumberjack.current_store()
-assert store is not None            # None before init() and after shutdown()
+assert store is not None  # None before init() and after shutdown()
 
-records = store.recent()            # the last 1000, oldest first
-print(len(records))                 # 1000
-print(records[-1].message)          # processed item 999
-print(records[-1].thread_name)      # MainThread
+records = store.recent()  # the last 1000, oldest first
+print(len(records))  # 1000
+print(records[-1].message)  # processed item 999
+print(records[-1].thread_name)  # MainThread
 print(records[-1].func_name, records[-1].lineno)
 ```
 
@@ -375,13 +376,13 @@ import logging
 import lumberjack
 from lumberjack.store import SQLiteRecordStore
 
-store = SQLiteRecordStore(":memory:")   # or a path, to outlive the process
+store = SQLiteRecordStore(":memory:")  # or a path, to outlive the process
 lumberjack.init(store=store)
 
 logging.info("work happened")
 
-lumberjack.shutdown()                   # display gone, root logger restored
-print(len(store.recent()))              # 1 — a store you passed in stays open
+lumberjack.shutdown()  # display gone, root logger restored
+print(len(store.recent()))  # 1 — a store you passed in stays open
 store.close()
 ```
 
