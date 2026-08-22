@@ -492,8 +492,20 @@ def test_the_default_does_not_override_an_explicit_since(store, make_row):
 
 
 def test_close_prevents_subsequent_queries_and_is_idempotent():
-    """A closed store is unusable for queries, raising sqlite3.ProgrammingError.
-    Multiple closes are safe."""
+    """What `shutdown()` leaves behind for a store lumberjack owned.
+
+    `SQLiteRecordStore.close()` documents both halves — a second `close()` is
+    a no-op, every later *query* raises — and neither was pinned. `close()`
+    appears a dozen times in this file, always in a `finally`, never as the
+    subject.
+
+    **Not on the `store` fixture, deliberately.** `RecordStore.close()`
+    promises the opposite of a specific exception: "nothing is promised about
+    a closed store beyond its being closed, and a backend is free to raise out
+    of any later query rather than answer one." `ProgrammingError` is SQLite's
+    answer, not the interface's, so asserting it across every installed
+    backend would invent a contract the ABC declines to make.
+    """
     store = SQLiteRecordStore(":memory:")
     store.close()
     store.close()  # second close is a no-op
